@@ -610,6 +610,8 @@ impl MontyTypeExt for MontyType {
             Self::Template => Some(Type::Template),
             Self::Interpolation => Some(Type::Interpolation),
             Self::TypeAliasType => Some(Type::TypeAliasType),
+            Self::ContextVar => Some(Type::ContextVar),
+            Self::ContextToken => Some(Type::ContextToken),
         }
     }
 
@@ -707,6 +709,8 @@ impl MontyTypeExt for MontyType {
             // No host-side `dataclasses._MISSING_TYPE`; the sentinel degrades to
             // the marker family it belongs to, as defaultdict/Counter do to dict.
             Type::MissingType => Self::SpecialForm,
+            Type::ContextVar => Self::ContextVar,
+            Type::ContextToken => Self::ContextToken,
         }
     }
 

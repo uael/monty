@@ -918,6 +918,11 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::ValueError, msg).into()
     }
 
+    /// Creates a generic `RuntimeError` with a custom message.
+    fn runtime_error(msg: impl fmt::Display) -> RunError {
+        SimpleException::new_msg(ExcType::RuntimeError, msg).into()
+    }
+
     /// Creates a TypeError for bytes() constructor with invalid type.
     ///
     /// Matches CPython's format: `TypeError: cannot convert '{type}' object to bytes`

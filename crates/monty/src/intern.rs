@@ -1078,6 +1078,14 @@ pub enum StaticStrings {
     OsPath,
     /// `os.path.normpath()` function.
     Normpath,
+
+    // ==========================
+    // `contextvars` module strings.
+    /// The `contextvars` module name.
+    Contextvars,
+    /// The `contextvars.ContextVar` type.
+    #[strum(serialize = "ContextVar")]
+    ContextVarClass,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

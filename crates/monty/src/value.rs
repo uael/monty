@@ -26,7 +26,7 @@ use crate::{
     types::{
         Bytes, BytesIterator, CmpOrder, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
-        class_getattr,
+        class_getattr, contextvars,
         instance::{instance_dataclass_eq, instance_getattr, instance_repr_fmt, instance_str, instance_user_eq},
         instance_bool, instance_delattr, instance_delitem, instance_setattr, instance_setitem,
         long_int::{
@@ -519,6 +519,11 @@ impl<'h> PyTrait<'h> for Value {
                         // Other types don't typically have cycles, but handle gracefully
                         _ => Ok(f.write_str("...")?),
                     }
+                } else if matches!(vm.heap.get(*id), HeapData::ContextVar(_) | HeapData::ContextToken(_)) {
+                    // Same reason as the instance branch below: both reprs end in
+                    // the object's address, which `PyTrait::py_repr_fmt` has no
+                    // id to render.
+                    contextvars::repr_fmt(*id, f, vm, heap_ids)
                 } else if matches!(vm.heap.get(*id), HeapData::Instance(_)) {
                     // Handled here, not at the heap level, because dispatch needs
                     // the heap id for `self`. A user `__repr__` recurses on the

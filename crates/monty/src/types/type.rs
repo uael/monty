@@ -14,7 +14,7 @@ use crate::{
         AttrCallResult, Bytes, Deque, Dict, FrozenSet, List, LongInt, Path, PyTrait, Range, Set, Slice, Str, TimeZone,
         Tuple,
         bytes::{bytes_fromhex, bytes_repr},
-        date, datetime,
+        contextvars, date, datetime,
         dict::{DictKind, dict_fromkeys},
         instance::class_name,
         long_int::INT_MAX_STR_DIGITS,
@@ -235,6 +235,14 @@ pub enum Type {
     /// A paused `async def` containing `yield`.
     #[strum(serialize = "async_generator")]
     AsyncGenerator,
+    /// `contextvars.ContextVar` — named for the `_contextvars` accelerator the
+    /// runtime type comes from, which is what CPython's `tp_name` reports and
+    /// so what its error messages say.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// The `contextvars.Token` a `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextToken,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -525,6 +533,7 @@ impl Type {
             Self::Iterator => super::iter::init(vm, args),
             Self::Path => Path::init(vm, args),
             Self::Property => property::property_init(vm, args),
+            Self::ContextVar => contextvars::init(vm, args),
 
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),

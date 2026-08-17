@@ -10,6 +10,7 @@ and no way for sandboxed code to load additional modules.
 | -------------- | ---------------- |
 | `asyncio`      | ./asyncio.md     |
 | `collections`  | ./collections.md |
+| `contextvars`  | ./contextvars.md |
 | `dataclasses`  | ./dataclasses.md |
 | `datetime`     | ./datetime.md    |
 | `itertools`    | ./itertools.md   |

@@ -857,6 +857,13 @@ pub enum MontyType {
     /// A paused `async def` containing `yield`.
     #[strum(serialize = "async_generator")]
     AsyncGenerator,
+    /// `contextvars.ContextVar`. Named for the C accelerator the runtime type
+    /// comes from, as CPython's own `tp_name` is.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// The `contextvars.Token` a `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextToken,
 }
 
 impl fmt::Display for MontyType {
