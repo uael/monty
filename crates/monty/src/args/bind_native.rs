@@ -142,7 +142,12 @@ fn bind_slow<const N: usize>(
     if spec.vectorcall && n_kw == 0 && n_pos > spec.n_positional {
         return Err(ExcType::type_error_at_most(spec.func_name, spec.n_positional, n_pos));
     }
-    if spec.at_most_total && n_pos + n_kw > spec.n_positional {
+    // CPython counts this against every format unit, keyword-only ones included
+    // (`len` in `vgetargskeywords`), so a keyword-only param raises the ceiling
+    // rather than being excluded from it. `params.len()` is exactly that count:
+    // the derive rejects `at_most_total` alongside `varargs`/`varkwargs`, and
+    // without keyword-only params it equals `n_positional`.
+    if spec.at_most_total && n_pos + n_kw > spec.params.len() {
         return Err(total_overflow_error(spec, n_pos, n_kw));
     }
     if spec.uses_c_method_arity() && n_pos < spec.n_required_pos_only {
@@ -627,16 +632,20 @@ fn unpack_arity_error(spec: &ParamSpec, n_pos: usize) -> Option<RunError> {
 ///
 /// The named families pivot to `keyword argument` when the call passed no
 /// positionals — the only overflow site that can see `n_pos == 0`.
+///
+/// The reported ceiling is every format unit, matching the check that got here;
+/// it equals `n_positional` unless the function has keyword-only params.
 #[cold]
 fn total_overflow_error(spec: &ParamSpec, n_pos: usize, n_kw: usize) -> RunError {
     let total = n_pos + n_kw;
+    let max = spec.params.len();
     match spec.family {
         ErrorFamily::C {
             positional_pivot: false,
-        } => ExcType::type_error_c_at_most(spec.n_positional, total),
-        ErrorFamily::C { positional_pivot: true } => ExcType::type_error_c_at_most_positional(spec.n_positional, total),
+        } => ExcType::type_error_c_at_most(max, total),
+        ErrorFamily::C { positional_pivot: true } => ExcType::type_error_c_at_most_positional(max, total),
         // Clinic / CNamed (`def`/`unpack` reject the flag at derive time).
-        _ => ExcType::type_error_method_at_most(spec.func_name, spec.n_positional, total, n_pos == 0),
+        _ => ExcType::type_error_method_at_most(spec.func_name, max, total, n_pos == 0),
     }
 }
 
