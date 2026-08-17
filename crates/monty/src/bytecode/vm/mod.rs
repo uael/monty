@@ -1058,6 +1058,9 @@ impl<'h> VM<'h> {
                 countdown = c;
             } else {
                 countdown = CHECK_INTERVAL;
+                // One whole interval has executed; charged here so the step
+                // count stays deterministic (never a clock read).
+                self.heap.tracker.add_steps(u64::from(CHECK_INTERVAL) + 1);
                 self.dispatch_checkpoint(check_limits, cached_frame.ip)?;
             }
 

@@ -119,6 +119,14 @@ class ResourceLimits(TypedDict, total=False):
     max_recursion_depth: int | None
     """Maximum function call stack depth (default: 1000)."""
 
+    max_steps: int | None
+    """Maximum executed bytecode instructions.
+
+    Counted at the interpreter's dispatch checkpoint, so the budget trips at the
+    same instruction on every machine; `max_duration_secs` cannot promise that.
+    Exceeding it raises an uncatchable `RuntimeError`.
+    """
+
 
 class ExternalReturnValue(TypedDict):
     """Represents the return value of an external function call."""

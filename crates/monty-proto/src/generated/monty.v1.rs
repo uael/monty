@@ -290,6 +290,11 @@ pub struct ResourceLimits {
     pub gc_interval: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "4")]
     pub max_recursion_depth: ::core::option::Option<u64>,
+    /// Executed bytecode instructions, at dispatch-checkpoint granularity. Unlike
+    /// max_duration_micros this trips at the same instruction on every machine, so
+    /// a session that exhausted its budget replays identically.
+    #[prost(uint64, optional, tag = "5")]
+    pub max_steps: ::core::option::Option<u64>,
 }
 /// Outcome of an external function / OS call, decided by the parent. Mirrors
 /// monty's `ExtFunctionResult`, plus `not_handled` (which only the child can

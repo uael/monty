@@ -120,6 +120,9 @@ impl From<ResourceError> for RunError {
             ResourceError::Memory { .. } => (ExcType::MemoryError, false),
             ResourceError::Time { .. } => (ExcType::TimeoutError, false),
             ResourceError::Recursion { .. } => (ExcType::RecursionError, true),
+            // Uncatchable like Time: a step budget is physics, not a condition
+            // the sandboxed code may catch and outrun.
+            ResourceError::Steps { .. } => (ExcType::RuntimeError, false),
         };
         let exc = SimpleException::new_msg(exc_type, err).into();
         if catchable {

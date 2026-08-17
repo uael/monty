@@ -84,6 +84,12 @@ export interface ResourceLimits {
   maxMemory?: number
   gcInterval?: number
   maxRecursionDepth?: number
+  /**
+   * Maximum executed bytecode instructions, counted at the interpreter's
+   * dispatch checkpoint. Deterministic where `maxDurationSecs` is not: the
+   * same program trips at the same instruction on every machine.
+   */
+  maxSteps?: number
 }
 
 /**

@@ -54,6 +54,8 @@ pub enum ResourceError {
     Memory { limit: usize, used: usize },
     /// Maximum recursion depth exceeded.
     Recursion { limit: usize, depth: usize },
+    /// Maximum executed instructions exceeded.
+    Steps { limit: u64, executed: u64 },
 }
 
 impl fmt::Display for ResourceError {
@@ -67,6 +69,9 @@ impl fmt::Display for ResourceError {
             }
             Self::Recursion { .. } => {
                 write!(f, "maximum recursion depth exceeded")
+            }
+            Self::Steps { limit, executed } => {
+                write!(f, "step limit exceeded: {executed} instructions > {limit}")
             }
         }
     }
@@ -94,6 +99,12 @@ pub struct ResourceLimits {
     pub gc_interval: Option<usize>,
     /// Maximum recursion depth (function call stack depth).
     pub max_recursion_depth: usize,
+    /// Maximum executed bytecode instructions, counted at dispatch-checkpoint
+    /// granularity. Deterministic where `max_duration` is not: the same program
+    /// trips at the same instruction on every run and every machine, so a run
+    /// that hit the budget can be replayed.
+    #[serde(default)]
+    pub max_steps: Option<u64>,
 }
 
 /// Recommended maximum recursion depth if not otherwise specified.
@@ -107,6 +118,7 @@ impl Default for ResourceLimits {
             max_memory: None,
             gc_interval: None,
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
+            max_steps: None,
         }
     }
 }
@@ -116,6 +128,13 @@ impl ResourceLimits {
     #[must_use]
     pub fn max_duration(mut self, limit: Duration) -> Self {
         self.max_duration = Some(limit);
+        self
+    }
+
+    /// Sets the maximum executed instructions (dispatch-checkpoint granularity).
+    #[must_use]
+    pub fn max_steps(mut self, limit: u64) -> Self {
+        self.max_steps = Some(limit);
         self
     }
 
@@ -188,6 +207,12 @@ pub struct ResourceTracker {
     /// existed (`#[serde(default)]` gives back the `None` fallback case).
     #[serde(default)]
     recursion_limit_override: Cell<Option<usize>>,
+    /// Executed instructions, counted at dispatch-checkpoint granularity.
+    /// Serialized so step budgets survive dump/load, exactly as time does.
+    /// Unlike time, the count is deterministic, so it never varies a dump's
+    /// bytes between identical runs.
+    #[serde(default)]
+    executed_steps: Cell<u64>,
 }
 
 impl Default for ResourceTracker {
@@ -211,7 +236,42 @@ impl ResourceTracker {
             total_execution_time: Cell::new(Duration::ZERO),
             running_since: Cell::new(None),
             recursion_limit_override: Cell::new(None),
+            executed_steps: Cell::new(0),
         }
+    }
+
+    /// Charges `n` executed instructions against the step budget. Called from
+    /// the dispatch checkpoint, so the count advances in whole checkpoint
+    /// intervals; enforcement happens at the same checkpoint via
+    /// [`check_memory_time`](Self::check_memory_time).
+    #[inline]
+    pub fn add_steps(&self, n: u64) {
+        self.executed_steps.set(self.executed_steps.get().saturating_add(n));
+    }
+
+    /// Returns the instructions executed so far, at checkpoint granularity.
+    #[must_use]
+    pub fn executed_steps(&self) -> u64 {
+        self.executed_steps.get()
+    }
+
+    /// Returns the configured step budget, if any.
+    #[must_use]
+    pub fn max_steps(&self) -> Option<u64> {
+        self.limits.max_steps
+    }
+
+    /// Called at the dispatch checkpoint to enforce `max_steps`. Executed steps
+    /// are monotonic, so once the budget is exceeded every later call fails too.
+    #[inline]
+    pub fn check_steps(&self) -> Result<(), ResourceError> {
+        if let Some(limit) = self.limits.max_steps {
+            let executed = self.executed_steps.get();
+            if executed > limit {
+                return Err(ResourceError::Steps { limit, executed });
+            }
+        }
+        Ok(())
     }
 
     /// Returns the live recursion ceiling: the override if one is in effect,
@@ -246,10 +306,10 @@ impl ResourceTracker {
         self.limits.max_memory
     }
 
-    /// Returns whether the VM has a memory or time limit configured.
+    /// Returns whether the VM has a memory, time or step limit configured.
     #[must_use]
     pub fn has_memory_time_limit(&self) -> bool {
-        self.limits.max_memory.is_some() || self.limits.max_duration.is_some()
+        self.limits.max_memory.is_some() || self.limits.max_duration.is_some() || self.limits.max_steps.is_some()
     }
 
     /// Sets the maximum execution duration as a fresh budget from now,
@@ -296,6 +356,7 @@ impl ResourceTracker {
             }
         }
 
+        self.check_steps()?;
         self.check_time()
     }
 

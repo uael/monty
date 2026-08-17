@@ -1,8 +1,9 @@
 # Resource limits
 
-Monty enforces limits on memory, time, and recursion to keep untrusted code
-bounded. Memory limits surface to the host as `MemoryError`s and time limits as
-`TimeoutError`s; sandboxed code cannot catch either resource error.
+Monty enforces limits on memory, time, executed instructions, and recursion to
+keep untrusted code bounded. Memory limits surface to the host as
+`MemoryError`s, time limits as `TimeoutError`s, and the step budget as a
+`RuntimeError`; sandboxed code cannot catch any of those three resource errors.
 `RecursionError` is catchable, as in CPython.
 
 ## Compilation
@@ -170,6 +171,35 @@ indistinguishable from a stack overflow.
   from zero.
 - There is no in-sandbox way to observe the budget or remaining time.
 
+## Steps (the deterministic budget)
+
+`max_steps` bounds executed bytecode instructions. It is the replayable
+counterpart to `max_duration`: a wall-clock budget trips wherever the machine
+happens to be when the clock runs out, so a program that times out on one host
+and not another cannot be replayed, while an instruction budget trips at the
+same instruction on every run and every machine.
+
+- Exceeding it raises `RuntimeError: step limit exceeded: <executed>
+  instructions > <limit>`, uncatchable inside the sandbox like `MemoryError`
+  and `TimeoutError`. CPython has no equivalent limit, so this exception type
+  is a Monty-only surface.
+- The counter advances in whole dispatch-checkpoint intervals of 256
+  instructions, charged at the same checkpoint that enforces the budget. So the
+  executed count is always a multiple of 256, and a budget is overshot by at
+  most one interval before the run stops.
+- **A step is one bytecode instruction, not one unit of work.** A single
+  instruction can run an arbitrarily long native operation (a sort, an iterator
+  drain, a big-integer power), and native loops that poll for themselves charge
+  no steps of their own. `max_steps` therefore bounds interpretation, not time;
+  pair it with `max_memory` (and, for a wall-clock ceiling, `max_duration`) when
+  the concern is a runaway native operation rather than a runaway loop.
+- The count is cumulative for the life of the session, exactly as execution time
+  is: it accumulates across feeds and is serialized into dumps and snapshots, so
+  a restored session resumes its budget where it left off. Unlike the execution
+  clock it is deterministic, so it never varies a dump's bytes between two
+  identical runs.
+- There is no in-sandbox way to observe the budget or the steps remaining.
+
 ## JSON
 
 - `json.loads` rejects input nested deeper than 200 levels with
@@ -177,7 +207,7 @@ indistinguishable from a stack overflow.
 
 ## After a terminal resource error
 
-A worker remains responsive after a soft memory or time limit and its session
+A worker remains responsive after a soft memory, time, or step limit and its session
 can receive another feed, but execution is not transactional and no guarantees
 are made about heap state or reference counts. Hosts should discard the session;
 the worker itself remains reusable. A caught `RecursionError` may continue

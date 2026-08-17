@@ -32,6 +32,7 @@ export interface ResourceLimits {
   maxMemory?: number
   gcInterval?: number
   maxRecursionDepth?: number
+  maxSteps?: number
 }
 
 /** Session-creation options sent in the `ReplCreate` request. */
@@ -778,6 +779,7 @@ function encodeLimits(limits: ResourceLimits): Uint8Array {
   if (limits.maxMemory !== undefined) w.uint(2, limits.maxMemory) // max_memory_bytes
   if (limits.gcInterval !== undefined) w.uint(3, limits.gcInterval) // gc_interval
   if (limits.maxRecursionDepth !== undefined) w.uint(4, limits.maxRecursionDepth) // max_recursion_depth
+  if (limits.maxSteps !== undefined) w.uint(5, limits.maxSteps) // max_steps
   return w.finish()
 }
 

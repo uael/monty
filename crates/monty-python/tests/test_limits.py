@@ -17,11 +17,13 @@ def test_resource_limits_typed_dict():
         max_memory=1024,
         gc_interval=10,
         max_recursion_depth=500,
+        max_steps=1_000_000,
     )
     assert limits.get('max_duration_secs') == snapshot(5.0)
     assert limits.get('max_memory') == snapshot(1024)
     assert limits.get('gc_interval') == snapshot(10)
     assert limits.get('max_recursion_depth') == snapshot(500)
+    assert limits.get('max_steps') == snapshot(1000000)
 
 
 def test_resource_limits_repr():
@@ -79,6 +81,32 @@ def test_timeout_limit(monty_run: RunMonty):
     assert exc_info.value.display(format='type-msg').startswith('TimeoutError: time limit exceeded')
 
 
+def test_step_limit(monty_run: RunMonty):
+    with pytest.raises(MontyRuntimeError) as exc_info:
+        monty_run('n = 0\nwhile True:\n    n += 1', limits={'max_steps': 100_000})
+    inner = exc_info.value.exception()
+    assert isinstance(inner, RuntimeError)
+    assert exc_info.value.display(format='type-msg').startswith('RuntimeError: step limit exceeded')
+
+
+def test_step_limit_is_deterministic(monty_run: RunMonty):
+    """The step budget is the replayable limit: `max_duration_secs` trips wherever
+    the machine happens to be, a step count trips at the same instruction every time.
+    The message names the executed count, so two identical messages prove it."""
+    code = 'n = 0\nwhile True:\n    n += 1'
+    messages: list[str] = []
+    for _ in range(2):
+        with pytest.raises(MontyRuntimeError) as exc_info:
+            monty_run(code, limits={'max_steps': 50_000})
+        messages.append(exc_info.value.display(format='type-msg'))
+    assert messages[0].startswith('RuntimeError: step limit exceeded')
+    assert messages[0] == messages[1]
+
+
+def test_step_limit_wide_enough_never_fires(monty_run: RunMonty):
+    assert monty_run('sum(range(100))', limits={'max_steps': 100_000_000}) == snapshot(4950)
+
+
 def test_session_exhausted_after_resource_error_but_worker_reusable(pool: Monty):
     """A resource error leaves the session exhausted (later feeds keep failing),
     but the worker is reusable once the session exits."""
@@ -110,7 +138,7 @@ def test_limits_unknown_key_raises_error(pool: Monty):
             pass
     assert exc_info.value.args[0] == snapshot(
         "unknown limits key 'max_memroy'; accepted keys are 'max_duration_secs', 'max_memory', "
-        "'gc_interval', 'max_recursion_depth'"
+        "'gc_interval', 'max_recursion_depth', 'max_steps'"
     )
 
 
@@ -120,7 +148,7 @@ def test_limits_non_string_key_raises_error(pool: Monty):
             pass
     assert exc_info.value.args[0] == snapshot(
         "unknown limits key 1; accepted keys are 'max_duration_secs', 'max_memory', "
-        "'gc_interval', 'max_recursion_depth'"
+        "'gc_interval', 'max_recursion_depth', 'max_steps'"
     )
 
 
@@ -134,7 +162,7 @@ def test_limits_unprintable_key_still_raises_value_error(pool: Monty):
             pass
     assert exc_info.value.args[0] == snapshot(
         "unknown limits key <unprintable key>; accepted keys are 'max_duration_secs', 'max_memory', "
-        "'gc_interval', 'max_recursion_depth'"
+        "'gc_interval', 'max_recursion_depth', 'max_steps'"
     )
 
 

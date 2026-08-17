@@ -470,12 +470,14 @@ fn resource_limits_round_trip() {
         max_memory: Some(64 * 1024 * 1024),
         gc_interval: Some(100),
         max_recursion_depth: 50,
+        max_steps: Some(1_000_000),
     };
     let back = ResourceLimits::from(pb::ResourceLimits::from(&limits));
     assert_eq!(back.max_duration, limits.max_duration);
     assert_eq!(back.max_memory, limits.max_memory);
     assert_eq!(back.gc_interval, limits.gc_interval);
     assert_eq!(back.max_recursion_depth, limits.max_recursion_depth);
+    assert_eq!(back.max_steps, limits.max_steps);
 }
 
 #[test]
@@ -488,6 +490,7 @@ fn empty_resource_limits_default_recursion_depth() {
     assert_eq!(back.max_memory, expected.max_memory);
     assert_eq!(back.gc_interval, expected.gc_interval);
     assert_eq!(back.max_recursion_depth, expected.max_recursion_depth);
+    assert_eq!(back.max_steps, expected.max_steps);
 }
 
 #[test]

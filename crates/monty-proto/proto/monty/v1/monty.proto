@@ -293,6 +293,10 @@ message ResourceLimits {
   optional uint64 max_memory_bytes = 2;
   optional uint64 gc_interval = 3;
   optional uint64 max_recursion_depth = 4;
+  // Executed bytecode instructions, at dispatch-checkpoint granularity. Unlike
+  // max_duration_micros this trips at the same instruction on every machine, so
+  // a session that exhausted its budget replays identically.
+  optional uint64 max_steps = 5;
 }
 
 // ============================================================================

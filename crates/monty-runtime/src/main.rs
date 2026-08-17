@@ -72,6 +72,12 @@ pub(crate) struct Cli {
     #[arg(long)]
     max_recursion_depth: Option<usize>,
 
+    /// Maximum executed bytecode instructions. Unlike `--max-duration` this
+    /// trips at the same instruction on every machine, so a run that exhausted
+    /// its budget can be replayed.
+    #[arg(long)]
+    max_steps: Option<u64>,
+
     #[command(subcommand)]
     subcommand: Option<Command>,
 }
@@ -118,6 +124,7 @@ impl Cli {
             || self.max_memory.is_some()
             || self.gc_interval.is_some()
             || self.max_recursion_depth.is_some()
+            || self.max_steps.is_some()
     }
 
     /// Builds `ResourceLimits` from the parsed CLI arguments.
@@ -142,6 +149,9 @@ impl Cli {
         }
         if let Some(depth) = self.max_recursion_depth {
             limits = limits.max_recursion_depth(depth);
+        }
+        if let Some(steps) = self.max_steps {
+            limits = limits.max_steps(steps);
         }
         Ok(limits)
     }

@@ -20,6 +20,7 @@ impl From<&ResourceLimits> for pb::ResourceLimits {
             max_memory_bytes: limits.max_memory.map(|v| v as u64),
             gc_interval: limits.gc_interval.map(|v| v as u64),
             max_recursion_depth: Some(limits.max_recursion_depth as u64),
+            max_steps: limits.max_steps,
         }
     }
 }
@@ -31,6 +32,8 @@ impl From<pb::ResourceLimits> for ResourceLimits {
             max_memory: usize_field(limits.max_memory_bytes),
             gc_interval: usize_field(limits.gc_interval),
             max_recursion_depth: usize_field(limits.max_recursion_depth).unwrap_or(DEFAULT_MAX_RECURSION_DEPTH),
+            // A step count is `u64` on both sides, so it needs no narrowing.
+            max_steps: limits.max_steps,
         }
     }
 }

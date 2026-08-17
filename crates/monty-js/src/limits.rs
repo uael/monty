@@ -25,6 +25,10 @@ pub struct JsResourceLimits {
     pub gc_interval: Option<f64>,
     /// Maximum function call stack depth (default: 1000).
     pub max_recursion_depth: Option<f64>,
+    /// Maximum executed bytecode instructions, at dispatch-checkpoint
+    /// granularity. Trips at the same instruction on every machine, which
+    /// `maxDurationSecs` cannot promise.
+    pub max_steps: Option<f64>,
 }
 
 /// Extracts a Rust resource-limit configuration from a JS resource-limit object.
@@ -56,6 +60,9 @@ pub fn extract_limits(js_limits: JsResourceLimits) -> Result<ResourceLimits> {
     }
     if let Some(interval) = js_limits.gc_interval {
         limits = limits.gc_interval(js_number_to_usize(interval, "gcInterval")?);
+    }
+    if let Some(steps) = js_limits.max_steps {
+        limits = limits.max_steps(js_number_to_u64(steps, "maxSteps")?);
     }
 
     Ok(limits)

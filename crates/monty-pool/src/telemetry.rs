@@ -133,6 +133,7 @@ impl Recorder {
                     max_memory_bytes = limits.and_then(|l| l.max_memory_bytes),
                     gc_interval = limits.and_then(|l| l.gc_interval),
                     max_recursion_depth = limits.and_then(|l| l.max_recursion_depth),
+                    max_steps = limits.and_then(|l| l.max_steps),
                     // i64: `tracing` has no typed u32 value, so a u32 would be
                     // recorded as its debug string
                     worker_pid = self.worker_pid.map(i64::from),
