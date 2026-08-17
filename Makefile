@@ -209,6 +209,9 @@ update-typeshed: ## Update vendored typeshed from upstream
 .PHONY: check-typeshed
 check-typeshed: ## Check vendored typeshed stubs are in sync with upstream
 	uv run crates/monty-typeshed/check.py
+	# the drift check is only worth what its own coverage is: these pin the
+	# shapes it has silently passed before, notably stubs inside a package dir
+	uv run --only-dev pytest crates/monty-typeshed/tests
 
 .PHONY: bench
 bench: ## Run benchmarks

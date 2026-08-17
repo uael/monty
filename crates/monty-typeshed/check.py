@@ -61,13 +61,19 @@ def expected_files() -> set[str]:
         'stdlib/VERSIONS',
         GENERATED_FROM_UPSTREAM,
         *(f'stdlib/{name}' for name in update.COPY_FILES),
-        *(f'stdlib/{stub.name}' for stub in custom_stubs()),
+        *(f'stdlib/{name}' for name in custom_stubs()),
     }
 
 
-def custom_stubs() -> list[Path]:
-    """The `custom/*.pyi` overrides, in a stable order."""
-    return sorted(update.CUSTOM_DIR.glob('*.pyi'))
+def custom_stubs() -> dict[str, Path]:
+    """The `custom/**/*.pyi` overrides, keyed by their path under `stdlib/`.
+
+    `update.py` copies them with `rglob`, preserving subdirectories, so a
+    package stub lands at `stdlib/os/path.pyi` rather than `stdlib/path.pyi`.
+    Matching that here is what keeps a nested override checked at all.
+    """
+    stubs = sorted(update.CUSTOM_DIR.rglob('*.pyi'))
+    return {stub.relative_to(update.CUSTOM_DIR).as_posix(): stub for stub in stubs}
 
 
 def check_custom_stubs() -> list[str]:
@@ -76,9 +82,9 @@ def check_custom_stubs() -> list[str]:
     Absent copies are left to `check_tree_contents` so they report once.
     """
     return [
-        f'custom/{stub.name} differs from stdlib/{stub.name}'
-        for stub in custom_stubs()
-        if (vendored := read_vendored(f'stdlib/{stub.name}')) is not None and vendored != stub.read_bytes()
+        f'custom/{name} differs from stdlib/{name}'
+        for name, stub in custom_stubs().items()
+        if (vendored := read_vendored(f'stdlib/{name}')) is not None and vendored != stub.read_bytes()
     ]
 
 
@@ -114,11 +120,23 @@ def check_versions() -> list[str]:
             if not resolves(module)
         ),
         *(
-            f'custom/{stub.name} is missing from VERSIONS, so the type checker ignores it'
-            for stub in custom_stubs()
-            if stub.stem not in listed
+            f'custom/{name} is missing from VERSIONS, so the type checker ignores it'
+            for name in custom_stubs()
+            if module_name(name) not in listed
         ),
     ]
+
+
+def module_name(stub: str) -> str:
+    """The dotted module a `stdlib/`-relative stub path provides.
+
+    `os/path.pyi` is the module `os.path`, while `collections/__init__.pyi` is
+    the package `collections` itself.
+    """
+    parts = Path(stub).with_suffix('').parts
+    if parts[-1] == '__init__':
+        parts = parts[:-1]
+    return '.'.join(parts)
 
 
 def parse_versions(versions: str) -> set[str]:
