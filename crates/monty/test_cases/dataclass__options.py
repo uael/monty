@@ -1,5 +1,5 @@
-# The `@dataclass(...)` keyword form, for the options Monty implements:
-# `eq` and `frozen`. All behaviour here matches CPython.
+# The `@dataclass(...)` keyword form, option by option. All behaviour here
+# matches CPython.
 from dataclasses import FrozenInstanceError, dataclass
 
 
@@ -412,3 +412,131 @@ except TypeError as e:
 Rebound = dataclass(frozen=True)(Rebound)
 assert Rebound.__dataclass_params__.frozen is True
 assert list(Rebound.__dataclass_fields__) == ['x']
+
+
+# === order=True generates the four ordering methods ===
+@dataclass(order=True)
+class Ordered:
+    a: int
+    b: int
+
+
+assert Ordered(1, 2) < Ordered(1, 3)
+assert Ordered(1, 2) <= Ordered(1, 2)
+assert Ordered(2, 0) > Ordered(1, 9)
+assert Ordered(1, 2) >= Ordered(1, 2)
+assert not Ordered(1, 2) < Ordered(1, 2)
+assert sorted([Ordered(2, 0), Ordered(1, 1)]) == [Ordered(1, 1), Ordered(2, 0)]
+
+try:
+    Ordered(1, 2) < 5
+    raise AssertionError('ordering against another type should raise')
+except TypeError as exc:
+    assert str(exc) == "'<' not supported between instances of 'Ordered' and 'int'", str(exc)
+
+# order without eq is refused
+try:
+    dataclass(order=True, eq=False)
+
+    # the decorator itself is fine; applying it is what raises
+    @dataclass(order=True, eq=False)
+    class Bad:
+        x: int
+
+    raise AssertionError('order without eq should raise')
+except ValueError as exc:
+    assert str(exc) == 'eq must be true if order is true', str(exc)
+
+
+# === unsafe_hash=True hashes a mutable dataclass anyway ===
+@dataclass(unsafe_hash=True)
+class Unsafe:
+    x: int
+
+
+assert hash(Unsafe(1)) == hash((1,))
+
+
+# === kw_only=True makes every field keyword-only ===
+@dataclass(kw_only=True)
+class KwOnly:
+    a: int
+    b: int = 1
+
+
+assert KwOnly(a=1).b == 1
+assert KwOnly(a=1, b=2).b == 2
+assert KwOnly.__match_args__ == ()
+try:
+    KwOnly(1)
+    raise AssertionError('a kw-only field cannot be passed positionally')
+except TypeError:
+    pass
+try:
+    KwOnly()
+    raise AssertionError('a required kw-only field must be given')
+except TypeError as exc:
+    assert str(exc) == "KwOnly.__init__() missing 1 required keyword-only argument: 'a'", str(exc)
+
+
+# === match_args ===
+@dataclass
+class Args:
+    p: int
+    q: int = 0
+
+
+assert Args.__match_args__ == ('p', 'q')
+
+
+@dataclass(match_args=False)
+class NoArgs:
+    p: int
+
+
+assert not hasattr(NoArgs, '__match_args__')
+
+
+# === init=False synthesizes no constructor ===
+@dataclass(init=False)
+class NoInit:
+    x: int = 3
+
+
+assert NoInit().x == 3
+try:
+    NoInit(1)
+    raise AssertionError('init=False takes no arguments')
+except TypeError:
+    pass
+
+
+# === repr=False falls back to the default object repr ===
+@dataclass(repr=False)
+class NoRepr:
+    x: int
+
+
+assert repr(NoRepr(1)).startswith('<')
+assert 'NoRepr' in repr(NoRepr(1))
+
+
+# === the decorator can be applied in two steps, as `dataclass_transform` code does ===
+def seal(cls):
+    return dataclass(frozen=True, slots=True)(cls)
+
+
+@seal
+class Sealed:
+    a: int
+    b: tuple[int, ...] = ()
+
+
+s = Sealed(1)
+assert repr(s) == 'Sealed(a=1, b=())'
+assert hash(s) == hash((1, ()))
+try:
+    s.a = 2
+    raise AssertionError('a sealed record is immutable')
+except FrozenInstanceError:
+    pass

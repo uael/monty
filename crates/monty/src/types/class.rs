@@ -12,27 +12,91 @@ use crate::{
     value::{EitherStr, Value},
 };
 
-/// The `@dataclass(...)` options Monty implements.
+/// One `@dataclass(...)` keyword, and its bit in [`DataclassOptions`].
 ///
-/// Small and `Copy`, so it doubles as the payload of the *configured decorator*
-/// (`dataclass(frozen=True)`) without a heap allocation. Every other CPython
-/// flag is rejected at the call, so each is either stored here or known to hold
-/// its default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DataclassOptions {
-    /// Synthesize a field-wise `__eq__` (CPython's `eq`, default `True`).
-    pub eq: bool,
-    /// Reject attribute assignment, and hash by field values when `eq` is also
-    /// set (CPython's `frozen`, default `False`).
-    pub frozen: bool,
+/// The order is CPython's `_DataclassParams` field order, which is also the
+/// order `__dataclass_params__` reports them in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opt {
+    Init,
+    Repr,
+    Eq,
+    Order,
+    UnsafeHash,
+    Frozen,
+    MatchArgs,
+    KwOnly,
+    Slots,
+    WeakrefSlot,
 }
 
+impl Opt {
+    /// Every option, in `__dataclass_params__` order.
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Init,
+        Self::Repr,
+        Self::Eq,
+        Self::Order,
+        Self::UnsafeHash,
+        Self::Frozen,
+        Self::MatchArgs,
+        Self::KwOnly,
+        Self::Slots,
+        Self::WeakrefSlot,
+    ];
+
+    /// This option's bit.
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+
+    /// CPython's spelling of this keyword, which is both the `dataclass(...)`
+    /// argument name and the `_DataclassParams` attribute reporting it.
+    pub(crate) const fn keyword(self) -> &'static str {
+        match self {
+            Self::Init => "init",
+            Self::Repr => "repr",
+            Self::Eq => "eq",
+            Self::Order => "order",
+            Self::UnsafeHash => "unsafe_hash",
+            Self::Frozen => "frozen",
+            Self::MatchArgs => "match_args",
+            Self::KwOnly => "kw_only",
+            Self::Slots => "slots",
+            Self::WeakrefSlot => "weakref_slot",
+        }
+    }
+}
+
+/// The `@dataclass(...)` options a class was decorated with.
+///
+/// Packed into one `u16` so it stays `Copy` and doubles as the payload of the
+/// *configured decorator* (`dataclass(frozen=True)`) without a heap allocation
+/// between the two calls that syntax makes. A decorated class holds these bits
+/// directly, and `__dataclass_params__` reports them back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DataclassOptions(u16);
+
 impl Default for DataclassOptions {
-    /// CPython's defaults: `eq=True, frozen=False`.
+    /// CPython's defaults: `init=True, repr=True, eq=True, match_args=True`,
+    /// everything else false.
     fn default() -> Self {
-        Self {
-            eq: true,
-            frozen: false,
+        Self(Opt::Init.bit() | Opt::Repr.bit() | Opt::Eq.bit() | Opt::MatchArgs.bit())
+    }
+}
+
+impl DataclassOptions {
+    /// Whether `option` is on.
+    pub(crate) const fn get(self, option: Opt) -> bool {
+        self.0 & option.bit() != 0
+    }
+
+    /// Turns `option` on or off.
+    pub(crate) const fn set(&mut self, option: Opt, on: bool) {
+        if on {
+            self.0 |= option.bit();
+        } else {
+            self.0 &= !option.bit();
         }
     }
 }
@@ -123,6 +187,16 @@ impl<'h> HeapRead<'h, Class> {
     /// control.
     pub fn set_dataclass_options(&mut self, options: DataclassOptions, vm: &mut VM<'h>) {
         self.get_mut(vm.heap).options = options;
+    }
+
+    /// Unbinds a class attribute, returning the removed `(name, value)` pair for
+    /// the caller to release, or `None` when the name was not bound.
+    ///
+    /// The sandbox has no `del`, so this exists only for `@dataclass`, which
+    /// must remove the `field()` spec a class body left behind when that field
+    /// has no plain default: `C.x` then raises, as it does in CPython.
+    pub fn del_attr(&mut self, name: &Value, vm: &mut VM<'h>) -> RunResult<Option<(Value, Value)>> {
+        self.namespace_mut().pop(name, vm)
     }
 }
 

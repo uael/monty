@@ -77,7 +77,7 @@ impl<'h> HeapRead<'h, Instance> {
     /// counts as frozen and how it reads is [`dataclasses`]' business.
     pub fn set_attr(&mut self, name: Value, value: Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         let class_id = self.get(vm.heap).class();
-        if let Some(exc) = dataclasses::frozen_assignment_error(class_id, &name, vm) {
+        if let Some(exc) = dataclasses::set_attr_error(class_id, &name, vm) {
             [name, value].drop_with(vm);
             return Err(exc);
         }
@@ -116,6 +116,8 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Instance> {
 
     fn py_set_attr(&mut self, name: &EitherStr, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         let mut value_guard = DropGuard::new(value, vm);
+        // `set_attr` below is what refuses a `frozen` or `slots` write, and it
+        // releases both halves when it does.
         let name = attribute_name_value(name, value_guard.ctx());
         let (value, vm) = value_guard.into_parts();
         let old_value = self.set_attr(name, value, vm)?;
@@ -158,10 +160,9 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Instance> {
     fn py_hash(&self, self_id: HeapId, vm: &mut VM<'h>) -> RunResult<Option<HashValue>> {
         let class_id = self.get(vm.heap).class();
         match dataclasses::hash_action(class_id, vm) {
-            Some(DataclassHash::FieldWise) => {
-                let field_names = dataclasses::dataclass_fields(class_id, vm).unwrap_or_default();
-                dataclasses::dataclass_hash(self_id, &field_names, vm).map(Some)
-            }
+            // Takes the class rather than a field list: `dataclass_hash` selects
+            // the fields itself, honouring each one's `hash`/`compare` flag.
+            Some(DataclassHash::FieldWise) => dataclasses::dataclass_hash(self_id, class_id, vm),
             Some(DataclassHash::Unhashable) => Ok(None),
             None if class_defines(class_id, "__hash__", vm) => {
                 if class_defines_not_none(class_id, "__hash__", vm) {
@@ -495,15 +496,13 @@ pub(crate) fn instance_repr_fmt(
         return Ok(f.write_str(s.to_str(vm)?)?);
     }
     let class_id = instance_class(self_id, vm);
-    match dataclasses::dataclass_fields(class_id, vm) {
-        Some(field_names) => {
-            heap_ids.insert(self_id);
-            let result = dataclasses::dataclass_repr_fmt(self_id, &field_names, f, vm, heap_ids);
-            heap_ids.remove(&self_id);
-            result
-        }
-        None => Ok(f.write_str(&default_repr(self_id, vm))?),
+    heap_ids.insert(self_id);
+    let handled = dataclasses::dataclass_repr_fmt(self_id, class_id, f, vm, heap_ids);
+    heap_ids.remove(&self_id);
+    if handled? {
+        return Ok(());
     }
+    Ok(f.write_str(&default_repr(self_id, vm))?)
 }
 
 /// Produces `str(instance)`, dispatching to a user `__str__` if defined, else
@@ -705,15 +704,10 @@ pub(crate) fn instance_dataclass_eq(self_id: HeapId, other: &Value, vm: &mut VM<
         return Ok(None);
     }
     let class_id = instance_class(self_id, vm);
-    match dataclasses::dataclass_options(class_id, vm) {
-        // `eq=True` (the default) gets CPython's field-wise `__eq__`; `eq=False`
-        // and a plain class alike return `None`, leaving the caller on identity.
-        Some(options) if options.eq => {
-            let field_names = dataclasses::dataclass_fields(class_id, vm).unwrap_or_default();
-            dataclasses::dataclass_eq(self_id, &field_names, other, vm)
-        }
-        _ => Ok(None),
+    if !dataclasses::is_dataclass_class(class_id, vm) {
+        return Ok(None);
     }
+    dataclasses::dataclass_eq(self_id, class_id, other, vm)
 }
 
 /// Dispatches a user-defined `__hash__`, enforcing CPython's integer-return

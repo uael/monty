@@ -100,8 +100,10 @@ pub(crate) enum HeapData {
     /// A method bound to an instance, produced by `obj.method` without calling it.
     BoundMethod(BoundMethod),
     /// One `dataclasses.Field` of a `@dataclass`, held by the class's
-    /// `__dataclass_fields__` dict.
-    DataclassField(DataclassField),
+    /// `__dataclass_fields__` dict (or standing alone, as the value `field()`
+    /// returns before a class claims it). Boxed: it carries one `Value` per
+    /// `field()` keyword, well past the inline-size ceiling asserted below.
+    DataclassField(Box<DataclassField>),
     /// `list_iterator` object.
     ListIterator(ListIterator),
     /// `_collections._deque_iterator` object.

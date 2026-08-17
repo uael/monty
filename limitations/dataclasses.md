@@ -5,42 +5,46 @@ executed entirely inside the sandbox. Host-supplied dataclasses are a separate
 mechanism, passed in and dispatching back to the host (see
 ./classes.md).
 
+The module exposes `dataclass`, `field`, `fields`, `asdict`, `astuple`,
+`replace`, `is_dataclass`, `MISSING` and `FrozenInstanceError`. The decorator
+takes `init`, `repr`, `eq`, `order`, `unsafe_hash`, `frozen`, `match_args`,
+`kw_only` and `slots`, in both the bare (`@dataclass`) and the called
+(`@dataclass(frozen=True)`) form, and generates `__init__`, `__repr__`,
+`__eq__`, the four ordering methods, `__hash__` and `__match_args__` by the same
+rules CPython's do. `__post_init__` runs at the end of construction.
+
 ## Unsupported
 
-`@dataclass`, `@dataclass(...)` with `eq` and/or `frozen`, and `is_dataclass`
-exist. Everything below **raises at decoration time** rather than producing a
-subtly wrong class.
-
 Each raises `NotImplementedError`, marking a feature Monty has not built yet
-rather than a mistake in the calling code. CPython accepts all of them, so the
+rather than a mistake in the calling code, and raises it **at decoration time**
+rather than producing a subtly wrong class. CPython accepts all of them, so the
 exception type is a divergence in its own right: code catching `TypeError`
 around a decoration will not catch these.
 
-- **Every `@dataclass(...)` option except `eq` and `frozen`** — `init`, `repr`,
-  `order`, `unsafe_hash`, `match_args`, `kw_only`, `slots` and `weakref_slot`.
-  Setting one away from its CPython default raises
-  `NotImplementedError: dataclass() does not yet support the <name> option`;
-  each is named individually rather than reported as an unknown keyword.
-  Ordering dunders therefore do not exist, and hashing is whatever `eq`/`frozen`
-  imply.
-- **`__post_init__`** — raises `NotImplementedError: dataclass() does not yet
-  support __post_init__ in a class body, which would be silently skipped`.
 - **`InitVar[...]`** — raises `NotImplementedError: dataclass() does not yet
   support InitVar (field <name>), which would become an ordinary field`.
   Detected textually, since annotations are never evaluated: the name need not
   be imported to be rejected.
-- **`field()` / `default_factory` / `MISSING`** — `field(...)` in a class body
-  raises `NameError`. There is no `MISSING` object, so the `Field` attributes
-  whose value would be one raise `NotImplementedError: Field.default is not yet
-  supported, dataclasses.MISSING is not implemented` (likewise
-  `default_factory`, and `default` only for a field that has none).
-  `Field.metadata` and `Field._field_type` raise the same way, for
-  `types.MappingProxyType` and `dataclasses._FIELD`.
-- **Module helpers** — `fields`, `asdict`, `astuple`, `replace`.
+- **The `KW_ONLY` marker** (`_: KW_ONLY` in a class body) is rejected the same
+  way, and for the same reason: it would otherwise become an ordinary field
+  instead of making the fields after it keyword-only. `@dataclass(kw_only=True)`
+  and `field(kw_only=True)` are both supported, so the marker is the only
+  keyword-only spelling missing.
+- **`weakref_slot=True`**: Monty has no weak references, so there is no slot to
+  add and no `__weakref__` to expose. Without `slots=True` it fails first with
+  CPython's own `TypeError: weakref_slot is True but slots is False`.
+- **`Field._field_type`** is CPython's internal `_FIELD` / `_FIELD_CLASSVAR`
+  marker. Monty has no field kinds (see the `__dataclass_fields__` divergence
+  below), so reading it raises `NotImplementedError: Field._field_type is not
+  yet supported, dataclasses._FIELD is not implemented`.
+- **`make_dataclass`, `KW_ONLY`, `InitVar` and `Field` are not module
+  attributes**, so importing or reading them raises `ImportError` /
+  `AttributeError`.
 
 Mutable defaults are rejected as CPython rejects them
 (`ValueError: mutable default <class 'list'> for field xs is not allowed: use
-default_factory`), and so is a non-default field after a defaulted one
+default_factory`), whether written plainly or through `field(default=...)`, and
+so is a non-default field after a defaulted one
 (`TypeError: non-default argument 'b' follows default argument 'a'`).
 
 ## Divergences from CPython
@@ -51,33 +55,71 @@ default_factory`), and so is a non-default field after a defaulted one
   discovery and the generated methods are unaffected, the field *type* being
   inert metadata, but `C.__dataclass_fields__['x'].type` is the string `'int'`,
   not the `int` type object.
+- **`slots=True` restricts assignment, it does not change the object.** CPython
+  builds a *new* class with a real `__slots__`; Monty keeps the decorated class
+  and refuses assignment to any name that is not a declared field, with
+  CPython's message (`AttributeError: 'C' object has no attribute 'q' and no
+  __dict__ for setting new attributes`). So `C` is still the class the body
+  defined (CPython's is a replacement), and there is no memory saving. Neither
+  interpreter exposes `__dict__` on an instance, so that difference is not
+  observable. One message differs: assigning an *undeclared* name on a
+  `frozen=True, slots=True` instance raises `FrozenInstanceError` here, where
+  CPython 3.14 raises a `TypeError` from the recreated class's `__setattr__`.
+- **`__dataclass_params__` is a tuple of flags**, in the order `(init, repr, eq,
+  order, unsafe_hash, frozen, match_args, kw_only, slots, weakref_slot)`, where
+  CPython stores a `_DataclassParams` object with those names as attributes.
+  Both are read back by the generated methods; only the shape differs.
+  Rebinding it, like rebinding `__dataclass_fields__`, changes what those
+  methods do.
+- **`Field.metadata` is a plain dict**, not a `types.MappingProxyType` wrapping
+  one, so it is mutable and a field with no metadata hands back a fresh empty
+  dict on each read rather than one shared proxy.
+- **No object addresses.** `repr(MISSING)` is
+  `<dataclasses._MISSING_TYPE object>` and `Field.__repr__` writes that same
+  spelling, where CPython appends ` at 0x...`. `type(MISSING).__name__` matches
+  CPython (`dataclasses._MISSING_TYPE`), and `MISSING` is a singleton, so
+  `f.default is MISSING` works. Crossing to the host it is typed as the generic
+  marker type (`typing._SpecialForm`), which is the nearest thing the host-side
+  type mirror has.
 - **`__dataclass_fields__` holds only real fields.** CPython keeps `ClassVar`
   (and `InitVar`) entries in the mapping, marked `_FIELD_CLASSVAR`, and filters
   them in `fields()`. Monty has no field kinds, so the mapping *is* the field
   list and class variables never appear in it.
-- **`Field` renders differently.** `repr(field)` follows CPython's layout but
-  writes `MISSING` where CPython writes `<dataclasses._MISSING_TYPE object at
-  0x..>`, and the stringized `type`. `repr(type(field))` is `<class 'Field'>`,
-  not `<class 'dataclasses.Field'>` (`Field.__name__` matches either way, so
-  attribute errors read the same).
 - **Overwriting `__dataclass_fields__` un-marks the class.** Every dunder reads
   the mapping from the class namespace, so `C.__dataclass_fields__ = 5` makes
   `is_dataclass(C)` false and `C(...)` construct like a plain class. CPython
   keeps its generated methods and still calls `C` a dataclass.
-- **`ClassVar` / `InitVar` detection is purely textual.** Monty matches the
-  annotation text (bare, dotted, subscripted, or quoted) without checking that
-  the name is actually imported, where CPython resolves a *string* annotation
-  through the defining module's namespace. So `c: "ClassVar[int]"` without
-  `ClassVar` in scope is excluded by Monty but is an ordinary field to CPython.
-  Conversely any dotted spelling matches, so a same-named attribute on an
-  unrelated module (`mymod.ClassVar`) is treated as `typing.ClassVar`.
+- **`ClassVar` / `InitVar` / `KW_ONLY` detection is purely textual.** Monty
+  matches the annotation text (bare, dotted, subscripted, or quoted) without
+  checking that the name is actually imported, where CPython resolves a *string*
+  annotation through the defining module's namespace. So `c: "ClassVar[int]"`
+  without `ClassVar` in scope is excluded by Monty but is an ordinary field to
+  CPython. Conversely any dotted spelling matches, so a same-named attribute on
+  an unrelated module (`mymod.ClassVar`) is treated as `typing.ClassVar`.
+- **`__post_init__`, `default_factory` and `replace()` run to completion.** They
+  are dispatched synchronously, like every other hook Monty calls on the
+  interpreter's own stack (`__repr__`, `__eq__`, `__hash__`), so one that calls
+  an external or OS function raises `NotImplementedError` naming that call
+  instead of suspending to the host. A plain-function `__init__` on an ordinary
+  class *can* suspend, so this is a bound the synthesized construction adds.
+  `__post_init__`'s return value is discarded, as CPython discards it.
+- **`asdict` / `astuple` share leaf values instead of deep-copying them.**
+  CPython passes anything that is not a dataclass, list, tuple or dict through
+  `copy.deepcopy`; Monty has no `copy` module, so the result holds the same
+  object. Lists, tuples and dicts are rebuilt around their converted items, as
+  in CPython, so mutating the result's containers does not touch the instance.
+  A `namedtuple` is one of the values passed through: CPython rebuilds it from
+  converted items, so a dataclass nested inside one is converted there and not
+  here.
 - **A field holding a function or bound method reprs differently**, since
   Monty's own `repr` for those differs (see ./classes.md). Only the
   text differs; the value and its equality match CPython.
 - **A class-body `__setattr__` never runs for the synthesized `__init__`**,
   which writes fields straight into the instance `__dict__`. This is the
   never-dispatched attribute hook described in ./classes.md rather than
-  something dataclass-specific, so `@dataclass` does not reject it.
+  something dataclass-specific, so `@dataclass` does not reject it. The
+  `frozen` and `slots` refusals are enforced by the interpreter, not by a
+  generated `__setattr__`, so they hold regardless.
 - **`@dataclass` on a non-class** (e.g. `dataclasses.dataclass(5)`) raises
   `TypeError: dataclass() should be called on a class, not '<type>'`. CPython
   instead raises an incidental `AttributeError` about `__module__` from its
@@ -113,5 +155,7 @@ default_factory`), and so is a non-default field after a defaulted one
 ## Architectural gaps (cannot match)
 
 - **No inheritance**, so field inheritance across base dataclasses is
-  unsupported (Monty has no class inheritance at all).
-- **`slots=True` / `weakref_slot=True`** — no `__slots__`, no weakrefs.
+  unsupported (Monty has no class inheritance at all). Every consequence of it
+  is absent too: a frozen dataclass cannot inherit from a non-frozen one (or
+  vice versa), and `fields()` reports only the class's own annotations.
+- **No `__weakref__`**, so `weakref_slot=True` is refused rather than modelled.

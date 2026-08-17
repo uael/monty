@@ -1010,6 +1010,40 @@ pub enum StaticStrings {
     /// `TypeAliasType.__value__`, the lazily evaluated alias target.
     #[strum(serialize = "__value__")]
     DunderValue,
+
+    // ==========================
+    // More dataclasses module strings. Appended at the enum end rather than
+    // beside the earlier dataclasses block: discriminants are serialized
+    // `StringId`s, so inserting there would shift every later id.
+    /// `dataclasses.field()` factory function.
+    Field,
+    /// `dataclasses.fields()` function.
+    Fields,
+    /// `dataclasses.asdict()` function.
+    Asdict,
+    /// `dataclasses.astuple()` function.
+    Astuple,
+    /// `dataclasses.MISSING`, the sentinel standing for "no value given".
+    #[strum(serialize = "MISSING")]
+    Missing,
+    /// `hash` keyword of `field()`.
+    Hash,
+    /// `compare` keyword of `field()`.
+    Compare,
+    /// `metadata` keyword of `field()`.
+    Metadata,
+    /// `doc` keyword of `field()`.
+    Doc,
+    /// `dict_factory` keyword of `asdict()`.
+    DictFactory,
+    /// `tuple_factory` keyword of `astuple()`.
+    TupleFactory,
+    /// `__match_args__`, the field names positional patterns bind against.
+    #[strum(serialize = "__match_args__")]
+    DunderMatchArgs,
+    /// `__post_init__`, the hook the synthesized `__init__` calls last.
+    #[strum(serialize = "__post_init__")]
+    DunderPostInit,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

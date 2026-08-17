@@ -21,7 +21,7 @@ use crate::{
     heap_data::heap_subscript,
     identity::Identity,
     intern::{BytesId, FunctionId, Interns, LongIntId, StaticStrings, StringId},
-    modules::ModuleFunctions,
+    modules::{ModuleFunctions, dataclasses},
     resource_checks::check_pow_size,
     types::{
         Bytes, BytesIterator, CmpOrder, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
@@ -413,6 +413,13 @@ impl<'h> PyTrait<'h> for Value {
                 (HeapReadOutput::DateTime(a), HeapReadOutput::DateTime(b)) => a.py_cmp(&b, vm),
                 (HeapReadOutput::TimeDelta(a), HeapReadOutput::TimeDelta(b)) => {
                     Ok(CmpOrder::from_total(a.get(vm.heap).partial_cmp(b.get(vm.heap))))
+                }
+                // A dataclass decorated `order=True` orders by its compared
+                // fields; every other instance reports incomparable from there.
+                // Handled here rather than in `HeapRead<Instance>` because the
+                // generated methods read `self.field`, which needs both ids.
+                (HeapReadOutput::Instance(_), HeapReadOutput::Instance(_)) => {
+                    dataclasses::dataclass_cmp(*id1, *id2, vm)
                 }
                 _ => Ok(CmpOrder::Incomparable),
             },
@@ -2381,6 +2388,7 @@ impl Marker {
         match self.0 {
             StaticStrings::Stdout | StaticStrings::Stderr => Type::TextIOWrapper,
             StaticStrings::UnionType => Type::Type,
+            StaticStrings::Missing => Type::MissingType,
             _ => Type::SpecialForm,
         }
     }
@@ -2396,6 +2404,8 @@ impl Marker {
             StaticStrings::Stdout => f.write_str("<stdout>")?,
             StaticStrings::Stderr => f.write_str("<stderr>")?,
             StaticStrings::UnionType => f.write_str("<class 'typing.Union'>")?,
+            // CPython appends the singleton's address; Monty never reveals one.
+            StaticStrings::Missing => f.write_str("<dataclasses._MISSING_TYPE object>")?,
             _ => write!(f, "typing.{s}")?,
         }
         Ok(())

@@ -216,6 +216,10 @@ pub enum Type {
     /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
     #[strum(serialize = "typing.TypeAliasType")]
     TypeAliasType,
+    /// The type of `dataclasses.MISSING`, the sentinel a `Field` carries where
+    /// no default (or no per-field override) was given.
+    #[strum(serialize = "dataclasses._MISSING_TYPE")]
+    MissingType,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

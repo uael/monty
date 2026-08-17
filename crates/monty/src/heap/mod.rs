@@ -674,7 +674,7 @@ impl<'a> HeapPtr<'a> {
             HeapData::Class(class) => HeapReadOutput::Class(heap_read_boxed(base, class, readers)),
             HeapData::Instance(instance) => HeapReadOutput::Instance(heap_read_boxed(base, instance, readers)),
             HeapData::BoundMethod(bound_method) => HeapReadOutput::BoundMethod(heap_read(base, bound_method, readers)),
-            HeapData::DataclassField(field) => HeapReadOutput::DataclassField(heap_read(base, field, readers)),
+            HeapData::DataclassField(field) => HeapReadOutput::DataclassField(heap_read_boxed(base, field, readers)),
             HeapData::DataclassParams(params) => HeapReadOutput::DataclassParams(heap_read(base, params, readers)),
             HeapData::ListIterator(iter) => HeapReadOutput::ListIterator(heap_read(base, iter, readers)),
             HeapData::DequeIterator(iter) => HeapReadOutput::DequeIterator(heap_read(base, iter, readers)),
@@ -1726,13 +1726,12 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
             }
         }
         HeapData::DataclassField(field) => {
-            // A captured default can reach back to the class the field belongs
-            // to (`x: object = SomeInstanceOfIt`), closing a cycle.
-            if let Value::Ref(id) = field.annotation() {
-                on_child(*id);
-            }
-            if let Some(Value::Ref(id)) = field.default() {
-                on_child(*id);
+            // A captured default or factory can reach back to the class the
+            // field belongs to (`x: object = SomeInstanceOfIt`), closing a cycle.
+            for value in field.child_values() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
             }
         }
         HeapData::ListIterator(iter) => on_child(iter.list_id()),

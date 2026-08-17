@@ -20,30 +20,6 @@ fn expect_error(code: &str) -> String {
 }
 
 #[test]
-fn post_init_is_rejected() {
-    // CPython calls `__post_init__`; Monty would silently skip it, leaving the
-    // instance half-initialised, so the class is refused instead.
-    let err = expect_error(
-        r"
-from dataclasses import dataclass
-
-@dataclass
-class R:
-    x: int
-    def __post_init__(self):
-        self.x = 99
-",
-    );
-    assert_snapshot!(err, @r#"
-    Traceback (most recent call last):
-      File "test.py", line 4, in <module>
-        @dataclass
-         ~~~~~~~~~
-    NotImplementedError: dataclass() does not yet support __post_init__ in a class body, which would be silently skipped
-    "#);
-}
-
-#[test]
 fn initvar_is_rejected() {
     // Annotations are stringized and never evaluated, so `InitVar` need not be
     // imported to appear here — it would silently become an ordinary field.
@@ -67,24 +43,47 @@ class Q:
 }
 
 #[test]
-fn unimplemented_option_names_itself() {
-    // `eq` and `frozen` are implemented; the rest are refused by name rather
-    // than accepted and ignored.
+fn kw_only_marker_is_rejected() {
+    // The marker makes every field after it keyword-only in CPython; taken as an
+    // ordinary annotation it would instead add a field named `_`.
     let err = expect_error(
         r"
 from dataclasses import dataclass
 
-@dataclass(order=True)
-class F:
-    x: int
+@dataclass
+class K:
+    a: int
+    _: KW_ONLY
+    b: int
 ",
     );
     assert_snapshot!(err, @r#"
     Traceback (most recent call last):
       File "test.py", line 4, in <module>
-        @dataclass(order=True)
-         ~~~~~~~~~~~~~~~~~~~~~
-    NotImplementedError: dataclass() does not yet support the order option
+        @dataclass
+         ~~~~~~~~~
+    NotImplementedError: dataclass() does not yet support the KW_ONLY marker (field _), which would become an ordinary field instead of making the rest keyword-only
+    "#);
+}
+
+#[test]
+fn weakref_slot_is_rejected() {
+    // Nothing in Monty holds a weak reference, so there is no slot to add.
+    let err = expect_error(
+        r"
+from dataclasses import dataclass
+
+@dataclass(slots=True, weakref_slot=True)
+class W:
+    a: int
+",
+    );
+    assert_snapshot!(err, @r#"
+    Traceback (most recent call last):
+      File "test.py", line 4, in <module>
+        @dataclass(slots=True, weakref_slot=True)
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    NotImplementedError: dataclass(weakref_slot=True) is not supported, Monty has no weak references
     "#);
 }
 

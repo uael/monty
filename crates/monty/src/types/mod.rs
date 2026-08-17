@@ -40,7 +40,7 @@ pub mod r#type;
 pub mod type_alias;
 
 pub(crate) use bytes::{Bytes, BytesIterator};
-pub(crate) use class::{Class, DataclassOptions};
+pub(crate) use class::{Class, DataclassOptions, Opt};
 pub(crate) use dataclass::Dataclass;
 pub(crate) use deque::Deque;
 pub(crate) use dict::{Dict, DictItemIterator, DictKeyIterator, DictValueIterator};
