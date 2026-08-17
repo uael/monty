@@ -251,6 +251,8 @@ pub enum Type {
     /// `operator.attrgetter`, a callable that fetches attributes.
     #[strum(serialize = "operator.attrgetter")]
     AttrGetter,
+    #[strum(serialize = "itertools.accumulate")]
+    ItertoolsAccumulate,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

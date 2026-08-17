@@ -640,3 +640,83 @@ assert sorted(itertools.filterfalse(lambda x: x > 1, itertools.chain([0, 1], [2]
 assert list(itertools.starmap(lambda: 7, [()])) == [7]
 assert list(itertools.starmap(lambda a, b, c: a + b + c, [(1, 2, 3)])) == [6]
 assert list(itertools.starmap(lambda *a: len(a), [(1, 2, 3, 4)])) == [4]
+# === accumulate ===
+def _mul(a: int, b: int) -> int:
+    return a * b
+
+
+# The default is addition, and the first yield is the source's first item.
+assert list(itertools.accumulate([1, 2, 3])) == [1, 3, 6]
+assert list(itertools.accumulate([5])) == [5]
+assert list(itertools.accumulate([])) == []
+
+# Addition is whatever `+` means for the values, so strings concatenate.
+assert list(itertools.accumulate(['a', 'b', 'c'])) == ['a', 'ab', 'abc']
+assert list(itertools.accumulate([[1], [2]])) == [[1], [1, 2]]
+
+# `initial` is yielded first, untouched, and the source is not advanced for it.
+assert list(itertools.accumulate([1, 2, 3], initial=10)) == [10, 11, 13, 16]
+assert list(itertools.accumulate([], initial=5)) == [5]
+assert list(itertools.accumulate([2], initial=0)) == [0, 2]
+
+# An explicit None is indistinguishable from omitting either argument.
+assert list(itertools.accumulate([1, 2, 3], None)) == [1, 3, 6]
+assert list(itertools.accumulate([1, 2, 3], initial=None)) == [1, 3, 6]
+
+# A callable replaces addition, positionally or by keyword.
+assert list(itertools.accumulate([1, 2, 3], _mul)) == [1, 2, 6]
+assert list(itertools.accumulate([1, 2, 3], func=_mul, initial=2)) == [2, 2, 4, 12]
+
+# It is a lazy iterator, not a list: stepping it yields one total at a time.
+running = itertools.accumulate([1, 2, 3])
+assert next(running) == 1
+assert next(running) == 3
+assert next(running) == 6
+try:
+    next(running)
+    raise AssertionError('expected StopIteration')
+except StopIteration:
+    pass
+# Once spent it stays spent.
+assert list(running) == []
+
+# It drives any iterator, including a generator expression and another adaptor.
+assert ['', *itertools.accumulate(f'{x}\n' for x in ['p', 'q'])] == ['', 'p\n', 'p\nq\n']
+assert list(itertools.accumulate(itertools.islice([1, 2, 3, 4], 3))) == [1, 3, 6]
+assert list(itertools.islice(itertools.accumulate(itertools.repeat(2)), 4)) == [2, 4, 6, 8]
+
+# === accumulate errors ===
+try:
+    itertools.accumulate()  # pyright: ignore[reportCallIssue]
+    raise AssertionError('expected TypeError')
+except TypeError as e:
+    assert str(e) == "accumulate() missing required argument 'iterable' (pos 1)"
+
+try:
+    itertools.accumulate([1], _mul, 2)  # pyright: ignore[reportCallIssue]
+    raise AssertionError('expected TypeError')
+except TypeError as e:
+    assert str(e) == 'accumulate() takes at most 2 positional arguments (3 given)'
+
+# The iterable is resolved eagerly, so a non-iterable raises at construction.
+try:
+    itertools.accumulate(1)  # pyright: ignore[reportArgumentType]
+    raise AssertionError('expected TypeError')
+except TypeError as e:
+    assert str(e) == "'int' object is not iterable"
+
+# A non-callable `func` raises only when a second item needs folding.
+lazy_bad_func = itertools.accumulate([1, 2], 1)  # pyright: ignore[reportArgumentType]
+assert next(lazy_bad_func) == 1
+try:
+    next(lazy_bad_func)
+    raise AssertionError('expected TypeError')
+except TypeError as e:
+    assert str(e) == "'int' object is not callable"
+
+# A fold that cannot combine raises whatever `+` raises.
+try:
+    list(itertools.accumulate(['a', 1]))
+    raise AssertionError('expected TypeError')
+except TypeError as e:
+    assert str(e) == 'can only concatenate str (not "int") to str'

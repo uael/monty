@@ -614,6 +614,7 @@ impl MontyTypeExt for MontyType {
             Self::ContextToken => Some(Type::ContextToken),
             Self::Suppress => Some(Type::Suppress),
             Self::AttrGetter => Some(Type::AttrGetter),
+            Self::ItertoolsAccumulate => Some(Type::ItertoolsAccumulate),
         }
     }
 
@@ -715,6 +716,7 @@ impl MontyTypeExt for MontyType {
             Type::ContextToken => Self::ContextToken,
             Type::Suppress => Self::Suppress,
             Type::AttrGetter => Self::AttrGetter,
+            Type::ItertoolsAccumulate => Self::ItertoolsAccumulate,
         }
     }
 

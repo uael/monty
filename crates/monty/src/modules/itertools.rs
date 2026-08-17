@@ -15,7 +15,8 @@ use crate::{
     types::{
         ItertoolsIter, Module, Type,
         itertools::{
-            Chain, Compress, Count, Cycle, DropWhile, FilterFalse, Islice, Pairwise, Repeat, StarMap, TakeWhile,
+            Accumulate, Chain, Compress, Count, Cycle, DropWhile, FilterFalse, Islice, Pairwise, Repeat, StarMap,
+            TakeWhile,
         },
     },
     value::Value,
@@ -36,6 +37,7 @@ pub(crate) enum ItertoolsFunctions {
     Dropwhile,
     Filterfalse,
     Starmap,
+    Accumulate,
 }
 
 /// Static mapping of attribute names to functions for module creation.
@@ -51,6 +53,7 @@ const ITERTOOLS_FUNCTIONS: &[(StaticStrings, ItertoolsFunctions)] = &[
     (StaticStrings::Dropwhile, ItertoolsFunctions::Dropwhile),
     (StaticStrings::Filterfalse, ItertoolsFunctions::Filterfalse),
     (StaticStrings::Starmap, ItertoolsFunctions::Starmap),
+    (StaticStrings::Accumulate, ItertoolsFunctions::Accumulate),
 ];
 
 /// Creates the `itertools` module on the heap.
@@ -81,6 +84,7 @@ pub(super) fn call(vm: &mut VM<'_>, function: ItertoolsFunctions, args: ArgValue
         ItertoolsFunctions::Dropwhile => call_dropwhile(vm, args),
         ItertoolsFunctions::Filterfalse => call_filterfalse(vm, args),
         ItertoolsFunctions::Starmap => call_starmap(vm, args),
+        ItertoolsFunctions::Accumulate => call_accumulate(vm, args),
     }
 }
 
@@ -441,4 +445,45 @@ fn resolve_source(callable: Value, iterable: Value, vm: &mut VM<'_>) -> RunResul
     let source = iterable.into_py_iter(guard.ctx())?;
     let (callable, _) = guard.into_parts();
     Ok((callable, source))
+}
+
+/// Argument shape for `accumulate(iterable, func=None, *, initial=None)`.
+///
+/// CPython parses this with `PyArg_ParseTupleAndKeywords` carrying the name, so
+/// errors read `accumulate() …` (`style = c_named`) and the keyword-only
+/// `initial` switches overflow to the `… positional arguments …` wording.
+///
+/// Both optional slots stay raw `Value`s defaulting to `None`, because CPython
+/// cannot distinguish an omitted `func`/`initial` from an explicit `None` and
+/// neither can this: `accumulate(xs, None)` adds, and `initial=None` means no
+/// initial value.
+#[derive(FromArgs)]
+#[from_args(name = "accumulate", style = c_named)]
+struct AccumulateArgs {
+    iterable: Value,
+    #[from_args(default = Value::None)]
+    func: Value,
+    #[from_args(kw_only, default = Value::None)]
+    initial: Value,
+}
+
+/// `itertools.accumulate(iterable, func=None, *, initial=None)` — running totals.
+fn call_accumulate(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    let AccumulateArgs {
+        iterable,
+        func,
+        initial,
+    } = AccumulateArgs::from_args(args, vm)?;
+    // `into_py_iter` consumes its receiver, so the other two are guarded across
+    // the conversion and released if it raises.
+    let mut guard = DropGuard::new((func, initial), vm);
+    let source = iterable.into_py_iter(guard.ctx())?;
+    let ((func, initial), vm) = guard.into_parts();
+
+    // `None` is "absent" for both, so it is normalized away here rather than
+    // being carried into every step.
+    let func = (!matches!(func, Value::None)).then_some(func);
+    let initial = (!matches!(initial, Value::None)).then_some(initial);
+    let iter = ItertoolsIter::Accumulate(Accumulate::new(source, func, initial));
+    Ok(Value::Ref(vm.heap.allocate(HeapData::Itertools(iter))))
 }

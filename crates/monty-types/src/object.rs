@@ -871,6 +871,9 @@ pub enum MontyType {
     /// `operator.attrgetter`.
     #[strum(serialize = "operator.attrgetter")]
     AttrGetter,
+    /// `itertools.accumulate`.
+    #[strum(serialize = "itertools.accumulate")]
+    ItertoolsAccumulate,
 }
 
 impl fmt::Display for MontyType {

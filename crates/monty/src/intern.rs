@@ -1103,6 +1103,15 @@ pub enum StaticStrings {
     Operator,
     /// The `operator.attrgetter` callable.
     Attrgetter,
+
+    // ==========================
+    // More `itertools` module strings.
+    /// `itertools.accumulate()` function.
+    Accumulate,
+    /// `func` parameter of `itertools.accumulate()`.
+    Func,
+    /// `initial` keyword argument of `itertools.accumulate()`.
+    Initial,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

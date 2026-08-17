@@ -220,3 +220,41 @@ assert next(past_drop) == [1]
 
 len('done')
 # ref-counts={'itertools': 1, 'live': 1, 'primed': 1, 'cyclic': 2, 'paired': 1, 'sliced': 1, 'chained': 1, 'cycled': 1, 'replaying': 1, 'Boom': 2, 'erroring': 1, 'spent_source': 1, 'spent_pairwise': 1, 'stopped_source': 1, 'stopped_islice': 1, 'drained_source': 1, 'drained_islice': 1, 'chain_drained_source': 1, 'chain_drained': 1, 'chain_unreached_source': 1, 'chain_failed': 1, 'take_live': 1, 'drop_live': 1, 'filter_live': 1, 'star_live': 1, 'filter_none': 1, 'rejected': 1, 'pred_erroring': 1, 'star_erroring': 1, 'take_pred': 1, 'take_source': 1, 'latched_take': 1, 'drop_pred': 2, 'drop_source': 2, 'past_drop': 1}
+# accumulate owns three fields at once: the source, the running total, and the
+# callable. Each list below is reachable only through one of them.
+running = itertools.accumulate([[1], [2]])
+next(running)
+
+# With `initial`, the total is the initial value before the source is touched.
+seeded = itertools.accumulate([[3]], initial=[0])
+
+# The callable is the third field, and is reachable only via the adaptor.
+folded = itertools.accumulate([[4], [5]], lambda a, b: a + b)
+next(folded)
+next(folded)
+
+# The freeing path for each shape.
+gone_accumulate = itertools.accumulate([[6], [7]])
+next(gone_accumulate)
+gone_accumulate = None
+gone_seeded = itertools.accumulate([[8]], initial=[9])
+gone_seeded = None
+
+# A spent accumulate releases its source, total AND callable there and then, so
+# each named source below is at 1 only if the release happened.
+acc_drained_source = iter([1, 2])
+acc_drained = itertools.accumulate(acc_drained_source)
+list(acc_drained)
+
+# The fold error path leaves `next` through a `?` early return while the
+# adaptor stays live, so whatever it holds must still be accounted for.
+acc_erroring = itertools.accumulate(['a', 1])
+next(acc_erroring)
+try:
+    next(acc_erroring)
+    assert False, 'expected TypeError'
+except TypeError:
+    pass
+
+len('done')
+# ref-counts={'itertools': 1, 'live': 1, 'primed': 1, 'cyclic': 2, 'paired': 1, 'sliced': 1, 'chained': 1, 'cycled': 1, 'replaying': 1, 'Boom': 2, 'erroring': 1, 'spent_source': 1, 'spent_pairwise': 1, 'stopped_source': 1, 'stopped_islice': 1, 'drained_source': 1, 'drained_islice': 1, 'chain_drained_source': 1, 'chain_drained': 1, 'chain_unreached_source': 1, 'chain_failed': 1, 'running': 1, 'seeded': 1, 'folded': 1, 'acc_drained_source': 1, 'acc_drained': 1, 'acc_erroring': 1}

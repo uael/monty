@@ -10,6 +10,7 @@
 //! - `py_next` cannot hold the state borrow: adaptors re-enter the VM, so each
 //!   per-type function takes the `HeapRead` and re-projects under short borrows.
 
+pub mod accumulate;
 pub mod chain;
 pub mod compress;
 pub mod count;
@@ -25,6 +26,7 @@ pub mod takewhile;
 
 use std::{fmt::Write, mem};
 
+pub(crate) use accumulate::Accumulate;
 pub(crate) use chain::Chain;
 pub(crate) use compress::Compress;
 pub(crate) use count::Count;
@@ -68,6 +70,7 @@ pub(crate) enum ItertoolsIter {
     DropWhile(DropWhile),
     FilterFalse(FilterFalse),
     StarMap(StarMap),
+    Accumulate(Accumulate),
 }
 
 // `Dict` is the widest `HeapData` payload on 64-bit hosts, so it — not a
@@ -97,6 +100,7 @@ pub(crate) enum Kind {
     DropWhile,
     FilterFalse,
     StarMap,
+    Accumulate,
 }
 
 impl ItertoolsIter {
@@ -114,6 +118,7 @@ impl ItertoolsIter {
             Self::DropWhile(_) => Kind::DropWhile,
             Self::FilterFalse(_) => Kind::FilterFalse,
             Self::StarMap(_) => Kind::StarMap,
+            Self::Accumulate(_) => Kind::Accumulate,
         }
     }
 
@@ -131,6 +136,7 @@ impl ItertoolsIter {
             Self::DropWhile(_) => Type::ItertoolsDropWhile,
             Self::FilterFalse(_) => Type::ItertoolsFilterFalse,
             Self::StarMap(_) => Type::ItertoolsStarMap,
+            Self::Accumulate(_) => Type::ItertoolsAccumulate,
         }
     }
 
@@ -150,7 +156,8 @@ impl ItertoolsIter {
             | Self::TakeWhile(_)
             | Self::DropWhile(_)
             | Self::FilterFalse(_)
-            | Self::StarMap(_) => true,
+            | Self::StarMap(_)
+            | Self::Accumulate(_) => true,
         }
     }
 
@@ -169,7 +176,8 @@ impl ItertoolsIter {
             | Self::TakeWhile(_)
             | Self::DropWhile(_)
             | Self::FilterFalse(_)
-            | Self::StarMap(_) => 0,
+            | Self::StarMap(_)
+            | Self::Accumulate(_) => 0,
             Self::Repeat(repeat) => repeat.size_hint(),
         }
     }
@@ -188,6 +196,7 @@ impl ItertoolsIter {
             Self::DropWhile(drop_while) => drop_while.for_each_child_id(on_child),
             Self::FilterFalse(filter) => filter.for_each_child_id(on_child),
             Self::StarMap(starmap) => starmap.for_each_child_id(on_child),
+            Self::Accumulate(accumulate) => accumulate.for_each_child_id(on_child),
         }
     }
 }
@@ -207,6 +216,7 @@ impl HeapItem for ItertoolsIter {
             Self::DropWhile(drop_while) => drop_while.py_dec_ref_ids(stack),
             Self::FilterFalse(filter) => filter.py_dec_ref_ids(stack),
             Self::StarMap(starmap) => starmap.py_dec_ref_ids(stack),
+            Self::Accumulate(accumulate) => accumulate.py_dec_ref_ids(stack),
         }
     }
 }
@@ -257,7 +267,8 @@ impl<'h> PyTrait<'h> for HeapRead<'h, ItertoolsIter> {
             | Kind::TakeWhile
             | Kind::DropWhile
             | Kind::FilterFalse
-            | Kind::StarMap => {
+            | Kind::StarMap
+            | Kind::Accumulate => {
                 let mut guard = vm.recursion_guard()?;
                 let vm = &mut *guard;
                 match kind {
@@ -270,6 +281,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, ItertoolsIter> {
                     Kind::DropWhile => dropwhile::next(self, vm),
                     Kind::FilterFalse => filterfalse::next(self, vm),
                     Kind::StarMap => starmap::next(self, vm),
+                    Kind::Accumulate => accumulate::next(self, vm),
                     Kind::Count | Kind::Repeat => unreachable!("handled above"),
                 }
             }
@@ -291,7 +303,8 @@ impl<'h> PyTrait<'h> for HeapRead<'h, ItertoolsIter> {
             | Kind::TakeWhile
             | Kind::DropWhile
             | Kind::FilterFalse
-            | Kind::StarMap => {
+            | Kind::StarMap
+            | Kind::Accumulate => {
                 let type_name = self.py_type(vm).name(vm.heap, vm.interns);
                 Ok(write!(f, "<{type_name} object>")?)
             }

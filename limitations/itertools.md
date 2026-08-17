@@ -10,13 +10,12 @@ notes below.
 `compress(data, selectors)`, `islice(iterable, [start,] stop[, step])`,
 `chain(*iterables)`, `cycle(iterable)`, `takewhile(predicate, iterable)`,
 `dropwhile(predicate, iterable)`, `filterfalse(predicate, iterable)`,
-`starmap(function, iterable)`.
+`starmap(function, iterable)`, `accumulate(iterable, func=None, *, initial=None)`.
 
 ## Not implemented
 
-Everything else: `accumulate`, `batched`, `combinations`,
-`combinations_with_replacement`, `groupby`, `permutations`, `product`, `tee`,
-`zip_longest`.
+Everything else: `batched`, `combinations`, `combinations_with_replacement`,
+`groupby`, `permutations`, `product`, `tee`, `zip_longest`.
 
 `chain.from_iterable` is also absent, even though `chain` itself is
 implemented: it is a classmethod reached through an attribute on the `chain`
@@ -27,6 +26,23 @@ object has no attribute 'from_iterable'`). Use `chain(*iterables)` instead.
 These names are absent from the module namespace rather than stubbed, so they
 are rejected at type-check time (`Module 'itertools' has no member 'chain'`) and
 raise `AttributeError` at runtime.
+
+## `accumulate`
+
+Matches CPython, including the parts that are easy to get wrong:
+
+- The default operation is `+`, so it folds whatever `+` means for the values:
+  `accumulate(['a', 'b'])` yields `'a'`, `'ab'`.
+- **An explicit `None` is indistinguishable from an omitted argument**, for both
+  `func` and `initial`, exactly as in CPython. `accumulate(xs, None)` adds, and
+  `initial=None` means no initial value, so neither can be used to fold `None`
+  in.
+- With an `initial`, that value is yielded first untouched and the source is not
+  advanced for it, so `accumulate([], initial=5)` yields `5` and an empty source
+  with no initial yields nothing at all.
+- `func` is called only when there is a second value to fold, so a non-callable
+  `func` raises on the *second* `next()`, not at construction. The iterable, by
+  contrast, is resolved eagerly and a non-iterable raises straight away.
 
 ## Behavioural divergences
 
