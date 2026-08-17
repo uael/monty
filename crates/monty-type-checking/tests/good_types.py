@@ -2,10 +2,12 @@ import asyncio
 import datetime
 import json
 import os
+import os.path
 import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
+from os.path import normpath
 from pathlib import Path
 from typing import Any, assert_type
 
@@ -432,6 +434,12 @@ assert_type(y, str | int)
 
 x2 = os.environ.get('foobar')
 assert_type(x2, str | None)
+
+# os.path is a submodule, reachable through the package or imported directly
+np1 = os.path.normpath('a/b/..')
+assert_type(np1, str)
+np2 = normpath(Path('a/b/..'))
+assert_type(np2, str)
 
 
 # === re module ===

@@ -16,6 +16,7 @@ and no way for sandboxed code to load additional modules.
 | `json`         | ./json.md        |
 | `math`         | ./math.md        |
 | `os`           | ./os.md          |
+| `os.path`      | ./os.md          |
 | `pathlib`      | ./pathlib.md     |
 | `re`           | ./re.md          |
 | `string.templatelib` | ./string_templatelib.md |
@@ -27,12 +28,22 @@ and no way for sandboxed code to load additional modules.
 and `namedtuple`; `OrderedDict`, `ChainMap`, and the `UserDict` / `UserList`
 / `UserString` wrappers are missing (see ./collections.md).
 
-`string.templatelib` is registered under that full dotted name, so
-`from string.templatelib import Template, Interpolation` and
-`import string.templatelib as tl` work while `import string.templatelib` (no
-alias) is rejected: Monty has no package objects, so the plain form would bind
-a name containing a dot. The `string` package itself is *not* importable, and
-neither is any other `string` submodule (see ./string_templatelib.md).
+A submodule is registered under its full dotted name. `import a.b` binds the
+package `a` and reaches the submodule as `a.b`, as in CPython, so
+`import os.path` gives the name `os`. That form needs the package to be a
+module Monty implements: `os.path` qualifies, while `import string.templatelib`
+is rejected at compile time because `string` itself is not importable here, and
+points at `import string.templatelib as tl` or
+`from string.templatelib import Template`, which name the submodule directly.
+The `string` package has no other importable submodule (see
+./string_templatelib.md).
+
+**Each import builds a fresh module object.** There is no `sys.modules` cache,
+so `import sys` twice, or `import os.path` alongside `import os.path as p`,
+yields distinct objects: `sys is s` and `os.path is p` are `False` where
+CPython says `True`. Module attributes are all read-only builtins, so the
+copies never disagree about a value; only identity and `is` comparisons
+diverge.
 
 A `gc` module exposing `collect()` / `enable()` / `disable()` is compiled
 in only under the `test-hooks` Cargo feature, for Monty's own test suite;

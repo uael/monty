@@ -25,6 +25,7 @@ pub(crate) mod itertools;
 pub(crate) mod json;
 pub(crate) mod math;
 pub(crate) mod os;
+pub(crate) mod os_path;
 pub(crate) mod pathlib;
 pub(crate) mod re;
 pub(crate) mod string_templatelib;
@@ -67,6 +68,9 @@ pub(crate) enum StandardLib {
     /// The `string.templatelib` module exposing the PEP 750 `Template` and
     /// `Interpolation` type objects (no functions).
     StringTemplatelib,
+    /// The `os.path` submodule providing the pure lexical `normpath`. Also
+    /// reachable as the `path` attribute of `os`.
+    OsPath,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -96,6 +100,7 @@ impl StandardLib {
             StaticStrings::Dataclasses => Some(Self::Dataclasses),
             StaticStrings::Collections => Some(Self::Collections),
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
+            StaticStrings::OsPath => Some(Self::OsPath),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -123,6 +128,7 @@ impl StandardLib {
             Self::Dataclasses => dataclasses::create_module(vm),
             Self::Collections => collections::create_module(vm),
             Self::StringTemplatelib => string_templatelib::create_module(vm),
+            Self::OsPath => os_path::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }
@@ -137,6 +143,7 @@ pub(crate) enum ModuleFunctions {
     Json(json::JsonFunctions),
     Math(math::MathFunctions),
     Os(os::OsFunctions),
+    OsPath(os_path::OsPathFunctions),
     Re(re::ReFunctions),
     Unicodedata(unicodedata::UnicodedataFunctions),
     Itertools(itertools::ItertoolsFunctions),
@@ -162,6 +169,7 @@ impl fmt::Display for ModuleFunctions {
             Self::Json(func) => write!(f, "{func}"),
             Self::Math(func) => write!(f, "{func}"),
             Self::Os(func) => write!(f, "{func}"),
+            Self::OsPath(func) => write!(f, "{func}"),
             Self::Re(func) => write!(f, "{func}"),
             Self::Unicodedata(func) => write!(f, "{func}"),
             Self::Itertools(func) => write!(f, "{func}"),
@@ -186,6 +194,7 @@ impl ModuleFunctions {
             Self::Json(functions) => json::call(vm, functions, args).map(CallResult::Value),
             Self::Math(functions) => math::call(vm, functions, args).map(CallResult::Value),
             Self::Os(functions) => os::call(vm, functions, args),
+            Self::OsPath(functions) => os_path::call(vm, functions, args).map(CallResult::Value),
             Self::Re(functions) => re::call(vm, functions, args),
             Self::Unicodedata(functions) => unicodedata::call(vm, functions, args).map(CallResult::Value),
             Self::Itertools(functions) => itertools::call(vm, functions, args).map(CallResult::Value),

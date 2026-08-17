@@ -152,6 +152,7 @@ itertools: 3.0-
 json: 3.0-
 math: 3.0-
 os: 3.0-
+os.path: 3.0-
 pathlib: 3.4-
 pathlib.types: 3.14-
 re: 3.0-

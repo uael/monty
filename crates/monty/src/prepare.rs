@@ -1026,6 +1026,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                             let resolved_binding = self.get_id(import_name.binding)?;
                             Ok(ImportName {
                                 module_name: import_name.module_name,
+                                bound_name: import_name.bound_name,
                                 binding: resolved_binding,
                             })
                         })

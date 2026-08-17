@@ -63,7 +63,13 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         Value::ModuleFunction(ModuleFunctions::Os(f))
     }
 
+    // `os.path` is a real submodule in CPython, always present once `os` is
+    // imported — which is what lets `import os.path` bind the package and still
+    // reach `normpath` through the attribute.
+    let os_path = Value::Ref(super::os_path::create_module(vm));
+
     let attrs = [
+        (StaticStrings::Path, os_path),
         // Callables — each dispatches through `ModuleFunctions::Os`.
         (StaticStrings::Getenv, function(OsFunctions::Getenv)),
         (StaticStrings::Listdir, function(OsFunctions::Listdir)),

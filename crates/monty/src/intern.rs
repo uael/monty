@@ -1070,6 +1070,14 @@ pub enum StaticStrings {
     /// CPython names it, so no user name can collide with it.
     #[strum(serialize = ".0")]
     GenexprArg,
+    // `os.path` submodule strings. Appended at the enum end: discriminants are
+    // serialized `StringId`s, so mid-enum insertion would shift every later id.
+    /// Module name for `import os.path`. The whole dotted path is interned as
+    /// one string, which is what the import lookup matches.
+    #[strum(serialize = "os.path")]
+    OsPath,
+    /// `os.path.normpath()` function.
+    Normpath,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

@@ -101,9 +101,15 @@ impl Identifier {
 /// module name and binding target.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportName {
-    /// The module name to import (e.g., "sys", "typing").
+    /// The module name as written (e.g., "sys", "os.path"). This is what must
+    /// exist, and what a `ModuleNotFoundError` names.
     pub module_name: StringId,
-    /// The binding target — the alias if provided, otherwise the module name.
+    /// The module actually bound. It is [`Self::module_name`] except for an
+    /// unaliased dotted import, where CPython binds the *top-level package* —
+    /// `import os.path` binds `os`, and reaches the submodule through its
+    /// `path` attribute.
+    pub bound_name: StringId,
+    /// The binding target — the alias if provided, otherwise [`Self::bound_name`].
     /// After the prepare phase, this includes the resolved namespace slot.
     pub binding: Identifier,
 }

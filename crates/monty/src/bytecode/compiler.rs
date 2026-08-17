@@ -847,7 +847,7 @@ impl<'a> Compiler<'a> {
             }
             Node::Import { names } => {
                 for import_name in names {
-                    self.compile_import(import_name.module_name, &import_name.binding)?;
+                    self.compile_import(import_name.module_name, import_name.bound_name, &import_name.binding)?;
                 }
             }
             Node::ImportFrom {
@@ -1155,29 +1155,40 @@ impl<'a> Compiler<'a> {
     /// Emits `LoadModule` to create the module, then stores it to the binding name.
     /// If the module is unknown, emits `RaiseImportError` to defer the error to runtime.
     /// This allows imports inside `if TYPE_CHECKING:` blocks to compile successfully.
-    fn compile_import(&mut self, module_name: StringId, binding: &Identifier) -> Result<(), CompileError> {
+    ///
+    /// `bound_name` is the module the binding receives, which differs from
+    /// `module_name` only for an unaliased dotted import (see
+    /// [`ImportName::bound_name`](crate::expressions::ImportName)).
+    fn compile_import(
+        &mut self,
+        module_name: StringId,
+        bound_name: StringId,
+        binding: &Identifier,
+    ) -> Result<(), CompileError> {
         let position = binding.position;
         self.code.set_location(position, None);
 
         // Look up the module by name
-        if let Some(builtin_module) = StandardLib::from_string_id(module_name) {
-            // A dotted module with no `as` alias would bind a name containing a
-            // dot, which no expression can ever read, where CPython binds the
-            // top-level package. Monty has no package objects, so reject it and
-            // point at the form that does work. See `limitations/modules.md`.
-            if binding.name_id == module_name && self.interns.get_str(module_name).contains('.') {
+        if StandardLib::from_string_id(module_name).is_some() {
+            // An unaliased dotted import binds the package, so the package must
+            // itself be a module Monty implements. `os.path` qualifies; a
+            // submodule whose package does not exist here has nothing to bind,
+            // so point at the forms that name the submodule directly. See
+            // `limitations/modules.md`.
+            let Some(bound_module) = StandardLib::from_string_id(bound_name) else {
                 return Err(CompileError::not_implemented(
                     format!(
-                        "importing a submodule without an alias; use `import {} as <name>` \
-                         or `from {} import <name>`",
+                        "importing a submodule of `{}`, which is not itself implemented; use \
+                         `import {} as <name>` or `from {} import <name>`",
+                        self.interns.get_str(bound_name),
                         self.interns.get_str(module_name),
                         self.interns.get_str(module_name),
                     ),
                     position,
                 ));
-            }
+            };
             // Known module - emit LoadModule
-            self.code.emit_u8(Opcode::LoadModule, builtin_module as u8)?;
+            self.code.emit_u8(Opcode::LoadModule, bound_module as u8)?;
             // Store to the binding (respects Local/Global/Cell scope)
             self.compile_store(binding)?;
         } else {

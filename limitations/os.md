@@ -19,6 +19,10 @@ whether each call is permitted.
 - `os.remove(path)`, `os.unlink(path)`, `os.rmdir(path)`
 - `os.rename(src, dst)`, `os.replace(src, dst)`
 - `os.fspath(path)` — pure, no host involvement.
+- `os.path.normpath(path)` — pure lexical normalization, the only `os.path`
+  member implemented. `os.path` is a real submodule: `import os` gives it as
+  `os.path`, and `import os.path`, `import os.path as p` and
+  `from os.path import normpath` all work.
 - Constants (fixed POSIX values on every host OS, matching the sandbox's
   POSIX-only path model): `os.sep == '/'`, `os.altsep is None`,
   `os.extsep == '.'`, `os.curdir == '.'`, `os.pardir == '..'`,
@@ -82,8 +86,11 @@ whether each call is permitted.
 
 ## Not implemented
 
-Everything else, including but not limited to: `os.path.*` (use
-`pathlib.Path` instead), `os.getcwd`, `os.chdir`, `os.walk`, `os.scandir`,
+Everything else, including but not limited to: every `os.path` member other
+than `normpath` — `join`, `split`, `dirname`, `basename`, `abspath`, `isabs`,
+`exists`, `isdir`, `isfile`, `splitext`, `realpath`, `relpath`, `expanduser`,
+`commonpath` — for which `pathlib.Path` is the supported route; `os.getcwd`,
+`os.chdir`, `os.walk`, `os.scandir`,
 `os.removedirs`, `os.renames`, `os.lstat`, `os.access`, `os.symlink`,
 `os.readlink`, `os.link`, `os.chmod`, `os.chown`, `os.umask`, `os.truncate`,
 `os.utime`, `os.system`, `os.popen`, `os.fork`, `os.exec*`, `os.spawn*`,

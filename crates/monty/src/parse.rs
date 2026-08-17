@@ -606,13 +606,25 @@ impl<'a> Parser<'a> {
                     .iter()
                     .map(|alias_node| {
                         let module_name = self.interner.intern(&alias_node.name);
-                        // The binding name is the alias if present, otherwise the module name
+                        // Without an alias a dotted import binds the top-level
+                        // package, not the submodule: `import os.path` gives the
+                        // name `os`. With one, the alias names the submodule
+                        // itself, so the whole dotted module is what loads.
+                        let bound_name = match alias_node.name.split_once('.') {
+                            Some((package, _)) if alias_node.asname.is_none() => self.interner.intern(package),
+                            _ => module_name,
+                        };
+                        // The binding name is the alias if present, otherwise the bound module
                         let binding_name = alias_node
                             .asname
                             .as_ref()
-                            .map_or(module_name, |n| self.interner.intern(&n.id));
+                            .map_or(bound_name, |n| self.interner.intern(&n.id));
                         let binding = Identifier::new(binding_name, position);
-                        ImportName { module_name, binding }
+                        ImportName {
+                            module_name,
+                            bound_name,
+                            binding,
+                        }
                     })
                     .collect();
                 Ok(Node::Import { names: import_names })
