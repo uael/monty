@@ -23,13 +23,13 @@ use crate::{
         dataclasses::{DataclassField, DataclassParams},
     },
     types::{
-        BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict, DictItemIterator,
-        DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet,
-        Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor, Module, NamedTuple,
-        NamedTupleClass, OpenFile, Path, PyTrait, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice,
-        Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator, Type, TypeAliasType, UserProperty,
-        callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, instance_subscript,
-        list::ListIterator, str::allocate_string, timedelta, timezone,
+        AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
+        DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
+        FrozenSet, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor, Module,
+        NamedTuple, NamedTupleClass, OpenFile, Path, PyTrait, Range, RangeIterator, ReMatch, RePattern, Set,
+        SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator, Type,
+        TypeAliasType, UserProperty, callable_iterator::CallableIterator, date, datetime, deque::DequeIterator,
+        instance_subscript, list::ListIterator, str::allocate_string, timedelta, timezone,
     },
     value::{EitherStr, Value},
 };
@@ -223,6 +223,8 @@ pub(crate) enum HeapData {
     ContextToken(ContextToken),
     /// `contextlib.suppress`, holding the exception classes it swallows.
     Suppress(Suppress),
+    /// `operator.attrgetter`, holding the attribute paths it fetches.
+    AttrGetter(AttrGetter),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -316,7 +318,9 @@ impl HeapData {
             | Self::Date(_)
             | Self::DateTime(_)
             | Self::TimeDelta(_)
-            | Self::TimeZone(_) => false,
+            | Self::TimeZone(_)
+            // A leaf: its paths are plain strings, never heap references.
+            | Self::AttrGetter(_) => false,
         }
     }
 
@@ -338,6 +342,7 @@ impl HeapData {
                 // `true` keeps `call_heap_callable` in charge of the real
                 // check, which raises the same `TypeError` when it is absent.
                 | Self::Instance(_)
+                | Self::AttrGetter(_)
         )
     }
 
@@ -406,6 +411,7 @@ impl HeapData {
             Self::ContextVar(_) => Type::ContextVar,
             Self::ContextToken(_) => Type::ContextToken,
             Self::Suppress(_) => Type::Suppress,
+            Self::AttrGetter(_) => Type::AttrGetter,
         }
     }
 }
@@ -600,6 +606,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::ContextVar($value) => $body,
             Self::ContextToken($value) => $body,
             Self::Suppress($value) => $body,
+            Self::AttrGetter($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -1139,6 +1146,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::ContextVar(value) => value.py_iter(self_id, vm),
             Self::ContextToken(value) => value.py_iter(self_id, vm),
             Self::Suppress(value) => value.py_iter(self_id, vm),
+            Self::AttrGetter(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1206,6 +1214,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::ContextVar(value) => value.py_next(self_id, vm),
             Self::ContextToken(value) => value.py_next(self_id, vm),
             Self::Suppress(value) => value.py_next(self_id, vm),
+            Self::AttrGetter(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),

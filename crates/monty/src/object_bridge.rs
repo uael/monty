@@ -613,6 +613,7 @@ impl MontyTypeExt for MontyType {
             Self::ContextVar => Some(Type::ContextVar),
             Self::ContextToken => Some(Type::ContextToken),
             Self::Suppress => Some(Type::Suppress),
+            Self::AttrGetter => Some(Type::AttrGetter),
         }
     }
 
@@ -713,6 +714,7 @@ impl MontyTypeExt for MontyType {
             Type::ContextVar => Self::ContextVar,
             Type::ContextToken => Self::ContextToken,
             Type::Suppress => Self::Suppress,
+            Type::AttrGetter => Self::AttrGetter,
         }
     }
 

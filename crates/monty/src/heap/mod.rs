@@ -33,11 +33,11 @@ use crate::{
     heap_data::{CellValue, Closure, FunctionDefaults},
     modules::dataclasses::{DataclassField, DataclassParams},
     types::{
-        BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict, DictItemIterator,
-        DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet,
-        Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module, NamedTuple, NamedTupleClass,
-        OpenFile, Path, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator,
-        SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator, TypeAliasType, UserProperty,
+        AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
+        DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
+        FrozenSet, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module, NamedTuple,
+        NamedTupleClass, OpenFile, Path, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str,
+        StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator, TypeAliasType, UserProperty,
         callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator, timedelta,
         timezone,
     },
@@ -283,6 +283,7 @@ pub enum HeapReadOutput<'a> {
     ContextVar(HeapRead<'a, ContextVar>),
     ContextToken(HeapRead<'a, ContextToken>),
     Suppress(HeapRead<'a, Suppress>),
+    AttrGetter(HeapRead<'a, AttrGetter>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -724,6 +725,7 @@ impl<'a> HeapPtr<'a> {
             HeapData::ContextVar(var) => HeapReadOutput::ContextVar(heap_read(base, var, readers)),
             HeapData::ContextToken(token) => HeapReadOutput::ContextToken(heap_read(base, token, readers)),
             HeapData::Suppress(suppress) => HeapReadOutput::Suppress(heap_read(base, suppress, readers)),
+            HeapData::AttrGetter(getter) => HeapReadOutput::AttrGetter(heap_read(base, getter, readers)),
         }
     }
 }

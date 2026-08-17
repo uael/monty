@@ -18,6 +18,7 @@ and no way for sandboxed code to load additional modules.
 | `json`         | ./json.md        |
 | `math`         | ./math.md        |
 | `os`           | ./os.md          |
+| `operator`     | ./operator.md    |
 | `os.path`      | ./os.md          |
 | `pathlib`      | ./pathlib.md     |
 | `re`           | ./re.md          |
@@ -57,7 +58,7 @@ Common modules that are *not* importable in Monty (non-exhaustive):
 `abc`, `argparse`, `array`, `base64`, `bisect`, `copy`, `csv`,
 `ctypes`, `decimal`, `enum`, `fractions`, `functools`,
 `hashlib`, `heapq`, `hmac`, `http`, `inspect`, `io`,
-`logging`, `multiprocessing`, `operator`, `pickle`, `queue`, `random`,
+`logging`, `multiprocessing`, `pickle`, `queue`, `random`,
 `socket`, `struct`, `subprocess`, `tempfile`, `threading`,
 `time`, `traceback`, `unittest`, `urllib`, `uuid`, `warnings`, `weakref`,
 `zipfile`, `zlib`.

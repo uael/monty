@@ -868,6 +868,9 @@ pub enum MontyType {
     /// pure-Python class.
     #[strum(serialize = "suppress")]
     Suppress,
+    /// `operator.attrgetter`.
+    #[strum(serialize = "operator.attrgetter")]
+    AttrGetter,
 }
 
 impl fmt::Display for MontyType {

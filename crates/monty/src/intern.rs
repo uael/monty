@@ -1096,6 +1096,13 @@ pub enum StaticStrings {
     /// The `contextlib.AbstractContextManager` base.
     #[strum(serialize = "AbstractContextManager")]
     AbstractContextManager,
+
+    // ==========================
+    // `operator` module strings.
+    /// The `operator` module name.
+    Operator,
+    /// The `operator.attrgetter` callable.
+    Attrgetter,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

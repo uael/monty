@@ -26,6 +26,7 @@ pub(crate) mod gc;
 pub(crate) mod itertools;
 pub(crate) mod json;
 pub(crate) mod math;
+pub(crate) mod operator;
 pub(crate) mod os;
 pub(crate) mod os_path;
 pub(crate) mod pathlib;
@@ -78,6 +79,8 @@ pub(crate) enum StandardLib {
     /// The `contextlib` module providing `suppress` and
     /// `AbstractContextManager`.
     Contextlib,
+    /// The `operator` module providing `attrgetter`.
+    Operator,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -110,6 +113,7 @@ impl StandardLib {
             StaticStrings::OsPath => Some(Self::OsPath),
             StaticStrings::Contextvars => Some(Self::Contextvars),
             StaticStrings::Contextlib => Some(Self::Contextlib),
+            StaticStrings::Operator => Some(Self::Operator),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -140,6 +144,7 @@ impl StandardLib {
             Self::OsPath => os_path::create_module(vm),
             Self::Contextvars => contextvars::create_module(vm),
             Self::Contextlib => contextlib::create_module(vm),
+            Self::Operator => operator::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

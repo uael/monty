@@ -12,7 +12,7 @@ use crate::{
     modules::collections,
     types::{
         AttrCallResult, Bytes, Deque, Dict, FrozenSet, List, LongInt, Path, PyTrait, Range, Set, Slice, Str, TimeZone,
-        Tuple,
+        Tuple, attrgetter,
         bytes::{bytes_fromhex, bytes_repr},
         contextvars, date, datetime,
         dict::{DictKind, dict_fromkeys},
@@ -248,6 +248,9 @@ pub enum Type {
     /// say `'suppress' object`, and only `repr(contextlib.suppress)` qualifies.
     #[strum(serialize = "suppress")]
     Suppress,
+    /// `operator.attrgetter`, a callable that fetches attributes.
+    #[strum(serialize = "operator.attrgetter")]
+    AttrGetter,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -540,6 +543,7 @@ impl Type {
             Self::Property => property::property_init(vm, args),
             Self::ContextVar => contextvars::init(vm, args),
             Self::Suppress => suppress::init(vm, args),
+            Self::AttrGetter => attrgetter::init(vm, args),
 
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),

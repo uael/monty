@@ -23,7 +23,7 @@ use crate::{
     modules::dataclasses,
     os_dispatch::{PendingOsEffect, release_pending_effect},
     types::{
-        Dict, Instance, PyTrait, Type,
+        Dict, Instance, PyTrait, Type, attrgetter,
         bytes::call_bytes_method,
         class::class_exc_base,
         construct_namedtuple,
@@ -540,6 +540,9 @@ impl VM<'_> {
                 let name = function.clone_name();
                 return Ok(CallResult::External(name, args));
             }
+            // A getter walks attributes, which re-enters attribute lookup, so
+            // it takes its own id rather than a read handle.
+            HeapData::AttrGetter(_) => return attrgetter::call(heap_id, self, args).map(CallResult::Value),
             _ => {
                 // Coupling check: dispatch rejected this Ref, so the heap-side
                 // callability predicate must agree (see `HeapData::is_callable`).
