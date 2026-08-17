@@ -33,7 +33,8 @@ CPython-matching features: instance methods, `__init__` (full parameter
 shapes), instance and class attribute get/set (including `setattr(Foo, ...)`
 and function-attributes-become-methods), bound methods, class variables
 (arbitrary expressions, evaluated in a real suspendable class-body scope),
-**class decorators** (`@deco class Foo`),
+**class decorators** (`@deco class Foo`), **method decorators** taking any
+callable in scope,
 `__repr__`/`__str__`/`__enter__`/`__exit__`/`__eq__`/`__hash__` dispatch,
 `obj.__class__`, `Foo.__name__`, `Foo.__doc__`/`obj.__doc__`,
 `Foo.__annotations__` (ordered; values stringized and provisional, see
@@ -178,9 +179,15 @@ first, e.g. return a `dict` of the fields.
   metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).
 - Abstract base classes (`abc.ABC`, `@abstractmethod`).
-- Method decorators — `@classmethod`, `@staticmethod`, `@property`, and any
-  decorator on a `def` inside a class body (rejected at parse time). Decorators
-  on classes and on non-method functions are supported.
+- `@classmethod`, `@staticmethod` and `@property` — the *decorator syntax* on a
+  method works and applies any callable in scope, but these three builtin
+  descriptors do not exist, so the names raise `NameError`. A method decorator
+  is otherwise an ordinary call: the member is bound to whatever it returns,
+  and the wrapper receives `self` as its first argument like any other function.
+  Because a function exposes no attributes (see ./language.md),
+  `functools.wraps`-style metadata copying has no equivalent here either.
+- **Tracebacks from a method decorator that raises** point at the whole `class`
+  statement, like class decorators below, rather than at the decorator line.
 - **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
   are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
   latter with stringized values, see ./typing.md). A class decorator

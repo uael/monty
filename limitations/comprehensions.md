@@ -13,6 +13,12 @@ enclosing scope.
   Monty does not implement `locals()` introspection.
 - **Generator expressions.** `(x for x in iterable)` parses but currently
   materialises to a `list` rather than a lazy iterator.
+- **Targets must be names.** `[x for obj.a in xs]` and `[x for d['k'] in xs]`
+  raise `NotImplementedError: The monty syntax parser does not yet support
+  attribute or subscript targets in a comprehension`. CPython accepts both.
+  Everywhere else (assignments, `for` statements, `with ... as`) those targets
+  work; a comprehension's targets live in operand-stack slots, which have
+  nowhere to store through an object.
 - **Maximum number of `for` clauses.** Monty caps a single comprehension at
   255 `for` clauses; exceeding this raises `SyntaxError: comprehension has
   too many nested clauses (N); maximum is 255`. Per-clause operand-stack

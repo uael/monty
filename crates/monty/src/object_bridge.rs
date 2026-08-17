@@ -604,6 +604,9 @@ impl MontyTypeExt for MontyType {
             Self::ReMatch => Some(Type::ReMatch),
             Self::Field => Some(Type::DataclassField),
             Self::DataclassParams => Some(Type::DataclassParams),
+            Self::Template => Some(Type::Template),
+            Self::Interpolation => Some(Type::Interpolation),
+            Self::TypeAliasType => Some(Type::TypeAliasType),
         }
     }
 
@@ -689,6 +692,9 @@ impl MontyTypeExt for MontyType {
             Type::ReMatch => Self::ReMatch,
             Type::DataclassField => Self::Field,
             Type::DataclassParams => Self::DataclassParams,
+            Type::Template => Self::Template,
+            Type::Interpolation => Self::Interpolation,
+            Type::TypeAliasType => Self::TypeAliasType,
         }
     }
 

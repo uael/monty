@@ -34,10 +34,10 @@ use crate::{
     types::{
         BoundMethod, Bytes, BytesIterator, Class, Dataclass, Deque, Dict, DictItemIterator, DictItemsView,
         DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet, Instance,
-        ItertoolsIter, List, LongInt, Module, NamedTuple, NamedTupleClass, OpenFile, Path, Range, RangeIterator,
-        ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, TimeZone, Tuple, TupleIterator,
-        callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator, timedelta,
-        timezone,
+        Interpolation, ItertoolsIter, List, LongInt, Module, NamedTuple, NamedTupleClass, OpenFile, Path, Range,
+        RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, Template, TimeZone, Tuple,
+        TupleIterator, TypeAliasType, callable_iterator::CallableIterator, date, datetime, deque::DequeIterator,
+        list::ListIterator, timedelta, timezone,
     },
     value::Value,
 };
@@ -271,6 +271,9 @@ pub enum HeapReadOutput<'a> {
     DateTime(HeapRead<'a, datetime::DateTime>),
     TimeDelta(HeapRead<'a, timedelta::TimeDelta>),
     TimeZone(HeapRead<'a, timezone::TimeZone>),
+    Template(HeapRead<'a, Template>),
+    Interpolation(HeapRead<'a, Interpolation>),
+    TypeAliasType(HeapRead<'a, TypeAliasType>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -702,6 +705,11 @@ impl<'a> HeapPtr<'a> {
             HeapData::DateTime(d) => HeapReadOutput::DateTime(heap_read(base, d, readers)),
             HeapData::TimeDelta(d) => HeapReadOutput::TimeDelta(heap_read(base, d, readers)),
             HeapData::TimeZone(d) => HeapReadOutput::TimeZone(heap_read(base, d, readers)),
+            HeapData::Template(template) => HeapReadOutput::Template(heap_read(base, template, readers)),
+            HeapData::Interpolation(interpolation) => {
+                HeapReadOutput::Interpolation(heap_read_boxed(base, interpolation, readers))
+            }
+            HeapData::TypeAliasType(alias) => HeapReadOutput::TypeAliasType(heap_read(base, alias, readers)),
         }
     }
 }
@@ -1832,6 +1840,28 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(*id);
             }
         }
+        // Mirror `py_dec_ref_ids_for_data`: a template owns its two tuples, an
+        // interpolation its four fields, and an alias its thunk plus any
+        // memoized `__value__`.
+        HeapData::Template(template) => {
+            for value in template.owned_values() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::Interpolation(interpolation) => {
+            for value in interpolation.owned_values() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::TypeAliasType(alias) => alias.for_each_owned_value(|value| {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }),
         // Leaf types with no heap references
         _ => {}
     }
@@ -1939,6 +1969,10 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         }
         // Release the shared subject reference (mirrors `for_each_child_id`).
         HeapData::ReMatch(m) => m.py_dec_ref_ids(stack),
+        // Release the template/alias references (mirrors `for_each_child_id`).
+        HeapData::Template(template) => template.py_dec_ref_ids(stack),
+        HeapData::Interpolation(interpolation) => interpolation.py_dec_ref_ids(stack),
+        HeapData::TypeAliasType(alias) => alias.py_dec_ref_ids(stack),
         // other types have no nested heap references
         _ => {}
     }

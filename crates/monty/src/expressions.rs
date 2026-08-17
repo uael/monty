@@ -8,6 +8,7 @@ use crate::{
     intern::{BytesId, LongIntId, StringId},
     namespace::NamespaceId,
     parse::{CodeRange, ParsedSignature, Try},
+    tstring::ParsedTemplate,
     value::{EitherStr, Marker, Value},
 };
 
@@ -285,6 +286,13 @@ pub enum Expr {
     ///
     /// The results are concatenated to produce the final string.
     FString(Vec<FStringPart>),
+    /// Template string (PEP 750): `t"a{x!r:>5}b"`.
+    ///
+    /// Unlike an f-string nothing is concatenated — evaluation builds a
+    /// `string.templatelib.Template` holding the literal segments and one
+    /// `Interpolation` per replacement field. Boxed because a template carries
+    /// two vectors and `Expr` is cloned on every prepare pass.
+    TString(Box<ParsedTemplate>),
     /// Conditional expression (ternary operator): `body if test else orelse`
     ///
     /// Only one of body/orelse is evaluated based on the truthiness of test.
@@ -364,18 +372,44 @@ pub enum Expr {
     },
 }
 
-/// Target for tuple unpacking - can be a single name, nested tuple, or starred target.
+/// Every shape Python allows on the left of a binding.
 ///
-/// Supports recursive structures like `(a, b), c` or `a, (b, c)`.
-/// Also supports starred targets like `first, *rest = [1, 2, 3, 4]`.
-/// Used in assignment statements, for loop targets, and comprehension targets.
+/// One type serves assignment targets, `for`/`with` targets, comprehension
+/// targets, and the elements of a tuple pattern, because Python's grammar makes
+/// them the same thing: a nested target (`a, (self.b, d[k]) = ...`) is just the
+/// recursive case of a top-level one. Keeping them unified means a new target
+/// shape is added once rather than in two parallel enums.
+///
+/// [`Starred`](Self::Starred) is only legal *inside* a [`Tuple`](Self::Tuple),
+/// and at most once per level; both rules are enforced by the parser.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum UnpackTarget {
     /// Single identifier: `a`
     Name(Identifier),
-    /// Nested tuple: `(a, b)` - can contain further nested tuples
+    /// Attribute target: `obj.attr`.
+    ///
+    /// The object expression is evaluated when the store happens, i.e. *after*
+    /// the right-hand side, matching CPython's evaluation order.
+    Attr {
+        /// Expression evaluating to the object whose attribute is being set.
+        object: ExprLoc,
+        /// The attribute name.
+        attr: EitherStr,
+        /// Position of the full attribute expression (for traceback carets).
+        position: CodeRange,
+    },
+    /// Subscript target: `container[index]`.
+    Subscript {
+        /// Expression evaluating to the container object.
+        object: ExprLoc,
+        /// Expression evaluating to the index/key.
+        index: ExprLoc,
+        /// Position of the full subscript expression (for traceback carets).
+        position: CodeRange,
+    },
+    /// Nested tuple/list pattern: `(a, b)` or `[a, *rest]`.
     Tuple {
-        /// The targets to unpack into (can be names or nested tuples)
+        /// The targets to unpack into (any target shape, including nested tuples)
         targets: Vec<Self>,
         /// Source position covering all targets (for error caret placement)
         position: CodeRange,
@@ -386,42 +420,28 @@ pub enum UnpackTarget {
     Starred(Identifier),
 }
 
-/// Target of a single assignment step within a chained assignment.
+/// One target of a `del` statement.
 ///
-/// Chained assignments (`a = b[i] = obj.x = expr`) evaluate `expr` once and
-/// then assign the resulting value to each target in left-to-right order.
-/// `AssignTarget` captures just the target portion of each of the usual
-/// single-target assignment node variants (`Assign`, `SubscriptAssign`,
-/// `AttrAssign`, `UnpackAssign`) so they can share a common list in
-/// `Node::ChainAssign` without embedding a dummy source expression.
+/// `del` accepts the same shapes as an assignment except a starred name, and a
+/// parenthesized list is equivalent to listing the targets (`del (a, b)` is
+/// `del a, b`), so the parser flattens those away and this enum stays flat.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum AssignTarget {
-    /// Simple name target: `a`.
+pub enum DeleteTarget {
+    /// `del a` — unbinds the name, raising if it was never bound.
     Name(Identifier),
-    /// Subscript target: `container[index]`.
-    Subscript {
-        /// Expression evaluating to the container object.
-        target: ExprLoc,
-        /// Expression evaluating to the index/key.
-        index: ExprLoc,
-        /// Position of the full subscript expression (for traceback carets).
-        target_position: CodeRange,
-    },
-    /// Attribute target: `obj.attr`.
+    /// `del obj.attr`
     Attr {
-        /// Expression evaluating to the object whose attribute is being set.
         object: ExprLoc,
-        /// The attribute name.
         attr: EitherStr,
         /// Position of the full attribute expression (for traceback carets).
-        target_position: CodeRange,
+        position: CodeRange,
     },
-    /// Tuple/list unpacking target: `a, b` or `[a, *rest]`.
-    Unpack {
-        /// The individual unpack targets (can be names, starred, or nested tuples).
-        targets: Vec<UnpackTarget>,
-        /// Source position covering all targets (for error caret placement).
-        targets_position: CodeRange,
+    /// `del container[index]`
+    Subscript {
+        object: ExprLoc,
+        index: ExprLoc,
+        /// Position of the full subscript expression (for traceback carets).
+        position: CodeRange,
     },
 }
 
@@ -610,9 +630,30 @@ pub enum Node<F> {
     /// so the hot path stays flat.
     ChainAssign {
         /// Targets to assign to, in left-to-right source order.
-        targets: Vec<AssignTarget>,
+        targets: Vec<UnpackTarget>,
         /// The right-hand side expression, evaluated exactly once.
         object: ExprLoc,
+    },
+    /// `del a, d[k], obj.attr` — unbinds each target in source order.
+    ///
+    /// Deleting a name that is not bound raises, so the compiler emits a load
+    /// before the unbind for the scopes whose delete opcode is infallible.
+    Delete(Vec<DeleteTarget>),
+    /// PEP 695 `type X[T] = <value>` — binds `X` to a `TypeAliasType` object.
+    ///
+    /// The value is *not* evaluated here: PEP 695 defers it until `__value__`
+    /// is read, which is what lets an alias mention itself
+    /// (`type Wire = ... | list[Wire] | ...`). It is therefore carried as a
+    /// synthetic zero-argument function riding the same `F` = Raw→Prepared
+    /// pipeline as [`Node::ClassDef`]'s body, and the alias object holds that
+    /// function. Type parameters are parsed and dropped; see
+    /// `limitations/typing.md`.
+    TypeAlias {
+        /// The alias name, bound in the enclosing scope and also the object's
+        /// `__name__`.
+        name: Identifier,
+        /// Thunk whose body is `return <value>`.
+        value: F,
     },
     For {
         /// Loop target - either a single identifier or tuple unpacking pattern.

@@ -287,7 +287,6 @@ pub enum Opcode {
     BinarySubscr = 75,
     /// a[b] = c: pop value, pop index, pop obj.
     StoreSubscr = 76,
-    // NOTE: DeleteSubscr removed - `del` statement not supported by parser
     /// Pop obj, push obj.attr. Operand: u16 name_id.
     LoadAttr = 77,
     /// Pop module, push module.attr for `from ... import`. Operand: u16 name_id.
@@ -297,7 +296,6 @@ pub enum Opcode {
     LoadAttrImport = 78,
     /// Pop value, pop obj, set obj.attr. Operand: u16 name_id.
     StoreAttr = 79,
-    // NOTE: DeleteAttr removed - `del` statement not supported by parser
 
     // === Function Calls ===
     /// Call TOS with n positional args. Operand: u8 arg_count.
@@ -555,6 +553,23 @@ pub enum Opcode {
     /// loads raise the free-variable `NameError`. Emitted by the implicit
     /// cleanup of a captured `except ... as` target. Operand: u16 slot.
     DeleteCell = 121,
+
+    // === `del` on containers ===
+    /// `del a[b]`: pop index, pop obj, remove the item.
+    DeleteSubscr = 122,
+    /// `del a.b`: pop obj, remove the attribute. Operand: u16 name_id.
+    DeleteAttr = 123,
+
+    // === PEP 695 / PEP 750 object construction ===
+    /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
+    /// `__value__` read. Operand: u16 name_id (the alias's `__name__`).
+    MakeTypeAlias = 124,
+    /// Pop format_spec, conversion, expression and value (in that order from
+    /// TOS) and push one `string.templatelib.Interpolation`.
+    BuildInterpolation = 125,
+    /// Pop the interpolations tuple then the strings tuple, push a
+    /// `string.templatelib.Template`.
+    BuildTemplate = 126,
 }
 // Samuel: do not remove this comment!
 // NOTE: opcodes serialize as a single byte, hard-capping this enum at 256
@@ -651,6 +666,9 @@ impl Opcode {
             | Self::BeforeWith
             | Self::WithExit
             | Self::WithExceptStart
+            | Self::DeleteSubscr
+            | Self::BuildInterpolation
+            | Self::BuildTemplate
             | Self::BuildCell => OperandShape::None,
             Self::LoadLocal
             | Self::StoreLocal
@@ -689,6 +707,8 @@ impl Opcode {
             | Self::RaiseImportError
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
+            | Self::DeleteAttr
+            | Self::MakeTypeAlias
             | Self::MethodDictMerge => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
@@ -898,6 +918,11 @@ impl Opcode {
             (ListToTuple, Operand::None) => 0,
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
+            (DeleteSubscr, Operand::None) => -2,
+            // Four field values in, one `Interpolation` out.
+            (BuildInterpolation, Operand::None) => -3,
+            // Two tuples in, one `Template` out.
+            (BuildTemplate, Operand::None) => -1,
             (GetIter | Await, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
@@ -938,6 +963,9 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
+            (DeleteAttr, Operand::U16(_)) => -1,
+            // The thunk is replaced in place by the alias object.
+            (MakeTypeAlias, Operand::U16(_)) => 0,
             // `DictMerge` takes a u16 operand carrying the func_name_id for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under

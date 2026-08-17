@@ -71,13 +71,29 @@ fn method_default_walrus_returns_not_implemented_error() {
 }
 
 #[test]
-fn method_decorators_return_not_implemented_error() {
-    let err = get_parse_err("class Foo:\n    @staticmethod\n    def m(): pass");
+fn method_decorator_walrus_returns_not_implemented_error() {
+    // A method decorator is an ordinary expression evaluated in the class-body
+    // scope, so a walrus there would bind a class member and is rejected like
+    // any other class-scope walrus.
+    let err = get_parse_err("class Foo:\n    @(d := staticmethod)\n    def m(): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support method decorators (classmethod/staticmethod/property)"
+        @"The monty syntax parser does not yet support assignment expressions (`:=`) in class bodies"
     );
+}
+
+#[test]
+fn method_decorators_compile_successfully() {
+    // Decorators on a method apply any callable in scope, exactly like they do
+    // on a module-level `def`.
+    let result = MontyRun::new(
+        "def deco(fn):\n    return fn\n\nclass Foo:\n    @deco\n    def m(self): return 1".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "method decorators should compile");
 }
 
 #[test]
@@ -602,11 +618,26 @@ fn matrix_multiplication_augmented_assignment_returns_syntax_error() {
 }
 
 #[test]
-fn del_statement_returns_not_implemented_error() {
-    // The del statement is not supported at parse time
-    let err = get_parse_err("x = 1\ndel x");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support the 'del' statement");
+fn del_of_a_starred_target_returns_syntax_error() {
+    // `del` accepts names, attributes, subscripts and parenthesized lists of
+    // those. A starred target is rejected by ruff's parser before Monty sees
+    // it, so the message is ruff's rather than Monty's; CPython says
+    // "cannot delete starred".
+    let err = get_parse_err("a = [1]\ndel *a,");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"Invalid delete target");
+}
+
+#[test]
+fn del_statement_compiles_successfully() {
+    // Every target shape `del` accepts, in one statement.
+    let result = MontyRun::new(
+        "class C: pass\nc = C()\nc.a = 1\nd = {'k': 1}\nx = 1\ndel x, d['k'], c.a".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "del should compile for every target shape");
 }
 
 #[test]
@@ -689,22 +720,24 @@ fn long_source_line_does_not_overflow_column() {
 
 #[test]
 fn starred_name_target_has_clean_message() {
-    // `*a = [1, 2]`: Ruff parses the LHS as a bare starred target, which
-    // Monty rejects at `parse_identifier`.
+    // `*a = [1, 2]`: a bare starred target is only meaningful inside a pattern.
     let result = MontyRun::new("*a = [1, 2]".to_owned(), "test.py", vec![], CompileOptions::default());
     let exc = result.expect_err("expected parse error");
     assert_eq!(exc.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(exc.message().expect("has message"), @"Expected name, got starred expression");
+    assert_snapshot!(
+        exc.message().expect("has message"),
+        @"starred assignment target must be in a list or tuple"
+    );
 }
 
 #[test]
 fn starred_attribute_target_has_clean_message() {
-    // `*x.y = 1`: starred target wrapping an attribute. Same rejection
-    // path, different inner node shape.
+    // `*x.y = 1`: starred target wrapping an attribute. CPython accepts any
+    // target after `*`; Monty's unpack simulation needs a namespace slot.
     let result = MontyRun::new("*x.y = 1".to_owned(), "test.py", vec![], CompileOptions::default());
     let exc = result.expect_err("expected parse error");
     assert_eq!(exc.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(exc.message().expect("has message"), @"Expected name, got starred expression");
+    assert_snapshot!(exc.message().expect("has message"), @"starred assignment target must be a name");
 }
 
 #[test]
@@ -713,24 +746,48 @@ fn starred_subscript_target_has_clean_message() {
     let result = MontyRun::new("*x[0] = 1".to_owned(), "test.py", vec![], CompileOptions::default());
     let exc = result.expect_err("expected parse error");
     assert_eq!(exc.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(exc.message().expect("has message"), @"Expected name, got starred expression");
+    assert_snapshot!(exc.message().expect("has message"), @"starred assignment target must be a name");
 }
 
 #[test]
-fn for_loop_attribute_target_has_clean_message() {
-    // `for x.y in [1]: pass`: attribute as a for-loop target. CPython
-    // accepts this; Monty currently rejects at `parse_unpack_target_impl`.
-    // That rejection of valid Python is a separate issue; this test locks
-    // only that the error message does not leak `ExprAttribute` Debug.
+fn call_assignment_target_has_clean_message() {
+    // `f() = 1`: a call is not assignable. Ruff's parser rejects it before
+    // Monty's target dispatch runs, so the message is ruff's; what matters is
+    // that it is a sentence and not the `Debug` of an AST node.
+    let result = MontyRun::new("f() = 1".to_owned(), "test.py", vec![], CompileOptions::default());
+    let exc = result.expect_err("expected parse error");
+    assert_eq!(exc.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(exc.message().expect("has message"), @"Invalid assignment target");
+}
+
+#[test]
+fn comprehension_attribute_target_has_clean_message() {
+    // A comprehension's targets live in operand-stack slots, so they cannot
+    // store through an object. CPython accepts this.
     let result = MontyRun::new(
-        "for x.y in [1]: pass".to_owned(),
+        "class C: pass\nc = C()\nr = [1 for c.y in [1]]".to_owned(),
         "test.py",
         vec![],
         CompileOptions::default(),
     );
     let exc = result.expect_err("expected parse error");
-    assert_eq!(exc.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(exc.message().expect("has message"), @"invalid unpacking target: attribute");
+    assert_eq!(exc.exc_type(), ExcType::NotImplementedError);
+    assert_snapshot!(
+        exc.message().expect("has message"),
+        @"The monty syntax parser does not yet support attribute or subscript targets in a comprehension"
+    );
+}
+
+#[test]
+fn for_loop_object_targets_compile_successfully() {
+    // `for x.y in [1]` and `for d['k'] in [1]` are valid Python and now work.
+    let result = MontyRun::new(
+        "class C: pass\nx = C()\nd = {}\nfor x.y in [1]: pass\nfor d['k'] in [1]: pass".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "object targets in a for loop should compile");
 }
 
 #[test]

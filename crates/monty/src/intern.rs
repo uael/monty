@@ -975,6 +975,41 @@ pub enum StaticStrings {
     Filterfalse,
     /// `itertools.starmap()` function.
     Starmap,
+
+    // ==========================
+    // PEP 750 `string.templatelib` strings. `values` reuses the existing
+    // [`Self::Values`] variant, and `__name__` the existing [`Self::DunderName`].
+    // Appended at the enum end: discriminants are serialized `StringId`s, so
+    // mid-enum insertion would shift every later id.
+    /// Module name for `from string.templatelib import ...`. The whole dotted
+    /// path is interned as one string, which is what the import lookup matches.
+    #[strum(serialize = "string.templatelib")]
+    StringTemplatelib,
+    /// The `string.templatelib.Template` type.
+    #[strum(serialize = "Template")]
+    TemplateClass,
+    /// The `string.templatelib.Interpolation` type.
+    #[strum(serialize = "Interpolation")]
+    InterpolationClass,
+    /// `Template.strings` attribute.
+    Strings,
+    /// `Template.interpolations` attribute.
+    Interpolations,
+    /// `Interpolation.value` attribute, distinct from [`Self::Values`].
+    #[strum(serialize = "value")]
+    ValueAttr,
+    /// `Interpolation.expression` attribute.
+    Expression,
+    /// `Interpolation.conversion` attribute.
+    Conversion,
+    /// `Interpolation.format_spec` attribute.
+    FormatSpec,
+
+    // ==========================
+    // PEP 695 type alias strings.
+    /// `TypeAliasType.__value__`, the lazily evaluated alias target.
+    #[strum(serialize = "__value__")]
+    DunderValue,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

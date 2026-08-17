@@ -24,10 +24,10 @@ use crate::{
     types::{
         BoundMethod, Bytes, BytesIterator, Class, Dataclass, Deque, Dict, DictItemIterator, DictItemsView,
         DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet, Instance,
-        ItertoolsIter, LazyHeapSet, List, LongInt, Module, NamedTuple, NamedTupleClass, OpenFile, Path, PyTrait, Range,
-        RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, Tuple, TupleIterator, Type,
-        callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator,
-        str::allocate_string, timedelta, timezone,
+        Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, Module, NamedTuple, NamedTupleClass, OpenFile, Path,
+        PyTrait, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, Template,
+        Tuple, TupleIterator, Type, TypeAliasType, callable_iterator::CallableIterator, date, datetime,
+        deque::DequeIterator, list::ListIterator, str::allocate_string, timedelta, timezone,
     },
     value::{EitherStr, Value},
 };
@@ -192,6 +192,14 @@ pub(crate) enum HeapData {
     /// The `@dataclass(...)` options of a `@dataclass`, held by the class's
     /// `__dataclass_params__` entry.
     DataclassParams(DataclassParams),
+    /// PEP 750 `string.templatelib.Template`: a `t"..."` literal's value.
+    Template(Template),
+    /// PEP 750 `string.templatelib.Interpolation`: one `{...}` field of a
+    /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
+    /// payload ceiling for a type nothing hot allocates.
+    Interpolation(Box<Interpolation>),
+    /// PEP 695 `typing.TypeAliasType`: the value of `type X = ...`.
+    TypeAliasType(TypeAliasType),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -245,7 +253,12 @@ impl HeapData {
             | Self::Module(_)
             | Self::Coroutine(_)
             | Self::GatherFuture(_)
-            | Self::ExternalFuture(_) => true,
+            | Self::ExternalFuture(_)
+            // Templates hold arbitrary interpolated values, and an alias's
+            // memoized `__value__` can reach back to the alias itself.
+            | Self::Template(_)
+            | Self::Interpolation(_)
+            | Self::TypeAliasType(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -337,6 +350,9 @@ impl HeapData {
             Self::SetIterator(_) => Type::SetIterator,
             Self::CallableIterator(_) => Type::CallableIterator,
             Self::Itertools(i) => i.py_type(),
+            Self::Template(_) => Type::Template,
+            Self::Interpolation(_) => Type::Interpolation,
+            Self::TypeAliasType(_) => Type::TypeAliasType,
         }
     }
 }
@@ -521,6 +537,9 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::DateTime($value) => $body,
             Self::TimeDelta($value) => $body,
             Self::TimeZone($value) => $body,
+            Self::Template($value) => $body,
+            Self::Interpolation($value) => $body,
+            Self::TypeAliasType($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -946,6 +965,33 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
         )
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        heap_read_output_py_trait_forward!(
+            self,
+            |item| item.py_delitem(key, vm),
+            else {
+                key.drop_with(vm);
+                Err(ExcType::type_error_no_item_deletion(
+                    &self.py_type(vm).name(vm.heap, vm.interns),
+                ))
+            }
+        )
+    }
+
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
+        heap_read_output_py_trait_forward!(
+            self,
+            |item| item.py_del_attr(name, vm),
+            else {
+                let type_name = self.py_type(vm).name(vm.heap, vm.interns);
+                Err(ExcType::attribute_error_no_setattr(
+                    &type_name,
+                    name.as_str(vm.interns),
+                ))
+            }
+        )
+    }
+
     fn py_set_attr(&mut self, name: &EitherStr, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         heap_read_output_py_trait_forward!(
             self,
@@ -1017,6 +1063,9 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::DateTime(value) => value.py_iter(self_id, vm),
             Self::TimeDelta(value) => value.py_iter(self_id, vm),
             Self::TimeZone(value) => value.py_iter(self_id, vm),
+            Self::Template(value) => value.py_iter(self_id, vm),
+            Self::Interpolation(value) => value.py_iter(self_id, vm),
+            Self::TypeAliasType(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1074,6 +1123,9 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::DateTime(value) => value.py_next(self_id, vm),
             Self::TimeDelta(value) => value.py_next(self_id, vm),
             Self::TimeZone(value) => value.py_next(self_id, vm),
+            Self::Template(value) => value.py_next(self_id, vm),
+            Self::Interpolation(value) => value.py_next(self_id, vm),
+            Self::TypeAliasType(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),

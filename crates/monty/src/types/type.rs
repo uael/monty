@@ -205,6 +205,17 @@ pub enum Type {
     ItertoolsFilterFalse,
     #[strum(serialize = "itertools.starmap")]
     ItertoolsStarMap,
+    /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
+    /// Dotted like `re.Match`; only `__name__` diverges from CPython's bare
+    /// `'Template'`. See `limitations/string_templatelib.md`.
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
+    /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
+    #[strum(serialize = "typing.TypeAliasType")]
+    TypeAliasType,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

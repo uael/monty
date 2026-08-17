@@ -18,6 +18,7 @@ and no way for sandboxed code to load additional modules.
 | `os`           | ./os.md          |
 | `pathlib`      | ./pathlib.md     |
 | `re`           | ./re.md          |
+| `string.templatelib` | ./string_templatelib.md |
 | `sys`          | ./sys.md         |
 | `typing`       | ./typing.md      |
 | `unicodedata`  | ./unicodedata.md |
@@ -25,6 +26,13 @@ and no way for sandboxed code to load additional modules.
 `collections` is importable and exposes `deque`, `Counter`, `defaultdict`,
 and `namedtuple`; `OrderedDict`, `ChainMap`, and the `UserDict` / `UserList`
 / `UserString` wrappers are missing (see ./collections.md).
+
+`string.templatelib` is registered under that full dotted name, so
+`from string.templatelib import Template, Interpolation` and
+`import string.templatelib as tl` work while `import string.templatelib` (no
+alias) is rejected: Monty has no package objects, so the plain form would bind
+a name containing a dot. The `string` package itself is *not* importable, and
+neither is any other `string` submodule (see ./string_templatelib.md).
 
 A `gc` module exposing `collect()` / `enable()` / `disable()` is compiled
 in only under the `test-hooks` Cargo feature, for Monty's own test suite;
@@ -37,9 +45,13 @@ Common modules that are *not* importable in Monty (non-exhaustive):
 `ctypes`, `decimal`, `enum`, `fractions`, `functools`,
 `hashlib`, `heapq`, `hmac`, `http`, `inspect`, `io`,
 `logging`, `multiprocessing`, `operator`, `pickle`, `queue`, `random`,
-`socket`, `string`, `struct`, `subprocess`, `tempfile`, `threading`,
+`socket`, `struct`, `subprocess`, `tempfile`, `threading`,
 `time`, `traceback`, `unittest`, `urllib`, `uuid`, `warnings`, `weakref`,
 `zipfile`, `zlib`.
+
+`string` is a special case: the package itself is not importable (no
+`Template`/`Formatter`/`ascii_letters`), but its `string.templatelib`
+submodule is; see above.
 
 `socket`, `subprocess`, `multiprocessing`, `threading` and `ctypes` are
 excluded because they would breach the sandbox. Others (`functools`, `enum`)

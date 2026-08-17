@@ -27,6 +27,7 @@ pub(crate) mod math;
 pub(crate) mod os;
 pub(crate) mod pathlib;
 pub(crate) mod re;
+pub(crate) mod string_templatelib;
 pub(crate) mod sys;
 pub(crate) mod typing;
 pub(crate) mod unicodedata;
@@ -63,6 +64,9 @@ pub(crate) enum StandardLib {
     /// The `collections` module providing container datatypes: `deque`,
     /// `namedtuple`, `defaultdict`, and `Counter`.
     Collections,
+    /// The `string.templatelib` module exposing the PEP 750 `Template` and
+    /// `Interpolation` type objects (no functions).
+    StringTemplatelib,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -91,6 +95,7 @@ impl StandardLib {
             StaticStrings::Itertools => Some(Self::Itertools),
             StaticStrings::Dataclasses => Some(Self::Dataclasses),
             StaticStrings::Collections => Some(Self::Collections),
+            StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -117,6 +122,7 @@ impl StandardLib {
             Self::Itertools => itertools::create_module(vm),
             Self::Dataclasses => dataclasses::create_module(vm),
             Self::Collections => collections::create_module(vm),
+            Self::StringTemplatelib => string_templatelib::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

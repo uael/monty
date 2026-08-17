@@ -3,6 +3,13 @@
 Monty implements CPython 3.14's format mini-language for f-string
 interpolations. The mini-language is only reachable through f-strings.
 
+A t-string never *applies* a format spec: PEP 750 records the spec's rendered
+text on the `Interpolation` and leaves formatting to the consumer, so
+`t'{x:%Q}'` builds a `Template` carrying `format_spec == '%Q'` where the
+f-string `f'{x:%Q}'` raises. A nested field inside a t-string spec
+(`t'{x:>{w}}'`) *is* evaluated, with `str()` and no spec of its own, exactly as
+CPython renders it. See ./string_templatelib.md.
+
 The other CPython formatting mechanisms are not implemented:
 
 - The `format()` builtin raises `NameError` and the `str.format()` method

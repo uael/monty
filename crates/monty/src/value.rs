@@ -1321,6 +1321,25 @@ impl<'h> PyTrait<'h> for Value {
         }
     }
 
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'_>) -> RunResult<()> {
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_del_attr(name, vm)
+        } else {
+            let type_name = self.py_type_name(vm);
+            Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
+        }
+    }
+
+    fn py_delitem(&mut self, key: Self, vm: &mut VM<'_>) -> RunResult<()> {
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_delitem(key, vm)
+        } else {
+            let type_name = self.py_type_name(vm);
+            key.drop_with(vm);
+            Err(ExcType::type_error_no_item_deletion(&type_name))
+        }
+    }
+
     fn py_is_iterator(&self, vm: &VM<'_>) -> bool {
         // No immediate value is an iterator; interned `str`/`bytes` are iterable
         // but, as in CPython, are not their own iterators.

@@ -1315,6 +1315,20 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
         Ok(())
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        // A missing key raises `KeyError` even on a `defaultdict` or `Counter`:
+        // only reads consult `default_factory` / the implicit zero.
+        match self.pop(key, vm)? {
+            Some((old_key, old_value)) => {
+                old_key.drop_with(vm);
+                old_value.drop_with(vm);
+                Ok(())
+            }
+            None => Err(ExcType::key_error(key, vm)),
+        }
+    }
+
     fn py_call_attr(
         &mut self,
         self_id: HeapId,

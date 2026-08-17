@@ -402,6 +402,19 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Deque> {
         Ok(())
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        let idx = self.resolve_index(key, vm)?;
+        // `contains_refs` stays set: it is a conservative "may contain" flag.
+        let removed = self
+            .get_mut(vm.heap)
+            .items
+            .remove(idx)
+            .expect("index resolved in bounds");
+        removed.drop_with(vm);
+        Ok(())
+    }
+
     fn py_eq_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
         // A deque only ever equals another deque — unlike NamedTuple/tuple, there
         // is no cross-type equality with list. `maxlen` is not part of equality.

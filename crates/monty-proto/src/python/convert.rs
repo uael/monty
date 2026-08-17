@@ -478,6 +478,14 @@ fn type_object_to_py(py: Python<'_>, t: MontyType) -> PyResult<Py<PyAny>> {
         MontyType::BufferedRandom => cached!("io", "BufferedRandom"),
         MontyType::SpecialForm => cached!("typing", "_SpecialForm"),
         MontyType::Field => cached!("dataclasses", "Field"),
+        // Both modules postdate this package's minimum host (`string.templatelib`
+        // is 3.14, `typing.TypeAliasType` is 3.12), so these arms raise on an
+        // older interpreter instead of resolving. Deliberately absent from
+        // `round_trip_type_table`, which imports every entry eagerly and would
+        // then fail wholesale rather than only for these types.
+        MontyType::Template => cached!("string.templatelib", "Template"),
+        MontyType::Interpolation => cached!("string.templatelib", "Interpolation"),
+        MontyType::TypeAliasType => cached!("typing", "TypeAliasType"),
         // `NoneType` and `ellipsis` aren't `builtins` attributes; take them from
         // the singletons (`type(None)` / `type(...)`).
         MontyType::NoneType => Ok(py.None().bind(py).get_type().into_any().unbind()),

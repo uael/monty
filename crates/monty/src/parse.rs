@@ -17,13 +17,14 @@ use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
     exception_private::ExcType,
     expressions::{
-        AssignTarget, Callable, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName, Literal,
+        Callable, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier, ImportName, Literal,
         Node, Operator, SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
     intern::{InternerBuilder, StringId},
     source_map::{SourceMap, StackFrameExt},
     stringize::stringize_annotation,
+    tstring::{ParsedTemplate, TemplateInterpolation},
     types::long_int::INT_MAX_STR_DIGITS,
     value::EitherStr,
 };
@@ -354,11 +355,30 @@ impl<'a> Parser<'a> {
                 Some(value) => Some(self.parse_expression(*value)?),
                 None => None,
             })),
-            Stmt::Delete(d) => Err(ParseError::not_implemented(
-                "the 'del' statement",
-                self.convert_range(d.range),
-            )),
-            Stmt::TypeAlias(t) => Err(ParseError::not_implemented("type aliases", self.convert_range(t.range))),
+            Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+                let mut parsed = Vec::with_capacity(targets.len());
+                for target in targets {
+                    self.parse_delete_targets(target, &mut parsed)?;
+                }
+                Ok(Node::Delete(parsed))
+            }
+            Stmt::TypeAlias(ast::StmtTypeAlias {
+                name,
+                type_params,
+                value,
+                ..
+            }) => {
+                // Type parameters are parsed for their syntax only; see
+                // `check_type_params`.
+                self.check_type_params(type_params.as_deref())?;
+                let name = self.parse_identifier(*name)?;
+                // PEP 695 defers the value until `__value__` is read, which is
+                // what lets an alias mention itself (`type Wire = ... list[Wire]`).
+                // A zero-arg function is exactly that deferral, and reuses the
+                // whole closure/scope pipeline.
+                let value = self.parse_thunk(name, *value)?;
+                Ok(Node::TypeAlias { name, value })
+            }
             Stmt::Assign(ast::StmtAssign {
                 mut targets,
                 value,
@@ -725,6 +745,7 @@ impl<'a> Parser<'a> {
         function: ast::StmtFunctionDef,
     ) -> Result<(RawFunctionDef, Vec<ExprLoc>), ParseError> {
         let decorators = self.parse_decorators(function.decorator_list)?;
+        self.check_type_params(function.type_params.as_deref())?;
 
         let params = &function.parameters;
 
@@ -794,13 +815,15 @@ impl<'a> Parser<'a> {
     /// recorded in `members`, in source order, for namespace assembly.
     ///
     /// `pass` and `...` are ignored; a leading docstring becomes a `__doc__`
-    /// member, and annotated names a stringized `__annotations__`. Class
-    /// decorators are supported (enclosing scope, applied bottom-up);
-    /// inheritance, function/method decorators, and anything else in the body
-    /// are rejected as not-implemented, reserving the syntax for later.
+    /// member, and annotated names a stringized `__annotations__`. Decorators
+    /// are supported on the class and on its methods (evaluated in the
+    /// enclosing scope and the class-body scope respectively, applied
+    /// bottom-up); inheritance and anything else in the body are rejected as
+    /// not-implemented, reserving the syntax for later.
     fn parse_class_def(&mut self, class: ast::StmtClassDef) -> Result<ParseNode, ParseError> {
         let position = self.class_keyword_range(&class);
         let decorators = self.parse_decorators(class.decorator_list)?;
+        self.check_type_params(class.type_params.as_deref())?;
         // `class.arguments` carries base classes and metaclass keywords.
         if class
             .arguments
@@ -834,26 +857,22 @@ impl<'a> Parser<'a> {
         for (i, stmt) in class.body.into_iter().enumerate() {
             match stmt {
                 Stmt::FunctionDef(function) => {
-                    if !function.decorator_list.is_empty() {
-                        return Err(ParseError::not_implemented(
-                            "method decorators (classmethod/staticmethod/property)",
-                            self.convert_range(function.range),
-                        ));
+                    // A decorator expression and a parameter default both evaluate
+                    // in the class-body scope, so a walrus target in either would
+                    // become a class member (see `reject_class_body_walrus`);
+                    // walrus in the method *body* binds in the method scope and is
+                    // fine.
+                    for decorator in &function.decorator_list {
+                        self.reject_class_body_walrus(&decorator.expression)?;
                     }
-                    // Parameter defaults evaluate in the class-body scope, so a
-                    // walrus target there would become a class member (see
-                    // `reject_class_body_walrus`); walrus in the method *body*
-                    // binds in the method scope and is fine.
                     for param in function.parameters.iter_non_variadic_params() {
                         if let Some(default) = &param.default {
                             self.reject_class_body_walrus(default)?;
                         }
                     }
                     let (method, decorators) = self.parse_function_def(function)?;
-                    // Rejected above, so a decorated method never reaches the
-                    // class namespace — where a decorator's return value, not a
-                    // function, would end up bound as the member.
-                    debug_assert!(decorators.is_empty(), "method decorators are rejected above");
+                    // The member is bound to whatever the decorators return, since
+                    // the namespace is assembled from the body's final local values.
                     members.push(method.name);
                     body.push(Node::FunctionDef {
                         def: method,
@@ -910,6 +929,21 @@ impl<'a> Parser<'a> {
                             self.convert_range(range),
                         ));
                     }
+                }
+                // `type X = ...` binds a `TypeAliasType` member, like a class var
+                // whose value is deferred.
+                Stmt::TypeAlias(ast::StmtTypeAlias {
+                    name,
+                    type_params,
+                    value,
+                    ..
+                }) => {
+                    self.check_type_params(type_params.as_deref())?;
+                    self.reject_class_body_walrus(&value)?;
+                    let alias = self.parse_identifier(*name)?;
+                    let value = self.parse_thunk(alias, *value)?;
+                    members.push(alias);
+                    body.push(Node::TypeAlias { name: alias, value });
                 }
                 // `pass` and `...` (the common `class C: ...` stub idiom) are
                 // no-ops. A leading string literal is the class docstring and
@@ -1079,46 +1113,41 @@ impl<'a> Parser<'a> {
 
     /// `lhs = rhs` — parses a single-target assignment into the appropriate `Node` variant.
     ///
-    /// Dispatches on the shape of `lhs` by delegating to `parse_assign_target`, then wraps
-    /// the resulting `AssignTarget` together with the parsed RHS into one of the flat
-    /// per-shape node variants (`Assign`/`SubscriptAssign`/`AttrAssign`/`UnpackAssign`).
+    /// Dispatches on the shape of `lhs` by delegating to `parse_top_level_target`, then
+    /// wraps the resulting [`UnpackTarget`] together with the parsed RHS into one of the
+    /// flat per-shape node variants (`Assign`/`SubscriptAssign`/`AttrAssign`/`UnpackAssign`).
     /// Handles simple assignments (`x = value`), subscript assignments (`dict[key] = value`),
     /// attribute assignments (`obj.attr = value`), and tuple/list unpacking (`a, b = value`).
     fn parse_assignment(&mut self, lhs: AstExpr, rhs: AstExpr) -> Result<ParseNode, ParseError> {
         // Parse the target first so sub-expression evaluation order (container, index, ...)
         // stays consistent with per-shape parsing done before the refactor.
-        let target = self.parse_assign_target(lhs)?;
+        let target = self.parse_top_level_target(lhs)?;
         let rhs = self.parse_expression(rhs)?;
         let node = match target {
-            AssignTarget::Name(target) => Node::Assign { target, object: rhs },
-            AssignTarget::Subscript {
-                target,
+            UnpackTarget::Name(target) => Node::Assign { target, object: rhs },
+            UnpackTarget::Subscript {
+                object,
                 index,
-                target_position,
+                position,
             } => Node::SubscriptAssign {
-                target,
+                target: object,
                 index,
                 value: rhs,
-                target_position,
+                target_position: position,
             },
-            AssignTarget::Attr {
+            UnpackTarget::Attr { object, attr, position } => Node::AttrAssign {
                 object,
                 attr,
-                target_position,
-            } => Node::AttrAssign {
-                object,
-                attr,
-                target_position,
+                target_position: position,
                 value: rhs,
             },
-            AssignTarget::Unpack {
+            UnpackTarget::Tuple { targets, position } => Node::UnpackAssign {
                 targets,
-                targets_position,
-            } => Node::UnpackAssign {
-                targets,
-                targets_position,
+                targets_position: position,
                 object: rhs,
             },
+            // Rejected by `parse_top_level_target`.
+            UnpackTarget::Starred(_) => unreachable!("bare starred target rejected above"),
         };
         Ok(node)
     }
@@ -1132,7 +1161,7 @@ impl<'a> Parser<'a> {
     fn parse_chained_assignment(&mut self, targets: Vec<AstExpr>, rhs: AstExpr) -> Result<ParseNode, ParseError> {
         let parsed_targets = targets
             .into_iter()
-            .map(|t| self.parse_assign_target(t))
+            .map(|t| self.parse_top_level_target(t))
             .collect::<Result<Vec<_>, _>>()?;
         let object = self.parse_expression(rhs)?;
         Ok(Node::ChainAssign {
@@ -1141,51 +1170,114 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parses a single assignment target expression into an `AssignTarget`.
+    /// Parses an assignment target that is *not* inside a tuple pattern.
     ///
-    /// Central dispatch for assignment-target shapes, shared by `parse_assignment`
-    /// (for single-target and annotation-driven assignments) and
-    /// `parse_chained_assignment` (for `a = b = value`). Keeping shape dispatch in one
-    /// place means adding a new target form only requires updating this function and
-    /// its downstream consumers (prepare and compiler).
-    fn parse_assign_target(&mut self, lhs: AstExpr) -> Result<AssignTarget, ParseError> {
-        match lhs {
+    /// Identical to [`parse_unpack_target`](Self::parse_unpack_target) except that a
+    /// bare `*x` is rejected: a starred target only makes sense as one element of a
+    /// pattern, so `*a = [1, 2]` is a `SyntaxError` in CPython too.
+    fn parse_top_level_target(&mut self, lhs: AstExpr) -> Result<UnpackTarget, ParseError> {
+        let position = self.convert_range(lhs.range());
+        match self.parse_unpack_target(lhs)? {
+            UnpackTarget::Starred(_) => Err(ParseError::syntax(
+                "starred assignment target must be in a list or tuple",
+                position,
+            )),
+            target => Ok(target),
+        }
+    }
+
+    /// Flattens one `del` target expression into `out`.
+    ///
+    /// A parenthesized list (`del (a, b)`) deletes each element, exactly as
+    /// `del a, b` does, so it is flattened away here and [`DeleteTarget`] stays
+    /// a flat three-shape enum.
+    fn parse_delete_targets(&mut self, target: AstExpr, out: &mut Vec<DeleteTarget>) -> Result<(), ParseError> {
+        self.decr_depth_remaining(|| target.range())?;
+        let result = match target {
+            AstExpr::Name(ast::ExprName { id, range, .. }) => {
+                out.push(DeleteTarget::Name(self.identifier(&id, range)));
+                Ok(())
+            }
+            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => {
+                let position = self.convert_range(range);
+                let object = self.parse_expression(*value)?;
+                out.push(DeleteTarget::Attr {
+                    object,
+                    attr: EitherStr::Interned(self.interner.intern(attr.id())),
+                    position,
+                });
+                Ok(())
+            }
             AstExpr::Subscript(ast::ExprSubscript {
                 value, slice, range, ..
-            }) => Ok(AssignTarget::Subscript {
-                target: self.parse_expression(*value)?,
-                index: self.parse_expression(*slice)?,
-                target_position: self.convert_range(range),
-            }),
-            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => Ok(AssignTarget::Attr {
-                object: self.parse_expression(*value)?,
-                attr: EitherStr::Interned(self.interner.intern(attr.id())),
-                target_position: self.convert_range(range),
-            }),
-            AstExpr::Tuple(ast::ExprTuple { elts, range, .. }) => {
-                let targets_position = self.convert_range(range);
-                let targets = elts
-                    .into_iter()
-                    .map(|e| self.parse_unpack_target(e))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(AssignTarget::Unpack {
-                    targets,
-                    targets_position,
-                })
+            }) => {
+                let position = self.convert_range(range);
+                let object = self.parse_expression(*value)?;
+                let index = self.parse_expression(*slice)?;
+                out.push(DeleteTarget::Subscript {
+                    object,
+                    index,
+                    position,
+                });
+                Ok(())
             }
-            AstExpr::List(ast::ExprList { elts, range, .. }) => {
-                let targets_position = self.convert_range(range);
-                let targets = elts
-                    .into_iter()
-                    .map(|e| self.parse_unpack_target(e))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(AssignTarget::Unpack {
-                    targets,
-                    targets_position,
-                })
+            AstExpr::Tuple(ast::ExprTuple { elts, .. }) | AstExpr::List(ast::ExprList { elts, .. }) => {
+                for elt in elts {
+                    self.parse_delete_targets(elt, out)?;
+                }
+                Ok(())
             }
-            other => Ok(AssignTarget::Name(self.parse_identifier(other)?)),
+            // CPython: `SyntaxError: cannot delete starred`.
+            AstExpr::Starred(s) => Err(ParseError::syntax("cannot delete starred", self.convert_range(s.range))),
+            other => Err(ParseError::syntax(
+                format!("cannot delete {}", describe_expr_kind(&other)),
+                self.convert_range(other.range()),
+            )),
+        };
+        self.depth_remaining += 1;
+        result
+    }
+
+    /// Wraps `value` in a synthetic zero-argument function named `name`.
+    ///
+    /// The thunk rides the ordinary function pipeline (prepare resolves its
+    /// scope, the compiler emits a `MakeFunction`/`MakeClosure`), which is how a
+    /// deferred expression gets closure capture for free. Used for PEP 695 type
+    /// alias values, whose evaluation must be postponed until `__value__` is read.
+    fn parse_thunk(&mut self, name: Identifier, value: AstExpr) -> Result<RawFunctionDef, ParseError> {
+        // The synthetic `return` adds a nesting level the source did not have.
+        self.decr_depth_remaining(|| value.range())?;
+        let result = self.parse_expression(value);
+        self.depth_remaining += 1;
+        let body = vec![Node::Return(Some(result?))];
+        Ok(RawFunctionDef {
+            name,
+            signature: ParsedSignature::default(),
+            body,
+            is_async: false,
+        })
+    }
+
+    /// Accepts PEP 695 type parameters (`def f[T]`, `class C[T]`, `type X[T] = ...`)
+    /// without giving them runtime meaning.
+    ///
+    /// Monty stringizes annotations (see `limitations/typing.md`), so a type
+    /// parameter is never *evaluated* in the position that motivates it. Binding
+    /// one would mean inventing a `TypeVar` object, so the names are dropped
+    /// instead and a body that reads one raises `NameError` — see
+    /// `limitations/typing.md`. The bounds/defaults are still walked for the
+    /// nesting-depth budget, since nothing else will look at them.
+    fn check_type_params(&mut self, type_params: Option<&ast::TypeParams>) -> Result<(), ParseError> {
+        for param in type_params.into_iter().flat_map(|p| p.iter()) {
+            let bound = match param {
+                ast::TypeParam::TypeVar(t) => t.bound.as_deref(),
+                ast::TypeParam::TypeVarTuple(_) | ast::TypeParam::ParamSpec(_) => None,
+            };
+            for expr in [bound, param.default()].into_iter().flatten() {
+                self.check_expression_depth(expr)?;
+            }
         }
+        Ok(())
     }
 
     /// Parses an expression from the ruff AST into Monty's ExprLoc representation.
@@ -1545,10 +1637,7 @@ impl<'a> Parser<'a> {
                 }
             }
             AstExpr::FString(ast::ExprFString { value, range, .. }) => self.parse_fstring(&value, range),
-            AstExpr::TString(t) => Err(ParseError::not_implemented(
-                "template strings (t-strings)",
-                self.convert_range(t.range),
-            )),
+            AstExpr::TString(ast::ExprTString { value, range, .. }) => self.parse_tstring(&value, range),
             AstExpr::StringLiteral(ast::ExprStringLiteral { value, range, .. }) => {
                 let string_id = self.interner.intern(&value.to_string());
                 Ok(ExprLoc::new(
@@ -1845,9 +1934,10 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Parses an unpack target - either a single identifier or a nested tuple.
+    /// Parses an assignment/binding target of any shape.
     ///
-    /// Handles patterns like `a` (single variable), `a, b` (flat tuple), or `(a, b), c` (nested).
+    /// Handles `a`, `obj.attr`, `d[k]`, `a, b`, `(a, b), c` and `a, *rest`, in
+    /// assignments, `for` targets, `with` targets and comprehension targets alike.
     /// Includes depth tracking to prevent stack overflow from deeply nested structures.
     fn parse_unpack_target(&mut self, ast: AstExpr) -> Result<UnpackTarget, ParseError> {
         self.decr_depth_remaining(|| ast.range())?;
@@ -1859,27 +1949,41 @@ impl<'a> Parser<'a> {
     fn parse_unpack_target_impl(&mut self, ast: AstExpr) -> Result<UnpackTarget, ParseError> {
         match ast {
             AstExpr::Name(ast::ExprName { id, range, .. }) => Ok(UnpackTarget::Name(self.identifier(&id, range))),
-            AstExpr::Tuple(ast::ExprTuple { elts, range, .. }) => {
+            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => Ok(UnpackTarget::Attr {
+                object: self.parse_expression(*value)?,
+                attr: EitherStr::Interned(self.interner.intern(attr.id())),
+                position: self.convert_range(range),
+            }),
+            AstExpr::Subscript(ast::ExprSubscript {
+                value, slice, range, ..
+            }) => Ok(UnpackTarget::Subscript {
+                object: self.parse_expression(*value)?,
+                index: self.parse_expression(*slice)?,
+                position: self.convert_range(range),
+            }),
+            // `(a, b)` and `[a, b]` are the same pattern; Python assigns from any
+            // iterable regardless of which bracket the target used.
+            AstExpr::Tuple(ast::ExprTuple { elts, range, .. }) | AstExpr::List(ast::ExprList { elts, range, .. }) => {
                 let position = self.convert_range(range);
                 let targets = elts
                     .into_iter()
-                    .map(|e| self.parse_unpack_target(e)) // Recursive call for nested tuples
+                    .map(|e| self.parse_unpack_target(e)) // Recursive call for nested patterns
                     .collect::<Result<Vec<_>, _>>()?;
                 if targets.is_empty() {
-                    return Err(ParseError::syntax("empty tuple in unpack target", position));
-                }
-                // Validate at most one starred target
-                let starred_count = targets.iter().filter(|t| matches!(t, UnpackTarget::Starred(_))).count();
-                if starred_count > 1 {
-                    return Err(ParseError::syntax(
+                    Err(ParseError::syntax("empty pattern in unpack target", position))
+                } else if targets.iter().filter(|t| matches!(t, UnpackTarget::Starred(_))).count() > 1 {
+                    Err(ParseError::syntax(
                         "multiple starred expressions in assignment",
                         position,
-                    ));
+                    ))
+                } else {
+                    Ok(UnpackTarget::Tuple { targets, position })
                 }
-                Ok(UnpackTarget::Tuple { targets, position })
             }
             AstExpr::Starred(ast::ExprStarred { value, range, .. }) => {
-                // Starred target must be a simple name
+                // CPython allows any target after `*` (`a, *obj.rest = xs`), but
+                // Monty's unpack simulation treats a starred leaf as a namespace
+                // slot, so only a name is accepted. See `limitations/language.md`.
                 match *value {
                     AstExpr::Name(ast::ExprName { id, range, .. }) => {
                         Ok(UnpackTarget::Starred(self.identifier(&id, range)))
@@ -1889,26 +1993,6 @@ impl<'a> Parser<'a> {
                         self.convert_range(range),
                     )),
                 }
-            }
-            AstExpr::List(ast::ExprList { elts, range, .. }) => {
-                // List unpacking target [a, b, *rest] - same as tuple
-                let position = self.convert_range(range);
-                let targets = elts
-                    .into_iter()
-                    .map(|e| self.parse_unpack_target(e))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if targets.is_empty() {
-                    return Err(ParseError::syntax("empty list in unpack target", position));
-                }
-                // Validate at most one starred target
-                let starred_count = targets.iter().filter(|t| matches!(t, UnpackTarget::Starred(_))).count();
-                if starred_count > 1 {
-                    return Err(ParseError::syntax(
-                        "multiple starred expressions in assignment",
-                        position,
-                    ));
-                }
-                Ok(UnpackTarget::Tuple { targets, position })
             }
             other => Err(ParseError::syntax(
                 format!("invalid unpacking target: {}", describe_expr_kind(&other)),
@@ -2010,6 +2094,112 @@ impl<'a> Parser<'a> {
         }
 
         Ok(ExprLoc::new(self.convert_range(range), Expr::FString(parts)))
+    }
+
+    /// Parses a t-string (PEP 750) into an [`Expr::TString`].
+    ///
+    /// Unlike an f-string nothing is joined: the literal segments and the
+    /// replacement fields stay separate, because a `Template` hands both to its
+    /// consumer. The two vectors are normalized here so `strings` is always one
+    /// longer than `interpolations`, empty segments included, which is the shape
+    /// CPython guarantees.
+    fn parse_tstring(&mut self, value: &ast::TStringValue, range: TextRange) -> Result<ExprLoc, ParseError> {
+        // Field-relative borrow of the source, so interning (which needs
+        // `&mut self.interner`) can happen while a source slice is live.
+        let code = self.code;
+        let mut segments: Vec<String> = vec![String::new()];
+        let mut interpolations = Vec::new();
+
+        for element in value.elements() {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    segments
+                        .last_mut()
+                        .expect("one segment exists before any field")
+                        .push_str(&lit.value);
+                }
+                InterpolatedStringElement::Interpolation(interp) => {
+                    // `t"{x=}"` puts `x=` in the *literal* text, not in the
+                    // interpolation, and makes `repr` the default conversion
+                    // unless the field carries a conversion or a format spec.
+                    let mut conversion = convert_conversion_flag(interp.conversion);
+                    if let Some(debug_text) = &interp.debug_text {
+                        let segment = segments.last_mut().expect("one segment exists before any field");
+                        segment.push_str(debug_text.leading());
+                        segment.push_str(&code[interp.expression.range()]);
+                        segment.push_str(debug_text.trailing());
+                        if matches!(conversion, ConversionFlag::None) && interp.format_spec.is_none() {
+                            conversion = ConversionFlag::Repr;
+                        }
+                    }
+                    // CPython reports the source from just past the `{` to the
+                    // end of the expression, so leading whitespace survives
+                    // (`t"{ x }".interpolations[0].expression == " x"`) while
+                    // trailing whitespace does not.
+                    let open_brace: usize = interp.range().start().into();
+                    let expr_start = if code.as_bytes().get(open_brace) == Some(&b'{') {
+                        open_brace + 1
+                    } else {
+                        open_brace
+                    };
+                    let expr_end: usize = interp.expression.range().end().into();
+                    let expression = self.interner.intern(&code[expr_start..expr_end]);
+                    let format_spec = match &interp.format_spec {
+                        Some(spec) => self.parse_tstring_format_spec(spec)?,
+                        None => Vec::new(),
+                    };
+                    let expr = Box::new(self.parse_expression((*interp.expression).clone())?);
+                    interpolations.push(TemplateInterpolation {
+                        expr,
+                        expression,
+                        conversion,
+                        format_spec,
+                    });
+                    segments.push(String::new());
+                }
+            }
+        }
+
+        let strings = segments.iter().map(|s| self.interner.intern(s)).collect();
+        Ok(ExprLoc::new(
+            self.convert_range(range),
+            Expr::TString(Box::new(ParsedTemplate {
+                strings,
+                interpolations,
+            })),
+        ))
+    }
+
+    /// Parses a t-string field's format spec into parts concatenated at runtime.
+    ///
+    /// A t-string never *applies* a spec, it reports the rendered text, so the
+    /// spec is neither parsed nor bit-packed the way
+    /// [`parse_format_spec`](Self::parse_format_spec) does for an f-string: a
+    /// static spec stays verbatim and a nested field (`t"{x:>{w}}"`) is
+    /// formatted with `str()` and concatenated, matching CPython.
+    fn parse_tstring_format_spec(
+        &mut self,
+        spec: &ast::InterpolatedStringFormatSpec,
+    ) -> Result<Vec<FStringPart>, ParseError> {
+        let mut parts = Vec::with_capacity(spec.elements.len());
+        for element in &spec.elements {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    parts.push(FStringPart::Literal(self.interner.intern(&lit.value)));
+                }
+                InterpolatedStringElement::Interpolation(nested) => {
+                    parts.push(FStringPart::Interpolation {
+                        expr: Box::new(self.parse_expression((*nested.expression).clone())?),
+                        conversion: convert_conversion_flag(nested.conversion),
+                        // Python forbids a spec inside a spec, and `=` there is
+                        // not a debug field.
+                        format_spec: None,
+                        debug_prefix: None,
+                    });
+                }
+            }
+        }
+        Ok(parts)
     }
 
     /// Parses a single f-string element (literal or interpolation).

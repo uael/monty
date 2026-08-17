@@ -149,6 +149,18 @@ pub(crate) trait ExcTypeExt: Sized {
         .into()
     }
 
+    /// Creates a TypeError for item deletion on types that don't support it.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object doesn't support item deletion`
+    #[must_use]
+    fn type_error_no_item_deletion(type_: &str) -> RunError {
+        SimpleException::new_msg(
+            ExcType::TypeError,
+            format!("'{type_}' object doesn't support item deletion"),
+        )
+        .into()
+    }
+
     /// Creates a TypeError for unhashable types when calling `hash()`.
     ///
     /// This matches Python 3.14's error message: `TypeError: unhashable type: 'list'`

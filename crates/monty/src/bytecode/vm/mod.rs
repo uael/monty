@@ -40,7 +40,7 @@ use crate::{
     os_dispatch::{PendingOsEffect, listdir_names, release_pending_effect},
     parse::CodeRange,
     types::{
-        Dict, LongInt, PyTrait,
+        Dict, LongInt, PyTrait, allocate_interpolation, allocate_template, allocate_type_alias,
         file::{apply_buffer_store, apply_write_position},
     },
     value::{EitherStr, Value},
@@ -1392,6 +1392,44 @@ impl<'h> VM<'h> {
                     let name_idx = cached_frame.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch_sync!(self, cached_frame, self.store_attr(name_id));
+                }
+                Opcode::DeleteSubscr => {
+                    // Stack order: obj, index (TOS)
+                    let index = self.pop();
+                    let mut obj = self.pop();
+                    let result = obj.py_delitem(index, self);
+                    obj.drop_with(self);
+                    if let Err(e) = result {
+                        catch_sync!(self, cached_frame, e);
+                    }
+                }
+                Opcode::DeleteAttr => {
+                    let name_idx = cached_frame.fetch_u16();
+                    let name_id = StringId::from_index(name_idx);
+                    try_catch_sync!(self, cached_frame, self.delete_attr(name_id));
+                }
+                Opcode::MakeTypeAlias => {
+                    let name_idx = cached_frame.fetch_u16();
+                    let name_id = StringId::from_index(name_idx);
+                    let thunk = self.pop();
+                    let alias = allocate_type_alias(name_id, thunk, self);
+                    self.push(alias);
+                }
+                Opcode::BuildInterpolation => {
+                    // Stack order: value, expression, conversion, format_spec (TOS)
+                    let format_spec = self.pop();
+                    let conversion = self.pop();
+                    let expression = self.pop();
+                    let value = self.pop();
+                    let interpolation = allocate_interpolation(value, expression, conversion, format_spec, self);
+                    self.push(interpolation);
+                }
+                Opcode::BuildTemplate => {
+                    // Stack order: strings tuple, interpolations tuple (TOS)
+                    let interpolations = self.pop();
+                    let strings = self.pop();
+                    let template = allocate_template(strings, interpolations, self);
+                    self.push(template);
                 }
                 // Control Flow - use cached_frame.ip directly for jumps
                 Opcode::Jump => {

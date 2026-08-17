@@ -43,6 +43,17 @@ extend-exclude = [
     "crates/monty/test_cases/decorator__class_body_traceback.py",
 ]
 
+# The datatest harness runs `crates/monty/test_cases/` against CPython 3.14 only
+# (see `.python-version`), so a fixture may use syntax newer than the package's
+# own `requires-python` floor. Listed per file rather than for the whole
+# directory: raising the target for every fixture also changes how ruff
+# *formats* unrelated ones (3.14 allows unparenthesized `except` groups).
+[tool.ruff.per-file-target-version]
+# PEP 750 t-strings.
+"crates/monty/test_cases/tstring__all.py" = "py314"
+# PEP 695 `type X = ...` and type parameter lists.
+"crates/monty/test_cases/typealias__pep695.py" = "py312"
+
 [tool.uv]
 # this is a monorepo without a root package
 package = false
@@ -200,6 +211,13 @@ reportUntypedNamedTuple = false
 # `break`/`return`/`continue` inside `with` tests bind through Optional outer
 # variables that pyright can't narrow.
 reportOptionalMemberAccess = false
+# PEP 695 alias tests bind `type X = <runtime value>` deliberately: what is
+# under test is the `TypeAliasType` object and its lazily evaluated
+# `__value__`, not whether the right-hand side is a well-formed type.
+reportInvalidTypeForm = false
+# a decorator defined *inside* a class body takes the decorated function, not
+# `self`, which the method-decorator tests exercise
+reportSelfClsParameterName = false
 
 [[tool.pyright.executionEnvironments]]
 root = "crates/monty-type-checking"

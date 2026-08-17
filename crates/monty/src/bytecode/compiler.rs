@@ -23,7 +23,7 @@ use crate::{
     builtins::{Builtins, BuiltinsFunctions},
     exception_private::ExcType,
     expressions::{
-        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier,
+        Callable, CaptureSource, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier,
         Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
@@ -35,6 +35,7 @@ use crate::{
     parse::{CodeRange, ExceptHandler, Try},
     run::CompileOptions,
     source_map::{SourceMap, StackFrameExt},
+    tstring::ParsedTemplate,
     value::{EitherStr, Value},
 };
 
@@ -126,15 +127,30 @@ fn check_comp_generators(count: usize, position: CodeRange) -> Result<(), Compil
     }
 }
 
+/// The single-character `str` CPython stores in `Interpolation.conversion`,
+/// or `None` when the field carries no `!` conversion.
+///
+/// A t-string never applies the conversion; it reports which one was written.
+fn conversion_char(conversion: ConversionFlag) -> Option<u8> {
+    match conversion {
+        ConversionFlag::None => None,
+        ConversionFlag::Str => Some(b's'),
+        ConversionFlag::Repr => Some(b'r'),
+        ConversionFlag::Ascii => Some(b'a'),
+    }
+}
+
 /// Returns a position that locates `target` in source for error reporting.
 ///
-/// `Name` / `Starred` carry the identifier's position; `Tuple` carries its
-/// own. Used by comp-target unpacking when the per-leaf position isn't
-/// available at the error point.
+/// `Name` / `Starred` carry the identifier's position; every other shape
+/// carries its own. Used by comp-target unpacking when the per-leaf position
+/// isn't available at the error point.
 fn target_position(target: &UnpackTarget) -> CodeRange {
     match target {
         UnpackTarget::Name(ident) | UnpackTarget::Starred(ident) => ident.position,
-        UnpackTarget::Tuple { position, .. } => *position,
+        UnpackTarget::Tuple { position, .. }
+        | UnpackTarget::Attr { position, .. }
+        | UnpackTarget::Subscript { position, .. } => *position,
     }
 }
 
@@ -657,6 +673,21 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(object)?;
                 self.emit_unpack_store(targets, *targets_position)?;
             }
+            Node::Delete(targets) => {
+                for target in targets {
+                    self.compile_delete_target(target)?;
+                }
+            }
+            Node::TypeAlias { name, value } => {
+                // The value stays unevaluated inside the alias: PEP 695 defers it
+                // to the first `__value__` read, which is what lets an alias name
+                // itself.
+                self.emit_make_function(value, "type alias value")?;
+                let name_idx = check_name_index_u16(name.name_id, name.position)?;
+                self.code.set_location(name.position, None);
+                self.code.emit_u16(Opcode::MakeTypeAlias, name_idx)?;
+                self.compile_store(name)?;
+            }
             Node::OpAssign { target, op, value } => {
                 let Some(opcode) = operator_to_inplace_opcode(op) else {
                     return Err(CompileError::new(
@@ -754,9 +785,9 @@ impl<'a> Compiler<'a> {
                 if let Some((last, rest)) = targets.split_last() {
                     for target in rest {
                         self.code.emit(Opcode::Dup)?;
-                        self.compile_assign_target(target)?;
+                        self.compile_unpack_target(target)?;
                     }
-                    self.compile_assign_target(last)?;
+                    self.compile_unpack_target(last)?;
                 } else {
                     self.code.emit(Opcode::Pop)?;
                 }
@@ -1103,6 +1134,21 @@ impl<'a> Compiler<'a> {
 
         // Look up the module by name
         if let Some(builtin_module) = StandardLib::from_string_id(module_name) {
+            // A dotted module with no `as` alias would bind a name containing a
+            // dot, which no expression can ever read, where CPython binds the
+            // top-level package. Monty has no package objects, so reject it and
+            // point at the form that does work. See `limitations/modules.md`.
+            if binding.name_id == module_name && self.interns.get_str(module_name).contains('.') {
+                return Err(CompileError::not_implemented(
+                    format!(
+                        "importing a submodule without an alias; use `import {} as <name>` \
+                         or `from {} import <name>`",
+                        self.interns.get_str(module_name),
+                        self.interns.get_str(module_name),
+                    ),
+                    position,
+                ));
+            }
             // Known module - emit LoadModule
             self.code.emit_u8(Opcode::LoadModule, builtin_module as u8)?;
             // Store to the binding (respects Local/Global/Cell scope)
@@ -1392,6 +1438,7 @@ impl<'a> Compiler<'a> {
                 let part_count = self.compile_fstring_parts(parts)?;
                 self.code.emit_u16(Opcode::BuildFString, part_count)?;
             }
+            Expr::TString(template) => self.compile_tstring(template, expr_loc.position)?,
 
             Expr::ListComp {
                 elt,
@@ -3221,6 +3268,16 @@ impl<'a> Compiler<'a> {
             UnpackTarget::Name(ident) | UnpackTarget::Starred(ident) => {
                 sim.push(SimItem::Leaf(ident.namespace_id().as_u16()));
             }
+            // The prepare phase rejects these in a comprehension (every leaf here
+            // must be a comp-var slot). `Node` derives `Deserialize`, so an
+            // untrusted snapshot could still carry one: surface it as a
+            // `CompileError` rather than panicking.
+            UnpackTarget::Attr { position, .. } | UnpackTarget::Subscript { position, .. } => {
+                return Err(CompileError::new(
+                    "internal error: attribute or subscript target in a comprehension",
+                    *position,
+                ));
+            }
             UnpackTarget::Tuple { targets, position } => {
                 // Pick UNPACK_EX vs UNPACK_SEQUENCE based on whether a starred
                 // sub-target is present (same logic as the regular assignment
@@ -3269,73 +3326,24 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// Compiles storage of an unpack target - either a single identifier, nested tuple, or starred.
+    /// Compiles one binding step, assuming the value to bind is on top of stack.
     ///
-    /// For single identifiers: emits a simple store.
-    /// For nested tuples: emits `UnpackSequence` (or `UnpackEx` with starred) and recursively
-    /// handles each sub-target.
+    /// Central per-shape dispatch for stores: each step of a chained assignment,
+    /// each leaf of a tuple pattern, and the single-target `Assign` /
+    /// `SubscriptAssign` / `AttrAssign` / `UnpackAssign` handlers all land here,
+    /// so the emitted store sequences cannot drift apart between those forms.
     fn compile_unpack_target(&mut self, target: &UnpackTarget) -> Result<(), CompileError> {
         match target {
-            UnpackTarget::Name(ident) => {
-                // Single identifier - just store directly
-                self.compile_store(ident)?;
-            }
-            UnpackTarget::Starred(ident) => {
-                // Starred target by itself (shouldn't happen at top level normally)
-                // Just store as if it were a name
-                self.compile_store(ident)?;
-            }
-            UnpackTarget::Tuple { targets, position } => {
-                // Check if there's a starred target
-                let star_idx = targets.iter().position(|t| matches!(t, UnpackTarget::Starred(_)));
-
-                self.code.set_location(*position, None);
-
-                if let Some(star_idx) = star_idx {
-                    // Has starred target - use UnpackEx
-                    let before = check_unpack_targets(star_idx, *position)?;
-                    let after = check_unpack_targets(targets.len() - star_idx - 1, *position)?;
-                    self.code.emit_u8_u8(Opcode::UnpackEx, before, after)?;
-                } else {
-                    // No starred target - use UnpackSequence
-                    let count = check_unpack_targets(targets.len(), *position)?;
-                    self.code.emit_u8(Opcode::UnpackSequence, count)?;
-                }
-
-                // After UnpackSequence/UnpackEx, values are on stack with first item on top
-                // Store them in order, recursively handling further nesting
-                for target in targets {
-                    self.compile_unpack_target(target)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Compiles a single assignment step, assuming the value to assign is on top of stack.
-    ///
-    /// Central per-shape dispatch for assignment stores. Called once per step of a chained
-    /// assignment, and also by the single-target `Node::SubscriptAssign`/`AttrAssign`/
-    /// `UnpackAssign`/`Assign` handlers (after they push the RHS). Keeping this dispatch
-    /// in one place ensures the store sequences stay in sync across single-target and
-    /// chained forms.
-    fn compile_assign_target(&mut self, target: &AssignTarget) -> Result<(), CompileError> {
-        match target {
-            AssignTarget::Name(ident) => self.compile_store(ident)?,
-            AssignTarget::Subscript {
-                target,
-                index,
-                target_position,
-            } => self.emit_subscript_store(target, index, *target_position)?,
-            AssignTarget::Attr {
+            // A lone `*rest` reaches here only as a tuple leaf, where `UnpackEx`
+            // has already collected the remainder into a list.
+            UnpackTarget::Name(ident) | UnpackTarget::Starred(ident) => self.compile_store(ident)?,
+            UnpackTarget::Attr { object, attr, position } => self.emit_attr_store(object, attr, *position)?,
+            UnpackTarget::Subscript {
                 object,
-                attr,
-                target_position,
-            } => self.emit_attr_store(object, attr, *target_position)?,
-            AssignTarget::Unpack {
-                targets,
-                targets_position,
-            } => self.emit_unpack_store(targets, *targets_position)?,
+                index,
+                position,
+            } => self.emit_subscript_store(object, index, *position)?,
+            UnpackTarget::Tuple { targets, position } => self.emit_unpack_store(targets, *position)?,
         }
         Ok(())
     }
@@ -3488,6 +3496,47 @@ impl<'a> Compiler<'a> {
                 self.code.emit_u8(Opcode::Assert, assert_flags(None))?;
             }
         }
+        Ok(())
+    }
+
+    /// Compiles a t-string (PEP 750) into a `string.templatelib.Template`.
+    ///
+    /// Nothing is concatenated: the literal segments become a tuple of `str` and
+    /// each replacement field becomes an `Interpolation` carrying its value plus
+    /// the three pieces of metadata a consumer inspects. Only the *format spec*
+    /// is rendered here, because CPython stores its text after substituting any
+    /// nested field (`t"{x:>{w}}"` records `">5"`).
+    fn compile_tstring(&mut self, template: &ParsedTemplate, position: CodeRange) -> Result<(), CompileError> {
+        let strings_len = u16::try_from(template.strings.len())
+            .map_err(|_| CompileError::new("t-string has too many literal segments", position))?;
+        for string_id in &template.strings {
+            let const_idx = self.code.add_const(Value::InternString(*string_id))?;
+            self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, strings_len)?;
+
+        let interpolations_len = u16::try_from(template.interpolations.len())
+            .map_err(|_| CompileError::new("t-string has too many interpolations", position))?;
+        for interpolation in &template.interpolations {
+            self.compile_expr(&interpolation.expr)?;
+            let expression_idx = self.code.add_const(Value::InternString(interpolation.expression))?;
+            self.code.emit_u16(Opcode::LoadConst, expression_idx)?;
+            match conversion_char(interpolation.conversion) {
+                Some(flag) => {
+                    let const_idx = self.code.add_const(Value::InternString(StringId::from_ascii(flag)))?;
+                    self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+                }
+                None => self.code.emit(Opcode::LoadNone)?,
+            }
+            let spec_parts = self.compile_fstring_parts(&interpolation.format_spec)?;
+            self.code.emit_u16(Opcode::BuildFString, spec_parts)?;
+            self.code.set_location(interpolation.expr.position, None);
+            self.code.emit(Opcode::BuildInterpolation)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, interpolations_len)?;
+
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::BuildTemplate)?;
         Ok(())
     }
 
@@ -3907,6 +3956,57 @@ impl<'a> Compiler<'a> {
                 self.code.emit_u16(Opcode::DeleteCell, slot)?;
             }
             NameScope::CompVar => unreachable!("no syntax exists to `del` a comprehension variable"),
+        }
+        Ok(())
+    }
+
+    /// Compiles one target of a `del` statement.
+    ///
+    /// A name delete is preceded by a load of that name, discarded immediately:
+    /// `DeleteLocal` and `DeleteCell` overwrite the slot unconditionally, so the
+    /// load is what raises the `UnboundLocalError`/`NameError` CPython raises for
+    /// `del` on an unbound name. Module-level and `global` names skip the guard
+    /// because `DeleteGlobal` raises `NameError` itself, and because a
+    /// `LoadGlobal` of an undefined name suspends to the host for an external
+    /// binding, which is not what `del` should do.
+    fn compile_delete_target(&mut self, target: &DeleteTarget) -> Result<(), CompileError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                let needs_guard = match ident.scope {
+                    NameScope::Local => !self.is_module_scope,
+                    NameScope::Cell => true,
+                    NameScope::Global | NameScope::CompVar => false,
+                };
+                if needs_guard {
+                    self.compile_name(ident)?;
+                    self.code.set_location(ident.position, None);
+                    self.code.emit(Opcode::Pop)?;
+                }
+                self.code.set_location(ident.position, None);
+                self.compile_delete(ident)?;
+            }
+            DeleteTarget::Attr { object, attr, position } => {
+                let Some(name_id) = attr.string_id() else {
+                    return Err(CompileError::new(
+                        "internal error: attribute name in AST must be interned",
+                        *position,
+                    ));
+                };
+                let name_idx = check_name_index_u16(name_id, *position)?;
+                self.compile_expr(object)?;
+                self.code.set_location(*position, None);
+                self.code.emit_u16(Opcode::DeleteAttr, name_idx)?;
+            }
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                self.code.set_location(*position, None);
+                self.code.emit(Opcode::DeleteSubscr)?;
+            }
         }
         Ok(())
     }

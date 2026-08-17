@@ -616,12 +616,35 @@ pub(crate) trait PyTrait<'h> {
         .into())
     }
 
+    /// Python subscript delete operation (`__delitem__`), e.g. `del d[key]`.
+    ///
+    /// Consumes `key` on both success and error, like
+    /// [`py_setitem`](PyTrait::py_setitem). The default rejects deletion.
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        key.drop_with(vm);
+        Err(ExcType::type_error_no_item_deletion(
+            &self.py_type(vm).name(vm.heap, vm.interns),
+        ))
+    }
+
     /// Python attribute assignment, consuming `value` on both success and error.
     ///
     /// The default rejects assignment. Mutable attribute-bearing types override
     /// this method and are responsible for releasing any replaced value.
     fn py_set_attr(&mut self, name: &EitherStr, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         value.drop_with(vm);
+        let type_name = self.py_type(vm).name(vm.heap, vm.interns);
+        Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
+    }
+
+    /// Python attribute deletion (`__delattr__`), e.g. `del obj.attr`.
+    ///
+    /// The default rejects deletion, which is right for every built-in type here:
+    /// their attributes are computed, not stored. It reports the same
+    /// "no `__dict__`" wording as assignment because CPython does: a type
+    /// without an instance dict cannot bind or unbind an attribute either way.
+    /// Types with a real `__dict__` override it.
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
         let type_name = self.py_type(vm).name(vm.heap, vm.interns);
         Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
     }

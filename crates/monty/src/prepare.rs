@@ -7,7 +7,7 @@ use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Signature},
     builtins::Builtins,
     expressions::{
-        AssignTarget, Callable, CaptureSource, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName,
+        Callable, CaptureSource, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier, ImportName,
         NameScope, Node, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
     },
     fstring::{FStringPart, FormatSpec},
@@ -15,6 +15,7 @@ use crate::{
     name_map::{NameMap, namespace_overflow},
     namespace::NamespaceId,
     parse::{CodeRange, ExceptHandler, ParseError, ParseNode, ParseResult, ParsedSignature, RawFunctionDef, Try},
+    tstring::{ParsedTemplate, TemplateInterpolation},
 };
 
 /// Mutable handle to the module's global [`NameMap`], threaded through
@@ -797,9 +798,37 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     let object = self.prepare_expression(object)?;
                     let targets = targets
                         .into_iter()
-                        .map(|t| self.prepare_assign_target(t))
+                        .map(|t| self.prepare_unpack_target(t))
                         .collect::<Result<Vec<_>, _>>()?;
                     new_nodes.push(Node::ChainAssign { targets, object });
+                }
+                Node::Delete(targets) => {
+                    let targets = targets
+                        .into_iter()
+                        .map(|t| self.prepare_delete_target(t))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    new_nodes.push(Node::Delete(targets));
+                }
+                Node::TypeAlias {
+                    name,
+                    value:
+                        RawFunctionDef {
+                            name: value_name,
+                            signature,
+                            body,
+                            is_async,
+                        },
+                } => {
+                    // The value thunk is prepared first (it is a nested scope, so
+                    // it captures the *pre*-binding state) and the alias name
+                    // binds afterwards, like any other assignment.
+                    let value = self.prepare_function_def(value_name, &signature, body, is_async)?;
+                    self.names_assigned_in_order.insert(name.name_id);
+                    let name = self.get_id(name)?;
+                    if self.is_class_scope {
+                        self.bound_class_members.insert(name.name_id);
+                    }
+                    new_nodes.push(Node::TypeAlias { name, value });
                 }
                 Node::For {
                     target,
@@ -1151,6 +1180,30 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     .collect::<Result<Vec<_>, ParseError>>()?;
                 Expr::FString(prepared_parts)
             }
+            Expr::TString(template) => {
+                let ParsedTemplate {
+                    strings,
+                    interpolations,
+                } = *template;
+                let interpolations = interpolations
+                    .into_iter()
+                    .map(|interpolation| {
+                        Ok(TemplateInterpolation {
+                            expr: Box::new(self.prepare_expression(*interpolation.expr)?),
+                            format_spec: interpolation
+                                .format_spec
+                                .into_iter()
+                                .map(|part| self.prepare_fstring_part(part))
+                                .collect::<Result<Vec<_>, ParseError>>()?,
+                            ..interpolation
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                Expr::TString(Box::new(ParsedTemplate {
+                    strings,
+                    interpolations,
+                }))
+            }
             Expr::IfElse { test, body, orelse } => Expr::IfElse {
                 test: Box::new(self.prepare_expression(*test)?),
                 body: Box::new(self.prepare_expression(*body)?),
@@ -1412,56 +1465,14 @@ impl<'i, 'g> Prepare<'i, 'g> {
         })
     }
 
-    /// Prepares an `AssignTarget` used by chained assignments.
+    /// Prepares a binding target by resolving identifiers and sub-expressions
+    /// recursively.
     ///
-    /// Resolves identifiers, sub-expressions and nested unpack patterns so that each
-    /// target is ready for the compiler. Name-targets are also recorded in
-    /// `names_assigned_in_order` just like single-target `Node::Assign` would, so the
-    /// observable scope behaviour of `a = b = 1` matches `a = 1; b = 1`.
-    fn prepare_assign_target(&mut self, target: AssignTarget) -> Result<AssignTarget, ParseError> {
-        match target {
-            AssignTarget::Name(ident) => {
-                self.names_assigned_in_order.insert(ident.name_id);
-                let ident = self.get_id(ident)?;
-                Ok(AssignTarget::Name(ident))
-            }
-            AssignTarget::Subscript {
-                target,
-                index,
-                target_position,
-            } => Ok(AssignTarget::Subscript {
-                target: self.prepare_expression(target)?,
-                index: self.prepare_expression(index)?,
-                target_position,
-            }),
-            AssignTarget::Attr {
-                object,
-                attr,
-                target_position,
-            } => Ok(AssignTarget::Attr {
-                object: self.prepare_expression(object)?,
-                attr,
-                target_position,
-            }),
-            AssignTarget::Unpack {
-                targets,
-                targets_position,
-            } => {
-                let targets = targets
-                    .into_iter()
-                    .map(|t| self.prepare_unpack_target(t))
-                    .collect::<Result<_, _>>()?;
-                Ok(AssignTarget::Unpack {
-                    targets,
-                    targets_position,
-                })
-            }
-        }
-    }
-
-    /// Prepares an unpack target by resolving identifiers recursively.
-    ///
-    /// Handles both single identifiers and nested tuples like `(a, b), c`.
+    /// Serves assignments, `for`/`with` targets and every nested pattern. Name
+    /// targets are recorded in `names_assigned_in_order` so `a = b = 1` and
+    /// `a, b = 1, 1` behave for scoping exactly like `a = 1; b = 1`. Attribute
+    /// and subscript targets bind nothing, so they only prepare the expressions
+    /// they read.
     fn prepare_unpack_target(&mut self, target: UnpackTarget) -> Result<UnpackTarget, ParseError> {
         match target {
             UnpackTarget::Name(ident) => {
@@ -1472,6 +1483,20 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 self.names_assigned_in_order.insert(ident.name_id);
                 Ok(UnpackTarget::Starred(self.get_id(ident)?))
             }
+            UnpackTarget::Attr { object, attr, position } => Ok(UnpackTarget::Attr {
+                object: self.prepare_expression(object)?,
+                attr,
+                position,
+            }),
+            UnpackTarget::Subscript {
+                object,
+                index,
+                position,
+            } => Ok(UnpackTarget::Subscript {
+                object: self.prepare_expression(object)?,
+                index: self.prepare_expression(index)?,
+                position,
+            }),
             UnpackTarget::Tuple { targets, position } => {
                 let resolved_targets = targets
                     .into_iter()
@@ -1482,6 +1507,32 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     position,
                 })
             }
+        }
+    }
+
+    /// Prepares one `del` target: resolves a name the way a store does (a `del`
+    /// makes the name local, exactly as an assignment would) and prepares the
+    /// sub-expressions of the container forms.
+    fn prepare_delete_target(&mut self, target: DeleteTarget) -> Result<DeleteTarget, ParseError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                self.names_assigned_in_order.insert(ident.name_id);
+                Ok(DeleteTarget::Name(self.get_id(ident)?))
+            }
+            DeleteTarget::Attr { object, attr, position } => Ok(DeleteTarget::Attr {
+                object: self.prepare_expression(object)?,
+                attr,
+                position,
+            }),
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => Ok(DeleteTarget::Subscript {
+                object: self.prepare_expression(object)?,
+                index: self.prepare_expression(index)?,
+                position,
+            }),
         }
     }
 
@@ -1522,6 +1573,13 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     position,
                 })
             }
+            // A comprehension's unpack is simulated on the operand stack, where
+            // every leaf is a comp-var slot, so a target that stores through an
+            // object has nowhere to live. CPython accepts these; see
+            // `limitations/comprehensions.md`.
+            UnpackTarget::Attr { position, .. } | UnpackTarget::Subscript { position, .. } => Err(
+                ParseError::not_implemented("attribute or subscript targets in a comprehension", position),
+            ),
         }
     }
 
@@ -2379,7 +2437,7 @@ fn collect_scope_info_from_node(
         Node::UnpackAssign { targets, object, .. } => {
             // Recursively collect all names from nested unpack targets
             for target in targets {
-                collect_names_from_unpack_target(target, assigned_names);
+                collect_assigned_names_from_unpack_target(target, assigned_names, interner);
             }
             // Scan value expression for walrus operators
             collect_assigned_names_from_expr(object, assigned_names, interner);
@@ -2419,7 +2477,7 @@ fn collect_scope_info_from_node(
             // Each target sees the same shared RHS; treat it like each per-target
             // assignment would be treated individually.
             for target in targets {
-                collect_assigned_names_from_assign_target(target, assigned_names, interner);
+                collect_assigned_names_from_unpack_target(target, assigned_names, interner);
             }
             collect_assigned_names_from_expr(object, assigned_names, interner);
         }
@@ -2430,7 +2488,7 @@ fn collect_scope_info_from_node(
             or_else,
         } => {
             // For loop target is assigned - collect all names from the target
-            collect_names_from_unpack_target(target, assigned_names);
+            collect_assigned_names_from_unpack_target(target, assigned_names, interner);
             // Scan iter expression for walrus operators
             collect_assigned_names_from_expr(iter, assigned_names, interner);
             // Recurse into body and else
@@ -2484,6 +2542,29 @@ fn collect_scope_info_from_node(
                 collect_assigned_names_from_expr(decorator, assigned_names, interner);
             }
         }
+        Node::TypeAlias { name, .. } => {
+            // Binds the alias name here; the value is a separate scope.
+            assigned_names.insert(name.name_id);
+        }
+        Node::Delete(targets) => {
+            for target in targets {
+                match target {
+                    // `del x` makes `x` local to this scope, exactly as an
+                    // assignment would, so reading it later is an
+                    // `UnboundLocalError` rather than a global read.
+                    DeleteTarget::Name(ident) => {
+                        assigned_names.insert(ident.name_id);
+                    }
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_assigned_names_from_expr(object, assigned_names, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_assigned_names_from_expr(object, assigned_names, interner);
+                        collect_assigned_names_from_expr(index, assigned_names, interner);
+                    }
+                }
+            }
+        }
         Node::Try(Try {
             body,
             handlers,
@@ -2515,7 +2596,7 @@ fn collect_scope_info_from_node(
         } => {
             // The `as TARGET` binds names like a for-loop target does.
             if let Some(t) = target {
-                collect_names_from_unpack_target(t, assigned_names);
+                collect_assigned_names_from_unpack_target(t, assigned_names, interner);
             }
             // Scan the context expression for walrus operators.
             collect_assigned_names_from_expr(context, assigned_names, interner);
@@ -2656,6 +2737,16 @@ fn collect_assigned_names_from_expr(
                 }
             }
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_assigned_names_from_expr(&interpolation.expr, assigned_names, interner);
+                for part in &interpolation.format_spec {
+                    if let FStringPart::Interpolation { expr, .. } = part {
+                        collect_assigned_names_from_expr(expr, assigned_names, interner);
+                    }
+                }
+            }
+        }
         Expr::Slice { lower, upper, step } => {
             if let Some(e) = lower {
                 collect_assigned_names_from_expr(e, assigned_names, interner);
@@ -2777,10 +2868,21 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
             }
         }
+        Node::TypeAlias {
+            value: RawFunctionDef { signature, body, .. },
+            ..
+        } => {
+            // The deferred value is a nested scope of this one, like a `def`.
+            collect_cell_vars_from_function(signature, body, our_locals, cell_vars, interner);
+        }
         // Recurse into control flow structures
         Node::For {
-            iter, body, or_else, ..
+            target,
+            iter,
+            body,
+            or_else,
         } => {
+            collect_cell_vars_from_unpack_target(target, our_locals, cell_vars, interner);
             collect_cell_vars_from_expr(iter, our_locals, cell_vars, interner);
             for n in body {
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
@@ -2828,8 +2930,13 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
             }
         }
-        Node::With { context, body, .. } => {
+        Node::With {
+            context, target, body, ..
+        } => {
             collect_cell_vars_from_expr(context, our_locals, cell_vars, interner);
+            if let Some(target) = target {
+                collect_cell_vars_from_unpack_target(target, our_locals, cell_vars, interner);
+            }
             for n in body {
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
             }
@@ -2839,8 +2946,28 @@ fn collect_cell_vars_from_node(
             collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
         }
         Node::Return(None) => {}
-        Node::Assign { object, .. } | Node::UnpackAssign { object, .. } => {
+        Node::Assign { object, .. } => {
             collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+        }
+        Node::UnpackAssign { targets, object, .. } => {
+            for target in targets {
+                collect_cell_vars_from_unpack_target(target, our_locals, cell_vars, interner);
+            }
+            collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+        }
+        Node::Delete(targets) => {
+            for target in targets {
+                match target {
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+                        collect_cell_vars_from_expr(index, our_locals, cell_vars, interner);
+                    }
+                    DeleteTarget::Name(_) => {}
+                }
+            }
         }
         Node::OpAssign { value, .. } => {
             collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
@@ -2869,7 +2996,7 @@ fn collect_cell_vars_from_node(
         }
         Node::ChainAssign { targets, object } => {
             for target in targets {
-                collect_cell_vars_from_assign_target(target, our_locals, cell_vars, interner);
+                collect_cell_vars_from_unpack_target(target, our_locals, cell_vars, interner);
             }
             collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
         }
@@ -3132,6 +3259,16 @@ fn collect_cell_vars_from_expr(
                 }
             }
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_cell_vars_from_expr(&interpolation.expr, our_locals, cell_vars, interner);
+                for part in &interpolation.format_spec {
+                    if let FStringPart::Interpolation { expr, .. } = part {
+                        collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
+                    }
+                }
+            }
+        }
         Expr::Named { value, .. } => {
             // Only scan the value expression for cell vars
             collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
@@ -3235,8 +3372,27 @@ fn collect_referenced_names_from_node(
         Node::Assign { object, .. } => {
             collect_referenced_names_from_expr(object, referenced, interner);
         }
-        Node::UnpackAssign { object, .. } => {
+        Node::UnpackAssign { targets, object, .. } => {
+            for target in targets {
+                collect_referenced_names_from_unpack_target(target, referenced, interner);
+            }
             collect_referenced_names_from_expr(object, referenced, interner);
+        }
+        Node::Delete(targets) => {
+            for target in targets {
+                match target {
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_referenced_names_from_expr(object, referenced, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_referenced_names_from_expr(object, referenced, interner);
+                        collect_referenced_names_from_expr(index, referenced, interner);
+                    }
+                    // A `del x` reads nothing: the unbind check is emitted
+                    // against this scope's own slot.
+                    DeleteTarget::Name(_) => {}
+                }
+            }
         }
         Node::OpAssign { target, value, .. } => {
             // OpAssign reads the target before writing
@@ -3267,13 +3423,17 @@ fn collect_referenced_names_from_node(
         }
         Node::ChainAssign { targets, object } => {
             for target in targets {
-                collect_referenced_names_from_assign_target(target, referenced, interner);
+                collect_referenced_names_from_unpack_target(target, referenced, interner);
             }
             collect_referenced_names_from_expr(object, referenced, interner);
         }
         Node::For {
-            iter, body, or_else, ..
+            target,
+            iter,
+            body,
+            or_else,
         } => {
+            collect_referenced_names_from_unpack_target(target, referenced, interner);
             collect_referenced_names_from_expr(iter, referenced, interner);
             for n in body {
                 collect_referenced_names_from_node(n, referenced, interner);
@@ -3347,11 +3507,24 @@ fn collect_referenced_names_from_node(
                 collect_referenced_names_from_node(n, referenced, interner);
             }
         }
-        Node::With { context, body, .. } => {
+        Node::With {
+            context, target, body, ..
+        } => {
             collect_referenced_names_from_expr(context, referenced, interner);
+            if let Some(target) = target {
+                collect_referenced_names_from_unpack_target(target, referenced, interner);
+            }
             for n in body {
                 collect_referenced_names_from_node(n, referenced, interner);
             }
+        }
+        Node::TypeAlias {
+            value: RawFunctionDef { signature, body, .. },
+            ..
+        } => {
+            // The deferred value is a nested scope, so its free names are ours,
+            // exactly as for a `def`.
+            collect_nested_function_references(signature, body, referenced, interner);
         }
         // Imports create bindings but don't reference names
         Node::Import { .. } | Node::ImportFrom { .. } => {}
@@ -3443,6 +3616,12 @@ fn collect_referenced_names_from_expr(expr: &ExprLoc, referenced: &mut AHashSet<
         }
         Expr::FString(parts) => {
             collect_referenced_names_from_fstring_parts(parts, referenced, interner);
+        }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_referenced_names_from_expr(&interpolation.expr, referenced, interner);
+                collect_referenced_names_from_fstring_parts(&interpolation.format_spec, referenced, interner);
+            }
         }
         Expr::Subscript { object, index } => {
             collect_referenced_names_from_expr(object, referenced, interner);
@@ -3569,8 +3748,11 @@ fn collect_referenced_names_from_comprehension(
             collect_referenced_names_from_expr(&comp.iter, &mut inner_refs, interner);
         }
 
-        // Add this generator's target(s) to local set
-        collect_names_from_unpack_target(&comp.target, &mut comp_locals);
+        // Add this generator's target(s) to local set. A comprehension target is
+        // always names (`prepare_unpack_target_for_comprehension` rejects
+        // attribute and subscript leaves), so passing the interner only feeds
+        // the unreachable walrus scan.
+        collect_assigned_names_from_unpack_target(&comp.target, &mut comp_locals, interner);
 
         // Filter conditions can see prior loop variables - collect separately
         for cond in &comp.ifs {
@@ -3681,93 +3863,85 @@ fn collect_referenced_names_from_fstring_parts(
     }
 }
 
-/// Collects all names from an unpack target into the given set.
+/// Collects the names a binding target binds, plus any walrus bindings in the
+/// expressions it evaluates.
 ///
-/// Recursively traverses nested tuples to find all identifier names.
-fn collect_names_from_unpack_target(target: &UnpackTarget, names: &mut AHashSet<StringId>) {
-    match target {
-        UnpackTarget::Name(ident) | UnpackTarget::Starred(ident) => {
-            names.insert(ident.name_id);
-        }
-        UnpackTarget::Tuple { targets, .. } => {
-            for t in targets {
-                collect_names_from_unpack_target(t, names);
-            }
-        }
-    }
-}
-
-/// Collects newly-assigned names and walrus bindings introduced by a single chained-assign target.
-///
-/// Mirrors the per-shape logic in `collect_scope_info_from_node` for the non-chained
-/// assignment nodes: name/unpack targets bind new names, while subscript/attribute
-/// targets only scan their sub-expressions for walrus bindings since they mutate an
-/// existing container rather than introducing a new binding.
-fn collect_assigned_names_from_assign_target(
-    target: &AssignTarget,
+/// A name (or starred name) leaf binds; an attribute or subscript leaf mutates
+/// an existing object instead, so it contributes only whatever `:=` its object
+/// and index expressions contain.
+fn collect_assigned_names_from_unpack_target(
+    target: &UnpackTarget,
     assigned_names: &mut AHashSet<StringId>,
     interner: &InternerBuilder,
 ) {
     match target {
-        AssignTarget::Name(ident) => {
+        UnpackTarget::Name(ident) | UnpackTarget::Starred(ident) => {
             assigned_names.insert(ident.name_id);
         }
-        AssignTarget::Subscript { target, index, .. } => {
-            collect_assigned_names_from_expr(target, assigned_names, interner);
-            collect_assigned_names_from_expr(index, assigned_names, interner);
-        }
-        AssignTarget::Attr { object, .. } => {
+        UnpackTarget::Attr { object, .. } => {
             collect_assigned_names_from_expr(object, assigned_names, interner);
         }
-        AssignTarget::Unpack { targets, .. } => {
+        UnpackTarget::Subscript { object, index, .. } => {
+            collect_assigned_names_from_expr(object, assigned_names, interner);
+            collect_assigned_names_from_expr(index, assigned_names, interner);
+        }
+        UnpackTarget::Tuple { targets, .. } => {
             for t in targets {
-                collect_names_from_unpack_target(t, assigned_names);
+                collect_assigned_names_from_unpack_target(t, assigned_names, interner);
             }
         }
     }
 }
 
-/// Collects cell variables referenced by sub-expressions inside a chained-assign target.
+/// Collects cell variables captured by expressions inside a binding target.
 ///
-/// Subscript and attribute targets embed arbitrary expressions that may contain lambdas
-/// capturing enclosing variables; pure name/unpack targets do not carry expressions and
-/// therefore contribute nothing to the cell-variable set.
-fn collect_cell_vars_from_assign_target(
-    target: &AssignTarget,
+/// Only attribute and subscript leaves carry expressions, which may contain
+/// lambdas or comprehensions capturing enclosing variables.
+fn collect_cell_vars_from_unpack_target(
+    target: &UnpackTarget,
     our_locals: &AHashSet<StringId>,
     cell_vars: &mut AHashSet<StringId>,
     interner: &InternerBuilder,
 ) {
     match target {
-        AssignTarget::Subscript { target, index, .. } => {
-            collect_cell_vars_from_expr(target, our_locals, cell_vars, interner);
-            collect_cell_vars_from_expr(index, our_locals, cell_vars, interner);
-        }
-        AssignTarget::Attr { object, .. } => {
+        UnpackTarget::Attr { object, .. } => {
             collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
         }
-        AssignTarget::Name(_) | AssignTarget::Unpack { .. } => {}
+        UnpackTarget::Subscript { object, index, .. } => {
+            collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+            collect_cell_vars_from_expr(index, our_locals, cell_vars, interner);
+        }
+        UnpackTarget::Tuple { targets, .. } => {
+            for t in targets {
+                collect_cell_vars_from_unpack_target(t, our_locals, cell_vars, interner);
+            }
+        }
+        UnpackTarget::Name(_) | UnpackTarget::Starred(_) => {}
     }
 }
 
-/// Collects names referenced (read) by sub-expressions inside a chained-assign target.
+/// Collects names read by a binding target.
 ///
-/// Only subscript and attribute targets read from surrounding state: the container or
-/// object expression must be evaluated at store time. Name and unpack targets do not
-/// reference any names on the read side.
-fn collect_referenced_names_from_assign_target(
-    target: &AssignTarget,
+/// A store through an object still *reads* that object (and a subscript's
+/// index) at store time; a plain name leaf reads nothing.
+fn collect_referenced_names_from_unpack_target(
+    target: &UnpackTarget,
     referenced: &mut AHashSet<StringId>,
     interner: &InternerBuilder,
 ) {
     match target {
-        AssignTarget::Subscript { target, index, .. } => {
-            collect_referenced_names_from_expr(target, referenced, interner);
-            collect_referenced_names_from_expr(index, referenced, interner);
-        }
-        AssignTarget::Attr { object, .. } => {
+        UnpackTarget::Attr { object, .. } => {
             collect_referenced_names_from_expr(object, referenced, interner);
         }
-        AssignTarget::Name(_) | AssignTarget::Unpack { .. } => {}
+        UnpackTarget::Subscript { object, index, .. } => {
+            collect_referenced_names_from_expr(object, referenced, interner);
+            collect_referenced_names_from_expr(index, referenced, interner);
+        }
+        UnpackTarget::Tuple { targets, .. } => {
+            for t in targets {
+                collect_referenced_names_from_unpack_target(t, referenced, interner);
+            }
+        }
+        UnpackTarget::Name(_) | UnpackTarget::Starred(_) => {}
     }
 }

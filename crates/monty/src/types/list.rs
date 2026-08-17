@@ -360,6 +360,45 @@ impl<'h, C: ContainsVM<'h>> DropWithContext<C> for ListIter<'_, 'h> {
     }
 }
 
+impl<'h> HeapRead<'h, List> {
+    /// Resolves a `list[index]` store/delete key to an in-bounds index.
+    ///
+    /// Shared by `py_setitem` and `py_delitem` so both report CPython's
+    /// assignment-flavoured errors (`list indices must be integers or slices`,
+    /// `list assignment index out of range`) rather than the read-flavoured ones.
+    ///
+    /// Accepts `Int`, `Bool` (`True` is 1) and `LongInt`. The `LongInt` arm is
+    /// defensive: `into_value` demotes anything that fits `i64`, so a heap
+    /// `LongInt` here can only come from crafted snapshot data.
+    fn assignment_index(&self, key: &Value, vm: &mut VM<'h>) -> RunResult<usize> {
+        let index = match *key {
+            Value::Int(i) => i,
+            Value::Bool(b) => i64::from(b),
+            Value::Ref(heap_id) => {
+                if let HeapData::LongInt(li) = vm.heap.get(heap_id) {
+                    li.to_i64().ok_or_else(ExcType::index_error_int_too_large)?
+                } else {
+                    let key_type = key.py_type_name(vm);
+                    return Err(ExcType::type_error_list_assignment_indices(&key_type));
+                }
+            }
+            _ => {
+                let key_type = key.py_type_name(vm);
+                return Err(ExcType::type_error_list_assignment_indices(&key_type));
+            }
+        };
+
+        // Normalize negative indices (Python-style: -1 = last element)
+        let len = i64::try_from(self.get(vm.heap).len()).expect("list length exceeds i64::MAX");
+        let normalized_index = if index < 0 { index + len } else { index };
+        if normalized_index < 0 || normalized_index >= len {
+            Err(ExcType::list_assignment_index_error())
+        } else {
+            Ok(usize::try_from(normalized_index).expect("index validated non-negative"))
+        }
+    }
+}
+
 impl<'h> PyTrait<'h> for HeapRead<'h, List> {
     fn py_is_iterable(&self, _vm: &VM<'h>) -> bool {
         true
@@ -418,42 +457,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, List> {
         defer_drop!(key, vm);
         defer_drop_mut!(value, vm);
 
-        // Extract integer index, accepting Int, Bool (True=1, False=0), and LongInt.
-        // Note: The LongInt-to-i64 conversion is defensive code. In normal execution,
-        // heap-allocated LongInt values always exceed i64 range because into_value()
-        // demotes i64-fitting values to Value::Int. However, this could be reached via
-        // deserialization of crafted snapshot data.
-        let index = match *key {
-            Value::Int(i) => i,
-            Value::Bool(b) => i64::from(b),
-            Value::Ref(heap_id) => {
-                if let HeapData::LongInt(li) = vm.heap.get(heap_id) {
-                    if let Some(i) = li.to_i64() {
-                        i
-                    } else {
-                        return Err(ExcType::index_error_int_too_large());
-                    }
-                } else {
-                    let key_type = key.py_type_name(vm);
-                    return Err(ExcType::type_error_list_assignment_indices(&key_type));
-                }
-            }
-            _ => {
-                let key_type = key.py_type_name(vm);
-                return Err(ExcType::type_error_list_assignment_indices(&key_type));
-            }
-        };
-
-        // Normalize negative indices (Python-style: -1 = last element)
-        let len = i64::try_from(self.get(vm.heap).len()).expect("list length exceeds i64::MAX");
-        let normalized_index = if index < 0 { index + len } else { index };
-
-        // Bounds check
-        if normalized_index < 0 || normalized_index >= len {
-            return Err(ExcType::list_assignment_index_error());
-        }
-
-        let idx = usize::try_from(normalized_index).expect("index validated non-negative");
+        let idx = self.assignment_index(key, vm)?;
 
         // Update contains_refs if storing a Ref (must check before swap,
         // since after swap `value` holds the old item)
@@ -464,6 +468,16 @@ impl<'h> PyTrait<'h> for HeapRead<'h, List> {
         // Replace value (old one dropped by defer_drop_mut guard)
         mem::swap(&mut self.get_mut(vm.heap).items[idx], value);
 
+        Ok(())
+    }
+
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        let idx = self.assignment_index(key, vm)?;
+        // `contains_refs` stays set: it is a conservative "may contain" flag, and
+        // clearing it would need a full rescan of the remaining items.
+        let removed = self.get_mut(vm.heap).items.remove(idx);
+        removed.drop_with(vm);
         Ok(())
     }
 

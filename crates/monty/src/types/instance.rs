@@ -91,6 +91,12 @@ impl<'h> HeapRead<'h, Instance> {
     pub fn set_attr_unchecked(&mut self, name: Value, value: Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         self.attrs_mut().set(name, value, vm)
     }
+
+    /// Removes an instance attribute, returning its key and value for the caller
+    /// to drop, or `None` when the instance `__dict__` does not bind `name`.
+    pub fn del_attr(&mut self, name: &Value, vm: &mut VM<'h>) -> RunResult<Option<(Value, Value)>> {
+        self.attrs_mut().pop(name, vm)
+    }
 }
 
 impl<'h> PyTrait<'h> for HeapRead<'h, Instance> {
@@ -115,6 +121,25 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Instance> {
         let old_value = self.set_attr(name, value, vm)?;
         old_value.drop_with(vm);
         Ok(())
+    }
+
+    /// `del obj.attr` removes the instance attribute only. A class-level binding
+    /// of the same name is not touched (and becomes visible again), matching
+    /// CPython; deleting a name only the class binds raises `AttributeError`.
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
+        let key = attribute_name_value(name, vm);
+        defer_drop!(key, vm);
+        if let Some((old_key, old_value)) = self.del_attr(key, vm)? {
+            old_key.drop_with(vm);
+            old_value.drop_with(vm);
+            Ok(())
+        } else {
+            let class_id = self.get(vm.heap).class;
+            Err(ExcType::attribute_error(
+                class_name(class_id, vm.heap, vm.interns),
+                name.as_str(vm.interns),
+            ))
+        }
     }
 
     /// Returns `NotImplemented`; comparisons dispatch at the `Value` level because

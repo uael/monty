@@ -11,22 +11,15 @@ any code runs.
   `__init__`/`__repr__`/`__str__`, class variables of arbitrary expressions).
   Rejected at parse time: base classes / metaclasses (`class Foo(Bar):`) and
   class-body statements other than `def`, a simple `name [: T] = <expr>`
-  assignment, `pass`, or a docstring. There is no inheritance and no general
-  dunder protocol. See ./classes.md.
-- **Decorators** (`@deco`) — supported on classes and on top-level or nested
-  `def`/`async def`, taking any callable in scope, evaluated in the enclosing
-  scope and applied bottom-up. Rejected at parse time on **methods**, so
-  `@classmethod`, `@staticmethod`, `@property` and any decorator on a `def`
-  inside a class body are unavailable. See ./classes.md.
+  assignment, `type X = ...`, `pass`, or a docstring. There is no inheritance
+  and no general dunder protocol. See ./classes.md.
 - **`async with` statements** — not yet supported.
 - **`yield` / `yield from` expressions** — no generator functions. Generator
   *expressions* (`(x for x in ...)`) parse but currently materialize to a
   `list` rather than a lazy iterator, a known temporary divergence; see
   `iter__generator_expr_type.py`.
 - **`match` statements** — structural pattern matching is not supported.
-- **`del` statements** — neither `del x` nor `del d[k]` parse.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
-- **`type` aliases** (PEP 695 `type Foo = int`).
 - **`async for` loops** and **async comprehensions**.
 - **Wildcard imports** (`from m import *`) — raises `ImportError:
   "Wildcard imports (\`from ... import *\`) are not supported"`.
@@ -35,7 +28,50 @@ any code runs.
 
 - **Complex number literals** (`1j`, `2+3j`) — `NotImplementedError: The monty
   syntax parser does not yet support complex constants`.
-- **Template strings (t-strings)** — PEP 750.
+
+## Assignment and binding targets
+
+Any assignable shape works on the left of `=`, as a `for`/`with` target, and as
+an element of a tuple pattern: names, `obj.attr`, `d[k]`, nested patterns, and
+one `*rest` per level. Divergences:
+
+- **A starred target must be a plain name.** `a, *rest = xs` works;
+  `a, *obj.rest = xs` and `a, *d['rest'] = xs` raise `SyntaxError: starred
+  assignment target must be a name`. CPython accepts any target after `*`.
+- **A comprehension target must be names only.** `[x for obj.a in xs]` and
+  `[x for d['k'] in xs]` raise `NotImplementedError: The monty syntax parser
+  does not yet support attribute or subscript targets in a comprehension`.
+  CPython accepts both. Comprehension targets live in operand-stack slots,
+  which have nowhere to store through an object.
+
+## `del`
+
+`del name`, `del obj.attr`, `del container[key]`, several targets in one
+statement (`del a, d[k]`), and a parenthesized list (`del (a, b)`) all work,
+deleting left to right. Divergences:
+
+- **No slice deletion.** `del lst[1:3]` raises `TypeError: list indices must be
+  integers or slices, not slice`, the same error `lst[1:3] = ...` raises, since
+  Monty implements neither slice assignment nor slice deletion.
+- **`del` reaches only real instance attributes.** `del obj.attr` works on an
+  instance of a user class and raises `AttributeError` for every other type,
+  including a `@dataclass` instance and the built-in types whose attributes are
+  computed rather than stored. CPython allows deleting a dataclass instance
+  attribute, and reports `attribute '<name>' is read-only` where Monty reports
+  `has no attribute '<name>' and no __dict__ for setting new attributes`.
+- **Module dunders cannot be deleted.** `del __name__` raises `NameError`,
+  because the module dunders are resolved on read rather than stored (see
+  below). CPython deletes the real module-dict entry.
+
+## PEP 695 type parameters and type aliases
+
+`def f[T](x): ...`, `class C[T]: ...` and `type X[T] = ...` all parse, and the
+`type` statement binds a real `TypeAliasType` object. See ./typing.md for what
+the type parameters do (and do not) mean at runtime.
+
+## Template strings (PEP 750)
+
+`t'...'` builds a `string.templatelib.Template`. See ./string_templatelib.md.
 
 ## Starred unpacking
 
@@ -184,7 +220,11 @@ direct `x == x` (`False` on both). Named tuples inherit all of this from `tuple`
 ## What *does* work
 
 - Functions (`def`, `async def`), nested functions, closures, and decorators on
-  them, but not on methods (see above).
+  them, on classes, and on methods.
+- `del` statements, and attribute / subscript targets in assignments,
+  `for` targets and `with` targets (see above).
+- PEP 695 `type X = ...` aliases and type parameters on `def`/`class`.
+- PEP 750 template strings (`t'...'`).
 - List / dict / set comprehensions; generator comprehensions degrade to
   lists (see above).
 - `try` / `except` / `else` / `finally`, `raise ... from ...`.

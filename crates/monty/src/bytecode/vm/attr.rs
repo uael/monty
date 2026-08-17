@@ -3,9 +3,10 @@
 use super::VM;
 use crate::{
     bytecode::vm::CallResult,
-    defer_drop,
+    defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError},
     intern::StringId,
+    types::PyTrait,
     value::EitherStr,
 };
 
@@ -58,5 +59,18 @@ impl VM<'_> {
         let value = this.pop();
         // py_set_attr takes ownership of value and drops it on error
         obj.py_set_attr(&EitherStr::Interned(name_id), value, this)
+    }
+
+    /// Removes an attribute from an object (`del obj.attr`).
+    ///
+    /// Returns an AttributeError when the object has no such attribute, or does
+    /// not support attribute deletion at all.
+    pub(super) fn delete_attr(&mut self, name_id: StringId) -> Result<(), RunError> {
+        let this = self;
+
+        let obj = this.pop();
+        defer_drop_mut!(obj, this);
+
+        obj.py_del_attr(&EitherStr::Interned(name_id), this)
     }
 }
