@@ -193,9 +193,10 @@ impl Dict {
     /// a `defaultdict` factory.
     ///
     /// Exhaustive over [`DictKind`] on purpose: every operation that builds a
-    /// *new* dict from an existing one (`copy`, and any future `|` / slice-like
-    /// derivation) must carry the tag across, and a hand-written `if
-    /// is_defaultdict()` chain silently degrades a `Counter` to a plain dict.
+    /// *new* dict from an existing one (`copy`, `|`'s `union_kind`, and any
+    /// future slice-like derivation) must carry the tag across, and a
+    /// hand-written `if is_defaultdict()` chain silently degrades a `Counter` to
+    /// a plain dict.
     #[must_use]
     pub fn cloned_kind(&self, heap: &impl ContainsHeap) -> DictKind {
         match self.kind.0.as_deref() {
@@ -1080,10 +1081,11 @@ impl<'h> HeapRead<'h, Dict> {
         Ok(())
     }
 
-    /// Clones every entry as a refcount-bumped `(key, value)` pair, for the
-    /// Counter repr: printing runs user `__repr__` code against indices from
-    /// the ordering pass, so live indices would panic or skew once that code
-    /// mutates the Counter — and CPython's `most_common()` snapshots the same way.
+    /// Clones every entry as a refcount-bumped `(key, value)` pair, so the work
+    /// that follows cannot observe shifted indices: both callers run user code
+    /// that may mutate this dict (the Counter repr's `__repr__`, a key's
+    /// `__hash__`/`__eq__` while `|` fills the new dict), and CPython's
+    /// `most_common()` snapshots for that same reason.
     ///
     /// Preflights the slot bytes so an over-budget clone raises a graceful
     /// `MemoryError` instead of bursting past the allocator's hard limit.
@@ -1233,8 +1235,14 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
         self.counter_binary(other, CounterOp::And, vm, self_id)
     }
 
+    /// `|` is the Counter algebra between two Counters and the dict union
+    /// otherwise, in that order: CPython reaches `dict.__or__` only once
+    /// `Counter.__or__` has returned `NotImplemented` for a non-Counter.
     fn py_or_impl(&self, other: &Value, vm: &mut VM<'h>, self_id: Option<HeapId>) -> RunResult<Option<Value>> {
-        self.counter_binary(other, CounterOp::Or, vm, self_id)
+        match self.counter_binary(other, CounterOp::Or, vm, self_id)? {
+            Some(counter) => Ok(Some(counter)),
+            None => self.dict_union(other, vm),
+        }
     }
 
     fn py_iadd_impl(&mut self, other: &Value, vm: &mut VM<'h>, self_id: Option<HeapId>) -> RunResult<bool> {
@@ -1249,8 +1257,19 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Dict> {
         self.counter_inplace(other, CounterOp::And, vm, self_id)
     }
 
+    /// `|=` on a non-Counter dict is `update`: it keeps the left operand's
+    /// identity and kind, and takes either a dict or an iterable of pairs. It
+    /// therefore always owns the operation, error paths included: `{} |= 3`
+    /// raises `update`'s `'int' object is not iterable`, never the
+    /// `unsupported operand type(s)` a `false` here would fall back to.
     fn py_ior_impl(&mut self, other: &Value, vm: &mut VM<'h>, self_id: Option<HeapId>) -> RunResult<bool> {
-        self.counter_inplace(other, CounterOp::Or, vm, self_id)
+        if self.counter_inplace(other, CounterOp::Or, vm, self_id)? {
+            Ok(true)
+        } else {
+            let other = other.clone_with_heap(vm);
+            self.merge_from_value(other, vm)?;
+            Ok(true)
+        }
     }
 
     fn py_repr_fmt(&self, f: &mut impl Write, vm: &mut VM<'h>, heap_ids: &mut LazyHeapSet) -> RunResult<()> {
@@ -1506,6 +1525,62 @@ impl<'h> HeapRead<'h, Dict> {
         match self_id {
             Some(id) if self.get(vm.heap).is_counter() => Ok(Some(counter_unary_op(id, negate, vm)?)),
             _ => Ok(None),
+        }
+    }
+
+    /// Builds `self | other`: a fresh dict holding self's items in insertion
+    /// order then other's, where a colliding key keeps its left-hand position
+    /// but takes the right's value, i.e. `{**self, **other}`.
+    ///
+    /// Reports `None` for anything but a dict on the right, so the caller raises
+    /// its ordinary `TypeError`; `dict.__or__` accepts only a dict, unlike `|=`,
+    /// which takes everything `update` takes.
+    fn dict_union(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
+        let Some(other_id) = other.ref_id() else {
+            return Ok(None);
+        };
+        if !matches!(vm.heap.get(other_id), HeapData::Dict(_)) {
+            return Ok(None);
+        }
+
+        let pairs = self.clone_all_pairs(vm)?;
+        // `kind` owns a cloned factory reference, so it is guarded from here:
+        // `from_pairs` can raise (a key's `__hash__`, the memory limit) and
+        // would otherwise drop it through Rust's `Drop`, leaking that refcount.
+        let mut kind_guard = DropGuard::new(self.union_kind(other_id, vm), vm);
+        let mut result = Dict::from_pairs(pairs, kind_guard.ctx())?;
+        result.set_kind(kind_guard.into_inner());
+
+        // The right half runs `update`'s merge, which can raise the same way, so
+        // the half-built dict needs a guard of its own until it reaches the heap.
+        let mut result_guard = DropGuard::new(result, vm);
+        {
+            let (result, vm) = result_guard.as_parts_mut();
+            let other = other.clone_with_heap(vm);
+            dict_merge_from_value(result, other, vm)?;
+        }
+        let result = result_guard.into_inner();
+        let heap_id = vm.heap.allocate(HeapData::Dict(result));
+        Ok(Some(Value::Ref(heap_id)))
+    }
+
+    /// The [`DictKind`] `self | other` produces, cloning any factory reference
+    /// it carries.
+    ///
+    /// `defaultdict` overrides `__or__` *and* `__ror__` and rebuilds through its
+    /// own type, so a defaultdict on either side wins (the left one when both
+    /// are) and carries its factory across. Everything else lands on
+    /// `dict.__or__`, which copies into a plain dict whatever its operands are,
+    /// which is why a Counter mixed with a plain dict degrades to `dict` here.
+    /// Two Counters never reach this; `counter_binary` owns that pairing.
+    fn union_kind(&self, other_id: HeapId, vm: &VM<'h>) -> DictKind {
+        if self.get(vm.heap).is_defaultdict() {
+            self.get(vm.heap).cloned_kind(vm.heap)
+        } else {
+            match vm.heap.get(other_id) {
+                HeapData::Dict(other) if other.is_defaultdict() => other.cloned_kind(vm.heap),
+                _ => DictKind::plain(),
+            }
         }
     }
 

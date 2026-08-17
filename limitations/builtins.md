@@ -45,6 +45,24 @@ These raise `NameError`:
   printed), as do list (live length, mid-repr pops truncate / appends extend),
   `set`, `collections.deque` and `collections.Counter` (all snapshot, like
   CPython).
+- **Filling a dict from a sequence of pairs**: `dict(pairs)`, `d.update(pairs)`
+  and `d |= pairs` all reject a malformed element with a `TypeError` reading
+  `dictionary update sequence element has length 1; 2 is required`, where
+  CPython raises a `ValueError` naming the offending index as well
+  (`... element #0 has length 1; ...`); an element longer than two says `has
+  length > 2` rather than its real length. An element that is not iterable at
+  all names the type Monty tried to iterate (`'int' object is not iterable`)
+  where CPython says `object is not iterable`. Only the wording and the
+  exception type differ: the same inputs are accepted and rejected.
+- **A colliding key keeps the *incoming* key object**: inserting a key equal to
+  one already stored (`{1: 'a'} | {True: 'b'}`, and likewise a dict literal,
+  `d[True] = 'b'`, `d.update(...)`, `dict(pairs)` and `d |= ...`) replaces the
+  stored key, so the result reads `{True: 'b'}` where CPython keeps the original
+  key and gives `{1: 'b'}`. The entry's position and value match CPython.
+- **`dict` has no `__or__` / `__ior__` attribute**: the operators themselves
+  work, but spelling one as a method call (`{'a': 1}.__or__({'b': 2})`,
+  `d.__ior__(other)`) raises `AttributeError`, as do Monty's other builtin
+  dunders (`{}.__eq__({})`, `(3).__add__(4)`).
 - **`enumerate`, `zip`, `map`, `filter` and `reversed` are eager, not lazy** —
   each drains its source and returns a `list`, so `type(enumerate(x)).__name__`
   is `'list'` rather than `'enumerate'`. Observable several ways: a
