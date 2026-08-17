@@ -77,3 +77,46 @@ recurse(50)
         );
     }
 }
+
+/// A re-raise reports the line the exception was first raised at, not the line
+/// re-raising it. Three shapes reach the same `Reraise`: an exception escaping
+/// a handler body (here an `assert`), one escaping a handler whose type does
+/// not match, and a bare `raise` written in a handler.
+#[test]
+fn a_reraise_reports_the_original_raise() {
+    // Line 4's assert raises inside the handler; line 5 exists so the implicit
+    // cleanup that re-raises it cannot borrow the assert's own location.
+    let escaping_handler = "try:\n    raise ValueError('boom')\nexcept ValueError:\n    assert 1 == 2\n    x = 1\n";
+    // Line 2 raises inside the `try`; the handler on line 4 does not match it.
+    let unmatched_handler = "try:\n    raise ValueError('boom')\n    y = 1\nexcept TypeError:\n    pass\n";
+    // Line 2 raises, line 4 re-raises with the statement on line 5 behind it.
+    let bare_raise = "try:\n    raise ValueError('boom')\nexcept ValueError:\n    raise\n";
+
+    for (code, raise_line, exc_type) in [
+        (escaping_handler, 4, ExcType::AssertionError),
+        (unmatched_handler, 2, ExcType::ValueError),
+        (bare_raise, 2, ExcType::ValueError),
+    ] {
+        let run = MontyRun::new(code.to_string(), "test.py", vec![], CompileOptions::default()).expect("should parse");
+        let err = run.run_no_limits(vec![]).expect_err("should raise");
+        assert_eq!(err.exc_type(), exc_type);
+        let frame = err.traceback().last().expect("traceback has at least one frame");
+        assert_eq!(frame.start.line, raise_line, "for:\n{code}");
+    }
+}
+
+/// The frames below the re-raise survive with it: a bare `raise` keeps the
+/// callee frame that raised, rather than restarting the traceback at itself.
+#[test]
+fn a_reraise_keeps_the_frames_under_it() {
+    let code = "def g():\n    raise ValueError('deep')\n\n\ndef f():\n    try:\n        g()\n    except ValueError:\n        raise\n\n\nf()\n";
+    let run = MontyRun::new(code.to_string(), "test.py", vec![], CompileOptions::default()).expect("should parse");
+    let err = run.run_no_limits(vec![]).expect_err("should raise");
+
+    let frames: Vec<(Option<&str>, u32)> = err
+        .traceback()
+        .iter()
+        .map(|frame| (frame.frame_name.as_deref(), frame.start.line))
+        .collect();
+    assert_eq!(frames, vec![(Some("<module>"), 12), (Some("f"), 7), (Some("g"), 2)]);
+}

@@ -31,7 +31,7 @@ use crate::{
         op::{Opcode, decode_assert_flags},
     },
     defer_drop_mut,
-    exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
+    exception_private::{ExcType, ExcTypeExt, RawStackFrame, RunError, RunResult, SimpleException},
     heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
@@ -712,6 +712,20 @@ pub struct VM<'h> {
     /// wrapping after 2^64 raises is harmless.
     raise_seq: u64,
 
+    /// Traceback of the raise the innermost caught exception came from, paired
+    /// with the object `exception_stack` holds for it.
+    ///
+    /// A re-raise reports where the exception was first raised, as CPython
+    /// does, but that chain lives on the `RunError` the catch consumed. Parking
+    /// it here is what lets `Reraise` put it back, for the bare `raise` a
+    /// handler writes and for the implicit one the compiler emits when an
+    /// exception escapes a handler body. The heap id makes the pairing
+    /// checkable: an unrelated exception re-raised later carries a different
+    /// one, and reports its own position as before. Not carried across a
+    /// suspension, so a re-raise after an `await` also reports its own
+    /// position.
+    caught_origin: Option<(HeapId, RawStackFrame)>,
+
     /// Bytecode IP of the most recent `LoadGlobalCallable` that
     /// pushed an `ExtFunction` for an undefined name.
     ///
@@ -793,6 +807,7 @@ impl<'h> VM<'h> {
             scheduler: Scheduler::new(),
             pending_raised: None,
             raise_seq: 0,
+            caught_origin: None,
             ext_function_load_ip: None, // Set by LoadGlobalCallable
             module_code: None,
             json_string_cache: JsonStringCache::default(),
@@ -868,6 +883,9 @@ impl<'h> VM<'h> {
             // error unwinds out of a nested `run()`, which cannot yield.
             pending_raised: None,
             raise_seq: 0,
+            // A caught exception's origin is likewise not carried across a
+            // suspension; a re-raise after the resume reports its own position.
+            caught_origin: None,
             module_code: Some(module_code),
             ext_function_load_ip: None,
             json_string_cache: JsonStringCache::default(),
@@ -1752,7 +1770,12 @@ impl<'h> VM<'h> {
                     // preserve its enclosing handler's active exception.
                     let raised = self.exception_stack.last().map(|exc| exc.clone_with_heap(self.heap));
                     let error = match &raised {
-                        Some(exc) => self.make_exception(exc, true), // is_raise=true for reraise
+                        Some(exc) => {
+                            let mut error = self.make_exception(exc, true); // is_raise=true for reraise
+                            // A re-raise reports the original raise, not itself.
+                            self.restore_caught_origin(exc, &mut error);
+                            error
+                        }
                         // No active exception - create a RuntimeError
                         None => {
                             SimpleException::new_msg(ExcType::RuntimeError, "No active exception to reraise").into()

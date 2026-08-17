@@ -21,6 +21,16 @@ use crate::{
     value::Value,
 };
 
+/// Takes the traceback chain off an error, leaving it without one.
+///
+/// `None` for an internal error, which carries no Python-level frame.
+fn take_error_frame(error: &mut RunError) -> Option<RawStackFrame> {
+    match error {
+        RunError::Exc(raise) | RunError::UncatchableExc(raise) => raise.frame.take(),
+        RunError::Internal(_) => None,
+    }
+}
+
 /// What the operand of a `raise` turned out to be, classified before the
 /// operand's own reference is consumed.
 enum RaiseOperand {
@@ -464,6 +474,26 @@ impl VM<'_> {
         }
     }
 
+    /// Puts back the traceback of the raise `exc` came from, so a re-raise
+    /// reports the line the exception was first raised at rather than the line
+    /// re-raising it, which is what CPython's traceback shows.
+    ///
+    /// Silent when the parked chain belongs to a different object, which is the
+    /// case for an exception raised before this build parked anything and for
+    /// one that survived a suspension.
+    pub(super) fn restore_caught_origin(&self, exc: &Value, error: &mut RunError) {
+        let Some((origin_id, origin)) = &self.caught_origin else {
+            return;
+        };
+        if exc.ref_id() != Some(*origin_id) {
+            return;
+        }
+        match error {
+            RunError::Exc(raise) | RunError::UncatchableExc(raise) => raise.frame = Some(origin.clone()),
+            RunError::Internal(_) => {}
+        }
+    }
+
     /// Parks `raised` so the next handler in an outer `run()` can bind the very
     /// object that was raised, stamping `error` with the matching token.
     ///
@@ -550,6 +580,11 @@ impl VM<'_> {
 
                 // Reclaim exc_value from guard - it's being pushed onto exception_stack
                 let (exc_value, this) = exc_guard.into_parts();
+
+                // Park where this exception was raised before the error carrying
+                // that chain is dropped, so a re-raise of the same object reports
+                // the original raise rather than the re-raise (see `caught_origin`).
+                this.caught_origin = exc_value.ref_id().zip(take_error_frame(&mut error));
 
                 // Push exception onto the exception_stack for bare raise.
                 // This allows nested except handlers to restore outer
