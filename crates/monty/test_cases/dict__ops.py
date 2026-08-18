@@ -143,6 +143,24 @@ dup = {'k': [1], 'k': [2]}
 assert dup == {'k': [2]}
 assert len(dup) == 1
 
+# === Rebinding an occupied slot keeps the key that got there first ===
+# Equal keys can still be distinguishable objects, so which one the dict kept is
+# observable through `keys()`, `items()` and `repr`.
+assert list({1: 'a', True: 'b'}.items()) == [(1, 'b')]
+assert repr(list({1: 'a', True: 'b'}.keys())) == '[1]'
+assert repr(list({True: 'a', 1: 'b'}.keys())) == '[True]'
+assert repr(list({0: 'a', False: 'b'}.keys())) == '[0]'
+assert repr(list({1.0: 'a', 1: 'b'}.keys())) == '[1.0]'
+assert repr(list({1: 'a', 1.0: 'b'}.keys())) == '[1]'
+
+rebound = {1: 'a'}
+rebound[True] = 'b'
+assert repr(list(rebound.keys())) == '[1]'
+rebound.update({True: 'c'})
+assert repr(list(rebound.items())) == "[(1, 'c')]"
+assert rebound.setdefault(True, 'd') == 'c'
+assert repr(list(rebound.keys())) == '[1]'
+
 # === `in` / `not in` ===
 # `in` on a dict tests its keys, never its values.
 membership = {'a': 1, 'b': 2}

@@ -111,11 +111,6 @@ Divergences:
   all names the type Monty tried to iterate (`'int' object is not iterable`)
   where CPython says `object is not iterable`. Only the wording and the
   exception type differ: the same inputs are accepted and rejected.
-- **A colliding key keeps the *incoming* key object**: inserting a key equal to
-  one already stored (`{1: 'a'} | {True: 'b'}`, and likewise a dict literal,
-  `d[True] = 'b'`, `d.update(...)`, `dict(pairs)` and `d |= ...`) replaces the
-  stored key, so the result reads `{True: 'b'}` where CPython keeps the original
-  key and gives `{1: 'b'}`. The entry's position and value match CPython.
 - **`dict` has no `__or__` / `__ior__` attribute**: the operators themselves
   work, but spelling one as a method call (`{'a': 1}.__or__({'b': 2})`,
   `d.__ior__(other)`) raises `AttributeError`, as do Monty's other builtin

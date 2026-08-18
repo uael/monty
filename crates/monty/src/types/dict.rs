@@ -527,19 +527,18 @@ impl<'h> HeapRead<'h, Dict> {
             }
         };
 
-        let entry = DictEntry { key, value, hash };
         if let Some(index) = opt_index {
-            // Key exists, replace in place to preserve insertion order
-            let old_entry = mem::replace(&mut self.get_mut(vm.heap).entries[index], entry);
-
-            // Decrement refcount for old key (we're discarding it)
-            old_entry.key.drop_with(vm);
+            // An occupied slot keeps its position *and* its key: equal keys can
+            // still be distinguishable objects, and CPython hands back the one
+            // inserted first, so `{1: 'a', True: 'b'}` stays keyed by `1`.
+            let old_value = mem::replace(&mut self.get_mut(vm.heap).entries[index].value, value);
+            key.drop_with(vm);
             // Transfer ownership of the old value to caller (no clone needed)
-            Ok(Some(old_entry.value))
+            Ok(Some(old_value))
         } else {
             let this = self.get_mut(vm.heap);
             let index = this.entries.len();
-            this.entries.push(entry);
+            this.entries.push(DictEntry { key, value, hash });
             this.indices
                 .insert_unique(hash, index, |index| this.entries[*index].hash);
             Ok(None)
