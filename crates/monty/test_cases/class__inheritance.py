@@ -118,3 +118,50 @@ made = Made('m')
 assert made.speak() == 'made'
 assert made.describe() == 'm says made'
 assert isinstance(made, Animal)
+
+# === A subclass of a dataclass inherits everything synthesized on it ===
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
+
+
+@dataclass
+class Point:
+    x: int
+    y: str = 'a'
+
+
+class Shifted(Point):
+    def moved(self):
+        return Shifted(self.x + 1, self.y)
+
+
+shifted = Shifted(1, 'b')
+assert shifted.x == 1
+assert shifted.y == 'b'
+assert repr(shifted) == "Shifted(x=1, y='b')"
+assert shifted == Shifted(1, 'b')
+assert (shifted == Point(1, 'b')) is False
+assert shifted.moved() == Shifted(2, 'b')
+assert is_dataclass(Shifted)
+assert is_dataclass(shifted)
+assert [f.name for f in fields(Shifted)] == ['x', 'y']
+assert asdict(shifted) == {'x': 1, 'y': 'b'}
+assert replace(shifted, x=9) == Shifted(9, 'b')
+
+
+@dataclass(frozen=True)
+class Sealed:
+    n: int
+
+
+class Kept(Sealed):
+    pass
+
+
+kept = Kept(3)
+assert repr(kept) == 'Kept(n=3)'
+assert hash(kept) == hash(Kept(3))
+try:
+    kept.n = 4
+    assert False, 'expected a frozen subclass to refuse assignment'
+except Exception as exc:
+    assert str(exc) == "cannot assign to field 'n'"

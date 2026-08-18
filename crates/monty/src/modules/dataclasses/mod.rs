@@ -34,6 +34,7 @@ use crate::{
     modules::ModuleFunctions,
     types::{
         Class, CmpOrder, DataclassOptions, Dict, Instance, LazyHeapSet, Module, Opt, PyTrait,
+        class::{MAX_MRO_DEPTH, class_base_id},
         dataclass::write_dataclass_repr,
         instance::{class_defines, class_dunder, class_name, instance_attr},
         tuple::allocate_tuple,
@@ -476,11 +477,24 @@ fn fields_dict_id(namespace: &Dict, vm: &VM<'_>) -> Option<HeapId> {
 
 /// [`fields_dict_id`] for the callers holding only a class `HeapId`: the
 /// generic `Instance` code, which reaches a class through its instance.
+///
+/// Walks the base chain, so an undecorated subclass of a dataclass is one too
+/// and constructs, compares and prints through the base's fields — which is
+/// what CPython's inherited `__init__` does. A subclass that *is* decorated
+/// shadows this with its own fields; field inheritance across two decorated
+/// classes is still unsupported (see `limitations/dataclasses.md`).
 fn class_fields_dict_id(class_id: HeapId, vm: &VM<'_>) -> Option<HeapId> {
-    match vm.heap.get(class_id) {
-        HeapData::Class(class) => fields_dict_id(class.namespace(), vm),
-        _ => None,
+    let mut current = Some(class_id);
+    for _ in 0..MAX_MRO_DEPTH {
+        let id = current?;
+        if let HeapData::Class(class) = vm.heap.get(id)
+            && let Some(found) = fields_dict_id(class.namespace(), vm)
+        {
+            return Some(found);
+        }
+        current = class_base_id(id, vm);
     }
+    None
 }
 
 /// Whether `class_id` names a dataclass.
@@ -494,13 +508,27 @@ pub(crate) fn has_synthesized_init(class_id: HeapId, vm: &VM<'_>) -> bool {
     is_dataclass_class(class_id, vm) && class_options(class_id, vm).get(Opt::Init)
 }
 
-/// The options `class_id` was decorated with, or the defaults when the class is
-/// not a dataclass (or sandboxed code replaced `__dataclass_params__`).
+/// The options in force for `class_id`, or the defaults for a class no
+/// decoration reached.
+///
+/// Walks the base chain for the same reason [`class_fields_dict_id`] does: an
+/// undecorated subclass of a frozen dataclass is frozen too, and hashes by the
+/// base's fields. A decoration writes the fields and the options together, so
+/// the class holding the fields is the one whose options apply — which also
+/// makes a decorated subclass shadow its base, fields and options alike.
 fn class_options(class_id: HeapId, vm: &VM<'_>) -> DataclassOptions {
-    match vm.heap.get(class_id) {
-        HeapData::Class(class) => class.dataclass_options(),
-        _ => DataclassOptions::default(),
+    let mut current = Some(class_id);
+    for _ in 0..MAX_MRO_DEPTH {
+        let Some(id) = current else { break };
+        let HeapData::Class(class) = vm.heap.get(id) else {
+            break;
+        };
+        if fields_dict_id(class.namespace(), vm).is_some() {
+            return class.dataclass_options();
+        }
+        current = class_base_id(id, vm);
     }
+    DataclassOptions::default()
 }
 
 /// One field's binding-relevant shape, owned so the heap borrow is released.

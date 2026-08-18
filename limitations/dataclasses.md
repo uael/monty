@@ -154,8 +154,15 @@ so is a non-default field after a defaulted one
 
 ## Architectural gaps (cannot match)
 
-- **No inheritance**, so field inheritance across base dataclasses is
-  unsupported (Monty has no class inheritance at all). Every consequence of it
-  is absent too: a frozen dataclass cannot inherit from a non-frozen one (or
-  vice versa), and `fields()` reports only the class's own annotations.
+- **Fields are not inherited across two decorated classes.** `@dataclass class
+  B(A)` collects only `B`'s own annotations, where CPython merges `A`'s fields
+  in front of them, so `fields()` and the synthesized `__init__` see only `B`'s.
+  A consequence: a frozen dataclass inheriting from a non-frozen one (or vice
+  versa) is accepted where CPython raises.
+
+  An **undecorated** subclass is a different case and does work: `class B(A)`
+  with `A` a dataclass inherits `A`'s fields, so it constructs, compares,
+  prints, hashes and refuses frozen assignment exactly as `A` does, and
+  `is_dataclass(B)` is true — which is what CPython's inherited `__init__`
+  gives. `repr` names the subclass (`B(x=1)`), as CPython's does.
 - **No `__weakref__`**, so `weakref_slot=True` is refused rather than modelled.
