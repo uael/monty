@@ -486,8 +486,14 @@ impl Executor {
             // heap, exactly as CPython's `sys.modules` owns it, so it is live whether or
             // not a name still refers to it.
             roots.extend(vm.heap.module_ids());
+            // The event loop owns for the same reason. A task still in the scheduler is
+            // one it can run or wake, and the module returning does not end it: a
+            // fixture that leaves `asyncio.sleep(100)` parked has not leaked it, and
+            // naming it a leak would only teach the tests to avoid unfinished tasks.
+            roots.extend(vm.loop_root_ids());
             // Those are the only roots: locals are gone once the module frame exits, so
-            // anything still live must hang off a name or the result to not be a leak.
+            // anything still live must hang off a name, the result, or one of those two
+            // owners to not be a leak.
             let unreachable: Vec<String> = vm
                 .heap
                 .unreachable_entries(roots)

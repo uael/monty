@@ -5,6 +5,7 @@
 ///
 /// The `AbstractValue` trait provides a common interface for all heap-allocated
 /// types, enabling efficient dispatch via `enum_dispatch`.
+pub mod asyncio;
 pub mod attrgetter;
 pub mod bytes;
 pub mod callable_iterator;

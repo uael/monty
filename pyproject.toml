@@ -161,6 +161,7 @@ exclude = [
     # fixtures in an async function, which basedpyright reading the file
     # standalone cannot see
     "crates/monty/test_cases/async__iteration.py",
+    "crates/monty/test_cases/async__combinators.py",
     "scripts/startup_performance.py",
     "examples/web_scraper/example_code.py",
 ]

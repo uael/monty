@@ -7,7 +7,7 @@ import asyncio
 
 async def ticks(n):
     for i in range(n):
-        yield await async_call(i)  # pyright: ignore
+        yield await async_call(i)
 
 
 async def consume(n):

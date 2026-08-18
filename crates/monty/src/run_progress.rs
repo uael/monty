@@ -98,7 +98,7 @@ impl RunProgress {
 ///
 /// The host can choose how to handle this:
 /// - **Sync resolution**: Call `resume(return_value, print)` to push the result and continue.
-/// - **Async resolution**: Call `resume_pending(print)` to push an `ExternalFuture` and continue.
+/// - **Async resolution**: Call `resume_pending(print)` to push a `Future` and continue.
 ///
 /// When using async resolution, the code continues and may `await` the future later.
 /// If the future isn't resolved when awaited, execution yields with `ResolveFutures`.
@@ -170,7 +170,7 @@ impl FunctionCall {
         self.snapshot.run(result, print)
     }
 
-    /// Resumes execution by pushing an `ExternalFuture` instead of a concrete value.
+    /// Resumes execution by pushing a `Future` instead of a concrete value.
     ///
     /// This is the async resolution pattern: the host continues execution with a
     /// pending future. The code can then `await` this future later. If the code

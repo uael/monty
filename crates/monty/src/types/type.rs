@@ -12,7 +12,7 @@ use crate::{
     modules::collections,
     types::{
         AttrCallResult, Bytes, Deque, Dict, FrozenSet, List, LongInt, NativeClass, Path, PyTrait, Range, Set, Slice,
-        Str, TimeZone, Tuple, attrgetter,
+        Str, TimeZone, Tuple, asyncio, attrgetter,
         bytes::{bytes_fromhex, bytes_repr},
         contextvars, date, datetime,
         dict::{DictKind, dict_fromkeys},
@@ -280,6 +280,33 @@ pub enum Type {
     /// to.
     #[strum(serialize = "typing.TypeVar")]
     TypeVar,
+    /// `asyncio.Future`. CPython's `tp_name` for the C accelerator is
+    /// `_asyncio.Future`, which is what its error messages say.
+    #[strum(serialize = "_asyncio.Future")]
+    Future,
+    /// `asyncio.Task`, the future a coroutine settles.
+    #[strum(serialize = "_asyncio.Task")]
+    Task,
+    /// What `asyncio.as_completed` hands back. A pure-Python class in
+    /// CPython, so the name carries no module.
+    #[strum(serialize = "as_completed_iterator")]
+    AsCompleted,
+    #[strum(serialize = "Lock")]
+    Lock,
+    #[strum(serialize = "Event")]
+    Event,
+    #[strum(serialize = "Semaphore")]
+    Semaphore,
+    #[strum(serialize = "BoundedSemaphore")]
+    BoundedSemaphore,
+    #[strum(serialize = "Barrier")]
+    Barrier,
+    #[strum(serialize = "Queue")]
+    Queue,
+    #[strum(serialize = "TaskGroup")]
+    TaskGroup,
+    #[strum(serialize = "Timeout")]
+    Timeout,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -613,6 +640,14 @@ impl Type {
             Self::Suppress => suppress::init(vm, args),
             Self::AttrGetter => attrgetter::init(vm, args),
             Self::PartialMethod => partialmethod::init(vm, args),
+            Self::Future | Self::Task => asyncio::init_future(self, vm, args),
+            Self::Lock
+            | Self::Event
+            | Self::Semaphore
+            | Self::BoundedSemaphore
+            | Self::Barrier
+            | Self::Queue
+            | Self::TaskGroup => asyncio::construct(self, vm, args),
 
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),

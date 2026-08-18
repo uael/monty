@@ -408,6 +408,23 @@ pub enum ExcType {
     /// subclass, so `except Exception:` inside the generator does not swallow
     /// the shutdown.
     GeneratorExit,
+
+    // --- asyncio ---
+    /// `asyncio.CancelledError`. A direct `BaseException` subclass since 3.8,
+    /// so `except Exception:` in a cancelled coroutine does not swallow the
+    /// cancellation while its `finally` still runs.
+    #[strum(serialize = "asyncio.CancelledError")]
+    CancelledError,
+    /// `asyncio.InvalidStateError`: setting a future that is already settled,
+    /// or reading a result off one that is not.
+    #[strum(serialize = "asyncio.InvalidStateError")]
+    InvalidStateError,
+    /// `asyncio.QueueEmpty`: `get_nowait()` on an empty queue.
+    #[strum(serialize = "asyncio.QueueEmpty")]
+    QueueEmpty,
+    /// `asyncio.QueueFull`: `put_nowait()` on a full queue.
+    #[strum(serialize = "asyncio.QueueFull")]
+    QueueFull,
 }
 impl ExcType {
     /// Whether this class lives in the `builtins` namespace, and so is
@@ -418,9 +435,18 @@ impl ExcType {
     #[must_use]
     pub fn is_builtin(self) -> bool {
         match self {
-            Self::FrozenInstanceError | Self::JsonDecodeError | Self::UnsupportedOperation | Self::RePatternError => {
-                false
-            }
+            // Every one of these belongs to a module rather than to
+            // `builtins`, which their dotted names say. `asyncio.TimeoutError`
+            // is absent from the list on purpose: since 3.11 it *is* the
+            // builtin `TimeoutError`, only re-exported under that name.
+            Self::FrozenInstanceError
+            | Self::JsonDecodeError
+            | Self::UnsupportedOperation
+            | Self::RePatternError
+            | Self::CancelledError
+            | Self::InvalidStateError
+            | Self::QueueEmpty
+            | Self::QueueFull => false,
             Self::Exception
             | Self::BaseException
             | Self::SystemExit
@@ -477,7 +503,11 @@ impl ExcType {
             // Exception catches everything except BaseException, and direct subclasses: KeyboardInterrupt, SystemExit
             Self::Exception => !matches!(
                 self,
-                Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit | Self::GeneratorExit
+                Self::BaseException
+                    | Self::KeyboardInterrupt
+                    | Self::SystemExit
+                    | Self::GeneratorExit
+                    | Self::CancelledError
             ),
             // LookupError catches KeyError and IndexError
             Self::LookupError => matches!(self, Self::KeyError | Self::IndexError),

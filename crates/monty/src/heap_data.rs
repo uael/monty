@@ -10,7 +10,7 @@ use monty_types::ExcType;
 
 use crate::{
     args::ArgValues,
-    asyncio::{Awaiter, Coroutine, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
+    asyncio::{Combinator, Coroutine, Future, FutureState, Waiter},
     bytecode::{CallResult, VM},
     exception_private::{ExcTypeExt, ExceptionObject, RunError, RunResult},
     expressions::CmpOperator,
@@ -28,9 +28,9 @@ use crate::{
         FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor,
         Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range, RangeIterator, ReMatch,
         RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator,
-        Type, TypeAliasType, TypeVar, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
-        deque::DequeIterator, generic_alias::class_subscript, instance_subscript, list::ListIterator,
-        str::allocate_string, timedelta, timezone,
+        Type, TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive,
+        callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, generic_alias::class_subscript,
+        instance_subscript, list::ListIterator, str::allocate_string, timedelta, timezone,
     },
     value::{EitherStr, Value},
 };
@@ -149,16 +149,13 @@ pub(crate) enum HeapData {
     /// Contains pre-bound arguments and captured cells, ready to be awaited.
     /// When awaited, a new frame is pushed using the stored namespace.
     Coroutine(Coroutine),
-    /// A gather() result tracking multiple coroutines/tasks.
-    ///
-    /// Created by asyncio.gather() and spawns tasks when awaited.
-    GatherFuture(Box<GatherFuture>),
-    /// An external future driven by the host.
-    ///
-    /// Created when the host returns `ExtFunctionResult::Future(call_id)`.
-    /// Holds its own state machine (`Pending`/`Resolved`/`Failed`) so
-    /// re-await yields cached results, matching CPython's Future semantics.
-    ExternalFuture(Box<ExternalFuture>),
+    /// Several futures watched as one: `gather`, `wait`, `as_completed`, and a
+    /// `TaskGroup`'s children. Settles a future of its own rather than being
+    /// awaitable itself.
+    Combinator(Box<Combinator>),
+    /// An `asyncio.Future`, and so also an `asyncio.Task` and the answer slot
+    /// for an external call. The one thing `await` waits on.
+    Future(Box<Future>),
     /// A filesystem path from `pathlib.Path`.
     ///
     /// Stored on the heap to provide Python-compatible path operations.
@@ -236,6 +233,9 @@ pub(crate) enum HeapData {
     UnionType(UnionType),
     /// PEP 695 `typing.TypeVar`: the value a `class C[T]` statement binds `T` to.
     TypeVar(TypeVar),
+    /// One of `asyncio`'s coordination objects: a lock, an event, a semaphore,
+    /// a barrier, a queue, a task group, or a timeout.
+    AsyncPrimitive(Box<AsyncPrimitive>),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -288,14 +288,14 @@ impl HeapData {
             | Self::CallableIterator(_)
             | Self::Module(_)
             | Self::Coroutine(_)
-            | Self::GatherFuture(_)
+            | Self::Combinator(_)
+            | Self::Future(_)
             | Self::Property(_)
             | Self::MethodDescriptor(_)
             | Self::Super(_)
             // An exception's `args` and `__cause__`/`__context__` can hold any
             // value, including one that reaches back to the exception itself.
             | Self::Exception(_)
-            | Self::ExternalFuture(_)
             // Templates hold arbitrary interpolated values, and an alias's
             // memoized `__value__` can reach back to the alias itself.
             | Self::Template(_)
@@ -310,7 +310,9 @@ impl HeapData {
             | Self::ContextToken(_)
             // Both hold whatever they were constructed with, which may reach back.
             | Self::Suppress(_)
-            | Self::PartialMethod(_) => true,
+            | Self::PartialMethod(_)
+            // Every one of them holds futures, and a future can reach back.
+            | Self::AsyncPrimitive(_)
             // A type form owns its origin and its argument tuple, either of
             // which can reach back through an alias's memoized value.
             | Self::GenericAlias(_)
@@ -398,7 +400,9 @@ impl HeapData {
             Self::DataclassParams(_) => Type::DataclassParams,
             Self::LongInt(_) => Type::Int,
             Self::Module(_) => Type::Module,
-            Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::Coroutine(_) => Type::Coroutine,
+            Self::Future(future) => future.py_type(),
+            Self::Combinator(_) => Type::AsCompleted,
             Self::Generator(generator) => generator.py_type(),
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
@@ -434,6 +438,7 @@ impl HeapData {
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::UnionType(_) => Type::Union,
             Self::TypeVar(_) => Type::TypeVar,
+            Self::AsyncPrimitive(primitive) => primitive.py_type(),
         }
     }
 }
@@ -530,45 +535,43 @@ impl HeapItem for Coroutine {
     }
 }
 
-impl HeapItem for GatherFuture {
+impl HeapItem for Future {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
-        // Decrement ref count for items the gather owns (every entry in
-        // `items` is inc_ref'd at construction time).
-        stack.extend(self.items.iter().copied());
-        // Release per-state heap refs: in-flight slot results plus this
-        // gather's own awaiter (if `GatherSlot`, it owns an inc_ref on the
-        // outer gather), or the cached result list once the gather has
-        // completed successfully. `Pending` and `Failed` carry no heap refs.
-        match &mut self.state {
-            GatherState::Awaited(awaited) => {
-                if let Awaiter::GatherSlot { gather, .. } = &awaited.awaiter {
-                    stack.push(*gather);
-                }
-                for result in awaited.results.iter_mut().flatten() {
-                    result.py_dec_ref_ids(stack);
-                }
+        // Mirrors `Future::owned_ids`, which the GC's child walk uses. The two
+        // cannot share a body: a destructor must hand each owned `Value` to
+        // `Value::py_dec_ref_ids`, which neutralizes it as well as reporting
+        // it, and that needs `&mut`.
+        if let FutureState::Finished(value) = &mut self.state {
+            value.py_dec_ref_ids(stack);
+        }
+        for waiter in &self.waiters {
+            if let Waiter::Slot { owner, .. } = waiter {
+                stack.push(*owner);
             }
-            GatherState::Completed(Value::Ref(id)) => stack.push(*id),
-            GatherState::Pending | GatherState::Failed(_) | GatherState::Completed(_) => {}
+        }
+        for callback in &mut self.callbacks {
+            callback.py_dec_ref_ids(stack);
+        }
+        if let Some(coroutine) = self.run.as_ref().and_then(|run| run.coroutine) {
+            stack.push(coroutine);
+        }
+        if let Some(message) = &mut self.must_cancel {
+            message.py_dec_ref_ids(stack);
         }
     }
 }
 
-impl HeapItem for ExternalFuture {
+impl HeapItem for Combinator {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
-        // `Pending { awaiter: Some(Awaiter::GatherSlot { gather, .. }) }`
-        // owns an inc_ref on `gather` — release it when this entry is
-        // freed. `Awaiter::Task` and `None` own nothing. `Resolved` owns
-        // the cached value; `Failed` carries no heap refs.
-        match &mut self.state {
-            ExternalFutureState::Resolved(value) => value.py_dec_ref_ids(stack),
-            ExternalFutureState::Pending {
-                awaiter: Some(Awaiter::GatherSlot { gather, .. }),
-            } => stack.push(*gather),
-            ExternalFutureState::Pending {
-                awaiter: None | Some(Awaiter::Task(_)),
-            }
-            | ExternalFutureState::Failed(_) => {}
+        // Mirrors `Combinator::owned_ids`; see the note above.
+        stack.extend(self.children.iter().copied());
+        for result in self.results.iter_mut().flatten() {
+            result.py_dec_ref_ids(stack);
+        }
+        stack.push(self.output);
+        stack.extend(self.finished.iter().copied());
+        if let Some(next) = self.next_wait {
+            stack.push(next);
         }
     }
 }
@@ -625,6 +628,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::MethodDescriptor($value) => $body,
             Self::Super($value) => $body,
             Self::Generator($value) => $body,
+            Self::Future($value) => $body,
             Self::ContextVar($value) => $body,
             Self::ContextToken($value) => $body,
             Self::Suppress($value) => $body,
@@ -633,15 +637,15 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::GenericAlias($value) => $body,
             Self::UnionType($value) => $body,
             Self::TypeVar($value) => $body,
+            Self::AsyncPrimitive($value) => $body,
+            Self::Combinator($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
             | Self::Cell(_)
             | Self::Exception(_)
             | Self::Module(_)
-            | Self::Coroutine(_)
-            | Self::GatherFuture(_)
-            | Self::ExternalFuture(_) => $fallback,
+            | Self::Coroutine(_) => $fallback,
         }
     };
 }
@@ -705,9 +709,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     | Self::Cell(_)
                     | Self::Exception(_)
                     | Self::Module(_)
-                    | Self::Coroutine(_)
-                    | Self::GatherFuture(_)
-                    | Self::ExternalFuture(_) => Ok(true),
+                    | Self::Coroutine(_) => Ok(true),
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
                 }
             }
@@ -825,9 +827,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     // `SendIter` with the coroutine and waits on it there.
                     // CPython interposes a `coroutine_wrapper` object; the
                     // only difference that leaves is the type name.
-                    if attr.as_str(vm.interns) == "__await__"
-                        && matches!(self, Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_))
-                    {
+                    if attr.as_str(vm.interns) == "__await__" && matches!(self, Self::Coroutine(_)) {
                         args.check_zero_args("__await__", vm.heap)?;
                         vm.heap.inc_ref(self_id);
                         return Ok(CallResult::Value(Value::Ref(self_id)));
@@ -892,7 +892,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(_) => Type::Cell,
                     Self::Exception(e) => e.py_type(vm),
                     Self::Module(_) => Type::Module,
-                    Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+                    Self::Coroutine(_) => Type::Coroutine,
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
                 }
             }
@@ -925,9 +925,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     | Self::Cell(_)
                     | Self::Exception(_)
                     | Self::Module(_)
-                    | Self::Coroutine(_)
-                    | Self::GatherFuture(_)
-                    | Self::ExternalFuture(_) => Ok(None),
+                    | Self::Coroutine(_) => Ok(None),
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
                 }
             }
@@ -954,9 +952,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(_) | Self::ExtFunction(_) => Ok(Some(identity_hash(self_id))),
                     Self::Exception(_)
                     | Self::Module(_)
-                    | Self::Coroutine(_)
-                    | Self::GatherFuture(_)
-                    | Self::ExternalFuture(_) => Ok(None),
+                    | Self::Coroutine(_) => Ok(None),
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
                 }
             }
@@ -985,12 +981,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                         let name = vm.interns.get_str(func.name.name_id);
                         Ok(write!(f, "<coroutine object {name}>")?)
                     }
-                    Self::GatherFuture(gather) => Ok(write!(f, "<gather({})>", gather.get(vm.heap).item_count())?),
-                    Self::ExternalFuture(fut) => Ok(write!(
-                        f,
-                        "<coroutine external_future({})>",
-                        fut.get(vm.heap).call_id.raw()
-                    )?),
+
                     Self::ExtFunction(function) => {
                         Ok(write!(f, "<function '{}' external>", function.get(vm.heap).as_str())?)
                     }
@@ -1194,6 +1185,9 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::GenericAlias(value) => value.py_iter(self_id, vm),
             Self::UnionType(value) => value.py_iter(self_id, vm),
             Self::TypeVar(value) => value.py_iter(self_id, vm),
+            Self::AsyncPrimitive(value) => value.py_iter(self_id, vm),
+            Self::Combinator(value) => value.py_iter(self_id, vm),
+            Self::Future(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1205,9 +1199,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             | Self::Super(_)
             | Self::LongInt(_)
             | Self::Module(_)
-            | Self::Coroutine(_)
-            | Self::GatherFuture(_)
-            | Self::ExternalFuture(_) => Err(ExcType::type_error_not_iterable(
+            | Self::Coroutine(_) => Err(ExcType::type_error_not_iterable(
                 &self.py_type(vm).name(vm.heap, vm.interns),
             )),
         }
@@ -1266,6 +1258,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::GenericAlias(value) => value.py_next(self_id, vm),
             Self::UnionType(value) => value.py_next(self_id, vm),
             Self::TypeVar(value) => value.py_next(self_id, vm),
+            Self::AsyncPrimitive(value) => value.py_next(self_id, vm),
+            Self::Combinator(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),

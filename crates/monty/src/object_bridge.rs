@@ -495,8 +495,8 @@ impl MontyObjectExt for MontyObject {
                         let name = vm.interns.get_str(func.name.name_id);
                         Self::Repr(format!("<coroutine object {name}>"))
                     }
-                    HeapReadOutput::GatherFuture(gather) => {
-                        Self::Repr(format!("<gather({})>", gather.get(vm.heap).item_count()))
+                    HeapReadOutput::Combinator(comb) => {
+                        Self::Repr(format!("<as_completed({})>", comb.get(vm.heap).children.len()))
                     }
                     HeapReadOutput::Path(path) => Self::Path(path.get(vm.heap).as_str().to_owned()),
                     // File objects carry no heap refs (leaf type) — no recursion.
@@ -720,7 +720,20 @@ impl MontyTypeExt for MontyType {
             Type::BuiltinFunction => Self::BuiltinFunction,
             Type::Cell => Self::Cell,
             Type::Iterator => Self::Iterator,
-            Type::Coroutine => Self::Coroutine,
+            // Everything `asyncio` adds crosses as a coroutine, the one
+            // awaitable name the host boundary already knows.
+            Type::Coroutine
+            | Type::Future
+            | Type::Task
+            | Type::AsCompleted
+            | Type::Lock
+            | Type::Event
+            | Type::Semaphore
+            | Type::BoundedSemaphore
+            | Type::Barrier
+            | Type::Queue
+            | Type::TaskGroup
+            | Type::Timeout => Self::Coroutine,
             Type::Generator => Self::Generator,
             Type::AsyncGenerator => Self::AsyncGenerator,
             Type::Module => Self::Module,

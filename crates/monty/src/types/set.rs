@@ -649,6 +649,15 @@ impl Set {
         &self.0
     }
 
+    /// A set of distinct values whose hashes the caller already knows.
+    ///
+    /// For values that hash by identity and so cannot collide or raise, which
+    /// is what `asyncio.wait` hands back. Hashes must be what
+    /// [`Value::py_hash`] would return, or membership tests will miss.
+    pub(crate) fn from_entries(entries: Vec<(Value, u64)>) -> Self {
+        Self(SetStorage::from_entries(entries))
+    }
+
     /// Returns an iterator over the set's elements in insertion order.
     ///
     /// This is primarily used by other runtime helpers that need to implement

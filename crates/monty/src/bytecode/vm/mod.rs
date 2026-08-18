@@ -18,6 +18,7 @@ mod scheduler;
 
 use std::mem;
 
+pub(crate) use async_exec::Outcome;
 pub(crate) use call::CallResult;
 use generator::{GenActivation, GeneratorYield, ResumeMode, SendIterStep};
 pub(crate) use generator::{GeneratorInput, GeneratorStep, stop_iteration_with};
@@ -58,7 +59,7 @@ use crate::{
 /// - `FramePushed`: a new frame was pushed for coroutine execution
 /// - `Yield`: all tasks blocked, yield to caller with pending futures
 enum AwaitResult {
-    /// The awaited value resolved immediately (e.g., resolved ExternalFuture).
+    /// The awaited value resolved immediately (e.g. an already-settled `Future`).
     ValueReady(Value),
     /// A new frame was pushed to execute a coroutine.
     FramePushed,
@@ -74,11 +75,7 @@ enum AwaitResult {
 macro_rules! try_catch_sync {
     ($self:expr, $cached_frame:ident, $expr:expr) => {
         if let Err(e) = $expr {
-            if let Some(result) = $self.handle_exception(e) {
-                return Err(result);
-            }
-            // Exception was caught - handler may be in different frame, reload cache
-            reload_cache!($self, $cached_frame);
+            catch_sync!($self, $cached_frame, e);
         }
     };
 }
@@ -94,6 +91,11 @@ macro_rules! catch_sync {
     ($self:expr, $cached_frame:ident, $err:expr) => {{
         if let Some(result) = $self.handle_exception($err) {
             return Err(result);
+        }
+        // A task that died while unwinding may have left the loop with nothing
+        // to run but the host.
+        if $self.deferred_resolve.is_some() {
+            return Ok(FrameExit::ResolveFutures($self.take_deferred_resolve()));
         }
         // Exception was caught - handler may be in different frame, reload cache
         reload_cache!($self, $cached_frame);
@@ -300,7 +302,7 @@ pub enum FrameExit {
     /// All tasks are blocked waiting for external futures to resolve.
     ///
     /// The caller must resolve the pending CallIds before calling `resume()`.
-    /// This happens when await is called on an ExternalFuture that hasn't
+    /// This happens when await is called on a `Future` that hasn't
     /// been resolved yet, and there are no other ready tasks to switch to.
     ResolveFutures(Vec<CallId>),
 
@@ -721,6 +723,18 @@ pub struct VM<'h> {
     /// need a reference to the module code when being restored after task switching.
     module_code: Option<&'h Code>,
 
+    /// Calls the host must answer before anything can run again, left here by a
+    /// task that died while the unwinder was working.
+    ///
+    /// A spawned task's unhandled exception ends that task, and if nothing else
+    /// can then run, control has to go to the host. The unwinder cannot return
+    /// a suspension, so it parks the pending call ids here and the very next
+    /// check in the run loop turns them into a `ResolveFutures` exit. Never
+    /// outlives one `run()`, and deliberately not a whole `FrameExit`: the run
+    /// loop tests it at every caught exception, and a big inline temporary
+    /// there costs native stack on a path that nests.
+    deferred_resolve: Option<Vec<CallId>>,
+
     /// The exception object of the raise currently unwinding out of this VM,
     /// paired with its [`ExceptionRaise::token`].
     ///
@@ -846,6 +860,7 @@ impl<'h> VM<'h> {
             caught_origin: None,
             ext_function_load_ip: None, // Set by LoadGlobalCallable
             module_code: None,
+            deferred_resolve: None,
             json_string_cache: JsonStringCache::default(),
             pending_os_effect: None,
             recursion_depth: 0,
@@ -916,6 +931,7 @@ impl<'h> VM<'h> {
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
             gen_activations: snapshot.gen_activations,
+            deferred_resolve: None,
             scheduler: snapshot.scheduler,
             // A raise never spans a suspension: it is parked only while an
             // error unwinds out of a nested `run()`, which cannot yield.
@@ -996,6 +1012,16 @@ impl<'h> VM<'h> {
             .last()
             .expect("VM should have at least one frame")
             .stack_base
+    }
+
+    /// Every heap id the event loop still owns.
+    ///
+    /// A leak check reaches from names; the loop is the other thing that owns
+    /// values once the module frame is gone, since a task it still holds is
+    /// one it can still run or wake. See [`Scheduler::root_ids`].
+    #[cfg(feature = "ref-count-return")]
+    pub fn loop_root_ids(&self) -> Vec<HeapId> {
+        self.scheduler.root_ids()
     }
 
     /// Takes ownership of the globals vector, replacing it with an empty vec.
@@ -2054,19 +2080,7 @@ impl<'h> VM<'h> {
                     handle_call_result!(self, cached_frame, self.exec_get_awaitable_iter());
                 }
                 Opcode::GetYieldFromIter => {
-                    // Generators and awaitables are already what a delegation
-                    // drives; only everything else goes through `iter()`.
-                    let passthrough = matches!(*self.peek(), Value::Ref(id)
-                        if matches!(self.heap.get(id), HeapData::Generator(_)) || self.is_native_awaitable(id));
-                    if !passthrough {
-                        let value = self.pop();
-                        let iterator = value.py_iter(self);
-                        value.drop_with(self);
-                        match iterator {
-                            Ok(iterator) => self.push(iterator),
-                            Err(e) => catch_sync!(self, cached_frame, e),
-                        }
-                    }
+                    try_catch_sync!(self, cached_frame, self.exec_get_yield_from_iter());
                 }
                 // Unpacking - route through exception handling
                 Opcode::UnpackSequence => {
@@ -2239,6 +2253,9 @@ impl<'h> VM<'h> {
         // handle_exception returns None if caught, Some(error) if not caught
         if let Some(uncaught_error) = self.handle_exception(error) {
             return Err(uncaught_error);
+        }
+        if self.deferred_resolve.is_some() {
+            return Ok(FrameExit::ResolveFutures(self.take_deferred_resolve()));
         }
         // Exception was caught, continue execution
         self.run_external()

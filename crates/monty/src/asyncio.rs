@@ -1,17 +1,21 @@
-//! Async/await support types for Monty.
+//! The objects `asyncio` is made of: coroutines, futures, tasks, and the
+//! combinators that watch several of them at once.
 //!
-//! This module contains all async-related types including coroutines, futures,
-//! and task identifiers. The host acts as the event loop - external function
-//! calls return `ExternalFuture` objects that can be awaited.
-
-use ahash::AHashMap;
-use smallvec::SmallVec;
+//! There is one future type. A plain `asyncio.Future` is settled by whoever
+//! holds it, an `asyncio.Task` is settled by the coroutine the scheduler drives
+//! for it, and a future standing for an external call is settled by the host,
+//! but all three are the same object, so `await`, `gather`, `cancel` and the
+//! rest need no special case per flavour.
+//!
+//! Waiting is registered on the future itself: every awaiting task and every
+//! combinator slot is a [`Waiter`] in the future's own list, and settling walks
+//! that list once. Nothing else in the VM knows who is waiting on what.
 
 use crate::{
     exception_private::RunError,
     heap::{ContainsHeap, DropWithContext, HeapId},
     intern::FunctionId,
-    value::Value,
+    value::{EitherStr, Value},
 };
 
 /// Unique identifier for external function calls.
@@ -55,6 +59,12 @@ impl TaskId {
     #[inline]
     pub fn is_main(self) -> bool {
         self.0 == 0
+    }
+
+    /// The raw counter value, which is also the number in a task's default name.
+    #[inline]
+    pub fn raw(self) -> u32 {
+        self.0
     }
 }
 
@@ -100,6 +110,7 @@ pub(crate) struct Coroutine {
     /// Current execution state.
     pub state: CoroutineState,
 }
+
 impl Coroutine {
     /// Creates a new coroutine for an async function call.
     ///
@@ -115,220 +126,237 @@ impl Coroutine {
     }
 }
 
-/// An external future driven by the host.
+/// What a [`Future`] is to Python, which is only a matter of its name and of
+/// which extra methods answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum FutureKind {
+    /// `asyncio.Future`: settled by whoever holds it, or by the host when it
+    /// stands for an external call.
+    Future,
+    /// `asyncio.Task`: settled by the coroutine the scheduler drives for it.
+    Task,
+}
+
+/// Where a [`Future`] is in its one-way trip from pending to settled.
 ///
-/// Created when the host returns `ExtFunctionResult::Future(call_id)` in
-/// response to a function call yield. The future starts in `Pending`, and
-/// transitions to `Resolved` (host returned a value) or `Failed` (host
-/// returned an error) when [`VM::resolve_future`] / [`VM::fail_future`]
-/// fires.
-///
-/// # Re-await semantics
-///
-/// `Resolved` / `Failed` futures can be awaited any number of times — each
-/// await yields a clone of the cached value or replays the cached exception,
-/// matching CPython's Future semantics. `Pending` futures still support only
-/// a single in-flight awaiter (the `awaiter: Option<Awaiter>` slot);
-/// multi-awaiter on `Pending` is a planned follow-up that needs the same
-/// wake/raise plumbing as multi-waiter gathers.
+/// `Cancelled` is kept apart from `Failed` because `cancelled()` has to answer
+/// differently, even though both raise at every awaiting site.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ExternalFuture {
-    /// Host-side identifier. Used by the scheduler's `CallId -> HeapId`
-    /// index so host resolutions can find the heap entry.
-    pub call_id: CallId,
-    /// Current state.
-    pub state: ExternalFutureState,
-}
-
-/// State machine for [`ExternalFuture`].
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) enum ExternalFutureState {
-    /// Awaiting host resolution. `awaiter` is the downstream that should be
-    /// notified on resolution; `None` until someone awaits, `Some(...)` for
-    /// the lifetime of the await.
-    Pending { awaiter: Option<Awaiter> },
-    /// Resolved with a value. Re-awaits clone this Value.
-    Resolved(Value),
-    /// Rejected with an error. Re-awaits replay (clone) this error.
-    Failed(RunError),
-}
-
-impl ExternalFuture {
-    /// Creates a new `ExternalFuture` in the `Pending` state with no awaiter.
-    pub fn new_pending(call_id: CallId) -> Self {
-        Self {
-            call_id,
-            state: ExternalFutureState::Pending { awaiter: None },
-        }
-    }
-}
-
-/// Where the result/error of a completing awaitable should be routed.
-///
-/// Stored as the "downstream" of an awaitable.
-///
-/// - `Task` wakes the named task by setting it `Ready` and pushing the value
-///   (or routing the error through its frame's exception handler). `TaskId`
-///   is just a scheduler-side identifier, not a heap reference, so the
-///   variant owns no inc_ref.
-/// - `GatherSlot` fans the value into the gather at `gather`, looking up the
-///   slot indices it should fill via the awaitable's own `HeapId` (`source`).
-///   The wrapper **owns an inc_ref on `gather`**: storing the awaiter on an
-///   awaitable keeps the gather alive for the in-flight window, so the
-///   awaitable's resolution path can dispatch to it safely without
-///   additional cleanup elsewhere. Drop the owned `Awaiter` via
-///   [`DropWithContext`] (and clone via [`Self::clone_with_heap`]) so the
-///   `gather` ref count stays balanced.
-///
-/// Not `Copy` / `Clone` on purpose — the inc_ref discipline requires every
-/// duplication to go through `clone_with_heap` and every discard to go
-/// through `drop_with`.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) enum Awaiter {
-    Task(TaskId),
-    GatherSlot { gather: HeapId, source: HeapId },
-}
-
-impl<C: ContainsHeap> DropWithContext<C> for Awaiter {
-    fn drop_with(self, heap: &mut C) {
-        if let Self::GatherSlot { gather, .. } = self {
-            heap.heap_mut().dec_ref(gather);
-        }
-    }
-}
-
-/// A gather() result tracking multiple coroutines/tasks and external futures.
-///
-/// Created by `asyncio.gather(*awaitables)`. Does NOT spawn tasks immediately -
-/// tasks are spawned when the GatherFuture is awaited in Await.
-///
-/// # Lifecycle
-///
-/// The lifecycle is encoded in [`GatherState`]:
-///
-/// 1. **`Pending`** — created by `gather(coro1, coro2, ...)` but not yet awaited.
-///    Only `items` carries data; the per-await bookkeeping does not yet exist.
-/// 2. **`Awaited(AwaitedGather)`** — entered by the `Await` opcode. Spawned task
-///    ids, the waiter, the per-slot results, and any external futures still
-///    being waited on all live inside the [`AwaitedGather`] payload. Tasks and
-///    external resolutions write into `results` slots while in this state.
-/// 3. **`Completed(list_id)`** — all children completed successfully. The
-///    `list_id` is an inc_ref'd `HeapData::List` holding the gathered results;
-///    re-awaiting the gather returns this same list, matching CPython's
-///    behavior of caching a Future's result.
-/// 4. **`Failed(error)`** — a child task or external future raised. The error
-///    was propagated to the original waiter on first await, and is cached here
-///    so re-awaits re-raise the same exception (again matching CPython).
-///
-/// Encoding the phases as a `match`-able enum lets every site that touches a
-/// gather state-transition explicitly, instead of inferring "have we been
-/// awaited?" / "are we done?" from emptiness checks across several `Vec`s.
-///
-/// # Re-await semantics
-///
-/// `Completed` and `Failed` gathers can be awaited any number of times — each
-/// await yields the same cached result or exception. Re-awaiting a gather that
-/// is still in `Awaited` state (in-flight, the original waiter has not finished
-/// driving it to completion) is currently rejected; supporting that would
-/// require a list of waiters and is left as future work.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct GatherFuture {
-    /// Heap ids of items to gather. Each id points to an awaitable
-    /// `HeapData` entry (currently `Coroutine` or `ExternalFuture`); the
-    /// kind is recovered with `heap.read(id)` at gather-await time.
-    ///
-    /// Set once at construction and never mutated. The gather inc_refs each
-    /// id and is the owner until drop, so GC must always walk this vector
-    /// regardless of `state`.
-    pub items: Vec<HeapId>,
-    /// Phase of the gather lifecycle. See [`GatherState`].
-    pub state: GatherState,
-}
-
-/// Lifecycle phase of a [`GatherFuture`].
-///
-/// See the `GatherFuture` docs for the transition rules.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) enum GatherState {
-    /// Created but never awaited. No spawned tasks, no results, no waiter.
+pub(crate) enum FutureState {
+    /// Nobody has settled it yet. `waiters` is only meaningful in this state.
     Pending,
-    /// Currently being awaited. `AwaitedGather` carries every per-await field.
-    Awaited(AwaitedGather),
-    /// All children completed successfully. Re-awaiting the gather inc_refs this
-    /// value and returns it.
-    Completed(Value),
-    /// A child task failed (or an external future was rejected). The error
-    /// is cached so subsequent awaits re-raise it. `RunError` implements
-    /// `Clone`; clone the error when transitioning into this state.
+    /// Settled with a value. Owned, and cloned to each awaiting site.
+    Finished(Value),
+    /// Settled with an exception, replayed to each awaiting site.
     Failed(RunError),
+    /// Cancelled. The error is the `CancelledError` every awaiting site gets.
+    Cancelled(RunError),
 }
 
-/// Per-await bookkeeping for a [`GatherFuture`] in the `Awaited` phase.
+impl FutureState {
+    /// Whether the future has settled, and so can no longer be set or cancelled.
+    #[inline]
+    pub fn is_settled(&self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+/// Who a settling future has to tell.
 ///
-/// All fields are populated when the gather is first awaited (in
-/// `await_gather_future`) and progressively consumed as children resolve.
+/// Registered in the future's own `waiters` list at the moment the wait starts,
+/// and walked exactly once when it settles.
 ///
-/// The gather is the single source of truth for "what awaitables I'm waiting
-/// on and where their values go". Both maps follow the same lifecycle: each
-/// entry is removed as the corresponding child resolves, and the gather is
-/// done when both maps are empty.
+/// Not `Copy` / `Clone` on purpose: `Slot` owns an inc_ref on its combinator, so
+/// every duplication has to go through the heap and every discard through
+/// [`DropWithContext`].
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AwaitedGather {
-    /// Downstream the gather should notify on completion. `Awaiter::Task(t)`
-    /// is the user-level `await gather` case (waker is the task that ran
-    /// the `await`); `Awaiter::GatherSlot { .. }` is the nested-gather case
-    /// (this gather is an item of an outer gather, and its result list
-    /// fans into the outer's slot). Single-waiter for now; the multi-waiter
-    /// form is a planned follow-up.
-    pub awaiter: Awaiter,
-    /// Children → slots they fill in `results`. Keyed by each child's own
-    /// `HeapId` (coroutine or external future). Duplicates from
-    /// `gather(c, c)` produce a single entry whose value is a `SmallVec` of
-    /// multiple indices.
-    ///
-    /// Entries are removed as the corresponding child resolves. The gather
-    /// is done when this map is empty.
-    pub pending_children: AHashMap<HeapId, SmallVec<[usize; 1]>>,
-    /// Results from each gather item, in order. Indices align with
-    /// `GatherFuture::items`. Filled as tasks complete and externals resolve.
-    pub results: Vec<Option<Value>>,
+pub(crate) enum Waiter {
+    /// A parked task: the value lands on its operand stack, or the error is
+    /// raised in its frame. `TaskId` is a scheduler-side number, not a heap
+    /// reference, so this variant owns nothing.
+    Task(TaskId),
+    /// Slot `index` of the combinator at `owner`, which decides for itself what
+    /// a child's outcome means. Owns an inc_ref on `owner` so the combinator
+    /// outlives every child still reporting to it.
+    Slot { owner: HeapId, index: u32 },
 }
 
-impl GatherFuture {
-    /// Creates a new GatherFuture with the given item heap ids.
-    ///
-    /// # Arguments
-    /// * `items` - Heap ids of awaitables (coroutines or external futures)
-    pub fn new(items: Vec<HeapId>) -> Self {
+impl<C: ContainsHeap> DropWithContext<C> for Waiter {
+    fn drop_with(self, heap: &mut C) {
+        if let Self::Slot { owner, .. } = self {
+            heap.heap_mut().dec_ref(owner);
+        }
+    }
+}
+
+/// The scheduler-side half of a task: what it runs, and under which id.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TaskRun {
+    /// The coroutine being driven, owned by the future. `None` for the main
+    /// task, which runs module-level code rather than a coroutine.
+    pub coroutine: Option<HeapId>,
+    /// The scheduler task holding this coroutine's frames.
+    pub task_id: TaskId,
+}
+
+/// An `asyncio.Future`, and so also an `asyncio.Task`.
+///
+/// A future settles once. Until it does, `waiters` records everyone who will be
+/// told and `callbacks` records the Python callables the loop will run
+/// afterwards; after it settles both are empty and the outcome is replayed to
+/// every later `await`, exactly as CPython caches a result.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Future {
+    /// Which of the two names this object answers to.
+    pub kind: FutureKind,
+    /// The outcome, or `Pending`.
+    pub state: FutureState,
+    /// Everyone to tell when it settles, in registration order.
+    pub waiters: Vec<Waiter>,
+    /// `add_done_callback` callables, owned, run by the loop after settling.
+    pub callbacks: Vec<Value>,
+    /// The external call this future stands for, when the host settles it.
+    pub call_id: Option<CallId>,
+    /// Set for a `Task`: the coroutine it drives and the id it runs under.
+    pub run: Option<TaskRun>,
+    /// How many `cancel()` calls this task has outstanding, which is what
+    /// `Task.cancelling()` reports.
+    pub cancelling: u32,
+    /// A cancellation asked for while the task was running rather than parked.
+    /// It takes effect at the task's next suspension, as in CPython, so a
+    /// `cancel()` cannot interrupt a stretch of straight-line code.
+    pub must_cancel: Option<Value>,
+    /// `Task.get_name()`, defaulting to `Task-<n>` on first read.
+    pub name: Option<EitherStr>,
+}
+
+impl Future {
+    /// A pending future nobody is waiting on yet.
+    pub(crate) fn new(kind: FutureKind, call_id: Option<CallId>) -> Self {
         Self {
-            items,
-            state: GatherState::Pending,
+            kind,
+            state: FutureState::Pending,
+            waiters: Vec::new(),
+            callbacks: Vec::new(),
+            call_id,
+            run: None,
+            cancelling: 0,
+            must_cancel: None,
+            name: None,
         }
     }
 
-    /// Returns the number of items to gather.
-    #[inline]
-    pub fn item_count(&self) -> usize {
-        self.items.len()
+    /// Pushes every heap id this future owns.
+    ///
+    /// The one place they are listed: both the GC's child walk and the
+    /// destructor's reference release go through it, so neither can drift.
+    pub fn owned_ids(&self, push: &mut impl FnMut(HeapId)) {
+        if let FutureState::Finished(Value::Ref(id)) = &self.state {
+            push(*id);
+        }
+        for waiter in &self.waiters {
+            if let Waiter::Slot { owner, .. } = waiter {
+                push(*owner);
+            }
+        }
+        for callback in &self.callbacks {
+            if let Value::Ref(id) = callback {
+                push(*id);
+            }
+        }
+        if let Some(coroutine) = self.run.as_ref().and_then(|run| run.coroutine) {
+            push(coroutine);
+        }
+        if let Some(Value::Ref(id)) = &self.must_cancel {
+            push(*id);
+        }
     }
+}
 
-    /// Returns the per-await bookkeeping if the gather is in the `Awaited`
-    /// phase. Convenience for read-only inspection sites that don't need to
-    /// distinguish the other phases from one another.
-    #[inline]
-    pub fn as_awaited(&self) -> Option<&AwaitedGather> {
-        match &self.state {
-            GatherState::Awaited(awaited) => Some(awaited),
-            GatherState::Pending | GatherState::Completed(_) | GatherState::Failed(_) => None,
+/// What a [`Combinator`] is watching its children for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum CombinatorKind {
+    /// `asyncio.gather`. With `return_exceptions` the failures become results;
+    /// without it the first failure settles the output and the siblings are
+    /// left running, as in CPython.
+    Gather { return_exceptions: bool },
+    /// `asyncio.wait`, which settles with `(done, pending)` sets and never
+    /// raises what a child raised.
+    Wait { return_when: ReturnWhen },
+    /// `asyncio.as_completed`, which hands each child out in settling order.
+    AsCompleted,
+    /// `asyncio.TaskGroup`, whose `__aexit__` waits for every child and
+    /// cancels the rest as soon as one fails.
+    TaskGroup,
+}
+
+/// When [`CombinatorKind::Wait`] stops waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ReturnWhen {
+    FirstCompleted,
+    FirstException,
+    AllCompleted,
+}
+
+/// Several futures watched as one.
+///
+/// The combinator registers a [`Waiter::Slot`] on each child and settles its
+/// own `output` future when its rule says so. It is not itself awaitable:
+/// callers await `output`, which keeps one settling path for every awaitable.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Combinator {
+    /// The rule that decides when `output` settles.
+    pub kind: CombinatorKind,
+    /// The futures being watched, in the order they were given. Owned.
+    pub children: Vec<HeapId>,
+    /// Per-child outcome, filled as each settles. Owned.
+    pub results: Vec<Option<Value>>,
+    /// Children that have not settled yet.
+    pub pending: usize,
+    /// The future this combinator settles. Owned.
+    pub output: HeapId,
+    /// `as_completed` only: children that have settled and not yet been handed
+    /// out, oldest first.
+    pub finished: Vec<HeapId>,
+    /// `as_completed` only: the future a waiting `__anext__` is parked on.
+    pub next_wait: Option<HeapId>,
+    /// `TaskGroup` only: the first error a child raised, which `__aexit__`
+    /// re-raises once every sibling has stopped.
+    pub error: Option<RunError>,
+}
+
+impl Combinator {
+    /// A combinator over `children`, settling `output`, with nothing reported yet.
+    pub fn new(kind: CombinatorKind, children: Vec<HeapId>, output: HeapId) -> Self {
+        let pending = children.len();
+        Self {
+            kind,
+            results: (0..children.len()).map(|_| None).collect(),
+            children,
+            pending,
+            output,
+            finished: Vec::new(),
+            next_wait: None,
+            error: None,
         }
     }
 
-    /// Mutable counterpart to [`Self::as_awaited`].
-    #[inline]
-    pub fn as_awaited_mut(&mut self) -> Option<&mut AwaitedGather> {
-        match &mut self.state {
-            GatherState::Awaited(awaited) => Some(awaited),
-            GatherState::Pending | GatherState::Completed(_) | GatherState::Failed(_) => None,
+    /// Pushes every heap id this combinator owns; see [`Future::owned_ids`].
+    pub fn owned_ids(&self, push: &mut impl FnMut(HeapId)) {
+        for child in &self.children {
+            push(*child);
+        }
+        for result in self.results.iter().flatten() {
+            if let Value::Ref(id) = result {
+                push(*id);
+            }
+        }
+        push(self.output);
+        for done in &self.finished {
+            push(*done);
+        }
+        if let Some(next) = self.next_wait {
+            push(next);
         }
     }
 }

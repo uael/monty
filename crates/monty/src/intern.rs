@@ -1238,6 +1238,66 @@ pub enum StaticStrings {
     /// `__await__`, the protocol method `await` drives an arbitrary object through.
     #[strum(serialize = "__await__")]
     DunderAwait,
+    Sleep,
+    #[strum(serialize = "ensure_future")]
+    EnsureFuture,
+    #[strum(serialize = "create_task")]
+    CreateTask,
+    Wait,
+    #[strum(serialize = "as_completed")]
+    AsCompleted,
+    #[strum(serialize = "current_task")]
+    CurrentTask,
+    Iscoroutine,
+    Isfuture,
+    #[strum(serialize = "timeout_at")]
+    TimeoutAt,
+    #[strum(serialize = "Future")]
+    FutureClass,
+    #[strum(serialize = "Task")]
+    TaskClass,
+    #[strum(serialize = "Lock")]
+    LockClass,
+    #[strum(serialize = "Event")]
+    EventClass,
+    #[strum(serialize = "Semaphore")]
+    SemaphoreClass,
+    #[strum(serialize = "BoundedSemaphore")]
+    BoundedSemaphoreClass,
+    #[strum(serialize = "Barrier")]
+    BarrierClass,
+    #[strum(serialize = "Queue")]
+    QueueClass,
+    #[strum(serialize = "TaskGroup")]
+    TaskGroupClass,
+    #[strum(serialize = "CancelledError")]
+    CancelledErrorClass,
+    #[strum(serialize = "InvalidStateError")]
+    InvalidStateErrorClass,
+    #[strum(serialize = "QueueEmpty")]
+    QueueEmptyClass,
+    #[strum(serialize = "QueueFull")]
+    QueueFullClass,
+    #[strum(serialize = "TimeoutError")]
+    TimeoutErrorClass,
+    #[strum(serialize = "FIRST_COMPLETED")]
+    FirstCompleted,
+    #[strum(serialize = "FIRST_EXCEPTION")]
+    FirstException,
+    #[strum(serialize = "ALL_COMPLETED")]
+    AllCompleted,
+    /// `return_when=` of `asyncio.wait`.
+    #[strum(serialize = "return_when")]
+    ReturnWhen,
+    /// The `asyncio.timeout()` function, and the `timeout=` keyword of
+    /// `asyncio.wait`.
+    Timeout,
+    /// `result=` of `asyncio.sleep`.
+    Result,
+    /// `delay` parameter of `asyncio.sleep`.
+    Delay,
+    /// `fs` parameter of `asyncio.wait` and `asyncio.as_completed`.
+    Fs,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

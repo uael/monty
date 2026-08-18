@@ -421,8 +421,10 @@ enum FBlock<'a> {
     /// An exception-path `finally` whose exception is swallowed on escape.
     FinallyEnd,
     /// A `with` body: the context manager sits on the operand stack and
-    /// `__exit__` is invoked when control exits the block.
-    With { region: Region },
+    /// `__exit__` is invoked when control exits the block. `aexit` carries the
+    /// `__aexit__` name index for an `async with`, whose exits have to call and
+    /// await the coroutine that the synchronous `WithExit` opcode cannot drive.
+    With { region: Region, aexit: Option<u16> },
     /// A return value to discard if control escapes an inline `finally`.
     PopValue,
 }
@@ -434,7 +436,7 @@ impl<'a> FBlock<'a> {
             Self::TryExcept { region }
             | Self::FinallyTry { region, .. }
             | Self::ExceptHandler { region, .. }
-            | Self::With { region } => Some(region),
+            | Self::With { region, .. } => Some(region),
             Self::WhileLoop(_) | Self::ForLoop(_) | Self::FinallyEnd | Self::PopValue => None,
         }
     }
@@ -482,7 +484,7 @@ impl<'a> FBlock<'a> {
     /// Extracts a `With` region or panics on a compiler invariant bug.
     fn expect_with(self) -> Region {
         match self {
-            Self::With { region } => region,
+            Self::With { region, .. } => region,
             _ => panic!("expected a with frame block"),
         }
     }
@@ -3487,13 +3489,25 @@ impl<'a> Compiler<'a> {
             // Discard the in-flight exception: break/continue/return in a
             // finally body swallows the exception that triggered it.
             FBlock::FinallyEnd => self.code.emit(Opcode::ClearException),
-            FBlock::With { region } => {
+            FBlock::With { region, aexit } => {
                 // Keep `__exit__` outside its own handler region.
                 region.interrupt(self.code.current_offset());
                 if preserve_tos {
                     self.code.emit(Opcode::Rot2)?;
                 }
-                self.code.emit(Opcode::WithExit)?;
+                // An `async with` exits through the same three-`None` call its
+                // normal path emits: `WithExit` dispatches `PyTrait::py_exit`,
+                // which is the synchronous pair and would report the missing
+                // `__exit__` rather than awaiting `__aexit__`.
+                if let Some(aexit) = *aexit {
+                    self.code.emit(Opcode::LoadNone)?;
+                    self.code.emit(Opcode::LoadNone)?;
+                    self.code.emit(Opcode::LoadNone)?;
+                    self.code.emit_u16_u8(Opcode::CallAttr, aexit, 3)?;
+                    self.compile_await()?;
+                } else {
+                    self.code.emit(Opcode::WithExit)?;
+                }
                 self.code.emit(Opcode::Pop)
             }
             FBlock::PopValue => {
@@ -4399,7 +4413,10 @@ impl<'a> Compiler<'a> {
         // === Body (protected region) ===
         // The context manager remains below the protected body's operands.
         let region = Region::open(self.code.current_offset(), stack_depth + 1, self.exc_stack_count());
-        self.fblocks.push(FBlock::With { region });
+        self.fblocks.push(FBlock::With {
+            region,
+            aexit: Some(aexit_idx),
+        });
         // Protect target binding so unpack failures invoke `__aexit__`.
         if let Some(target) = target {
             self.compile_unpack_target(target)?;
@@ -4468,7 +4485,7 @@ impl<'a> Compiler<'a> {
         // === Body (protected region) ===
         // The context manager remains below the protected body's operands.
         let region = Region::open(self.code.current_offset(), stack_depth + 1, self.exc_stack_count());
-        self.fblocks.push(FBlock::With { region });
+        self.fblocks.push(FBlock::With { region, aexit: None });
         // Protect target binding so unpack failures invoke `__exit__`.
         if let Some(target) = target {
             self.compile_unpack_target(target)?;

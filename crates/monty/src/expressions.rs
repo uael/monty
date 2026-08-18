@@ -280,7 +280,7 @@ pub enum Expr {
     UnaryInvert(Box<ExprLoc>),
     /// Await expression - suspends execution until the awaited value resolves.
     ///
-    /// Can await `ExternalFuture`, `Coroutine`, or `GatherFuture` values.
+    /// Can await a `Future`, a `Coroutine`, or a `Combinator` value.
     /// Raises `TypeError` for non-awaitable values.
     /// Unlike standard Python, `await` is allowed at module level (like Jupyter notebooks).
     Await(Box<ExprLoc>),

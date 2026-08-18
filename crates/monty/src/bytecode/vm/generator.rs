@@ -79,6 +79,16 @@ pub(crate) struct GenActivation {
     mode: ResumeMode,
 }
 
+impl GenActivation {
+    /// The generator this step owns, for the walks that have to name every
+    /// reference a parked task is holding.
+    #[cfg(feature = "ref-count-return")]
+    #[inline]
+    pub(super) fn generator_id(&self) -> HeapId {
+        self.gen_id
+    }
+}
+
 impl<C: ContainsHeap> DropWithContext<C> for GenActivation {
     fn drop_with(self, heap: &mut C) {
         heap.heap_mut().dec_ref(self.gen_id);
@@ -709,7 +719,7 @@ fn already_executing(is_async: bool) -> RunError {
     SimpleException::new_msg(ExcType::ValueError, format!("{kind} already executing")).into()
 }
 
-/// `TypeError: __await__() returned non-iterator of type 'X'` — an `await`
+/// `TypeError: __await__() returned non-iterator of type 'X'`: an `await`
 /// whose object handed back something the send loop cannot drive.
 fn await_returned_non_iterator(type_name: &str) -> RunError {
     SimpleException::new_msg(

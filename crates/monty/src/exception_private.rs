@@ -2635,7 +2635,7 @@ impl RawStackFrame {
 /// - `UncatchableExc`: Python exception from resource limits that CANNOT be caught
 ///
 /// `Clone` is implemented so an error can be cached for later re-raising
-/// (e.g. a failed `GatherFuture` replaying the same exception on every
+/// (e.g. a failed `Combinator` replaying the same exception on every
 /// re-await). Inner data is shallow-clonable: `Cow<'static, str>` is cheap,
 /// and `ExceptionRaise` already derives `Clone`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -7,7 +7,9 @@
 //! directly to cover the serde impls a dump ultimately rests on.
 
 use monty::{Dump, MontyRun, RunProgress, Session, SessionRef, dump};
-use monty_types::{CompileOptions, MontyException, MontyObject, NameLookupResult, PrintWriter, ResourceTracker};
+use monty_types::{
+    CompileOptions, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter, ResourceTracker,
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Round-trips compiled code through postcard.
@@ -278,4 +280,100 @@ fn run_progress_complete_round_trip() {
     let loaded: RunProgress = round_trip_progress(&progress);
 
     assert_eq!(loaded.into_complete().unwrap(), MontyObject::Int(3));
+}
+
+/// A whole event loop mid-flight survives a dump: a task parked on an external
+/// call, a second parked on a timer, and a custom `__await__` generator
+/// suspended inside a third all come back and finish.
+///
+/// This is the only coverage that carries `HeapData::Future`, the scheduler's
+/// tasks, and an armed timer through postcard.
+#[test]
+fn run_progress_round_trip_preserves_suspended_tasks() {
+    let code = r"
+import asyncio
+
+order = []
+
+
+class Waits:
+    def __await__(self):
+        got = yield from slow().__await__()
+        return got * 2
+
+
+async def slow():
+    await asyncio.sleep(0.01)
+    order.append('timer')
+    return 5
+
+
+async def outer():
+    order.append('start')
+    doubled = await Waits()
+    order.append('await')
+    return doubled
+
+
+async def external():
+    value = await async_call(7)
+    order.append('external')
+    return value
+
+
+async def main():
+    a, b = await asyncio.gather(outer(), external())
+    return [a, b, order]
+
+
+await main()
+";
+    let runner = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let progress = runner
+        .start(vec![], ResourceTracker::default(), PrintWriter::Stdout)
+        .unwrap();
+    let progress = resolve_name_lookups(progress).unwrap();
+
+    // The external call is answered as a future, which parks that task and
+    // leaves the loop suspended with the other two still in flight.
+    let call = progress.into_function_call().expect("should be at the external call");
+    assert_eq!(call.function_name, "async_call");
+    let progress = call.resume_pending(PrintWriter::Stdout).unwrap();
+
+    // The host's answer lands before the timer because an external call costs
+    // no scheduler time: the clock only moves once nothing is ready and nothing
+    // is outstanding with the host. See `limitations/asyncio.md`.
+    let expected = MontyObject::List(vec![
+        MontyObject::Int(10),
+        MontyObject::Int(70),
+        MontyObject::List(vec![
+            MontyObject::String("start".to_owned()),
+            MontyObject::String("external".to_owned()),
+            MontyObject::String("timer".to_owned()),
+            MontyObject::String("await".to_owned()),
+        ]),
+    ]);
+
+    let loaded = round_trip_progress(&progress);
+    let state = loaded.into_resolve_futures().expect("should be waiting on futures");
+    let call_id = state.pending_call_ids()[0];
+    let resumed = state
+        .resume(
+            vec![(call_id, ExtFunctionResult::Return(MontyObject::Int(70)))],
+            PrintWriter::Stdout,
+        )
+        .unwrap();
+    assert_eq!(resumed.into_complete().unwrap(), expected);
+
+    // The original is resumed too: an unresumed `RunProgress` leaves its
+    // globals' refs unreleased, which aborts under `memory-model-checks`.
+    let state = progress.into_resolve_futures().expect("should be waiting on futures");
+    let call_id = state.pending_call_ids()[0];
+    let resumed = state
+        .resume(
+            vec![(call_id, ExtFunctionResult::Return(MontyObject::Int(70)))],
+            PrintWriter::Stdout,
+        )
+        .unwrap();
+    assert_eq!(resumed.into_complete().unwrap(), expected);
 }

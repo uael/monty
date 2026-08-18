@@ -103,15 +103,20 @@ impl Drop for RecursionGuard<'_, '_> {
 /// nested call to [`VM::run`], not a push onto the heap-allocated `frames` vec.
 ///
 /// Tuned conservatively from the smallest native stack observed while fixing
-/// recursive callback crashes. A debug monty-datatest worker with an ~2 MiB
-/// stack crashed at depth 19 on macOS/arm64; keep this much lower and
-/// revalidate on all supported host targets before raising it.
+/// recursive callback crashes, and re-tuned whenever `run()`'s frame grows,
+/// since the product of the two is what the stack must hold. A debug
+/// monty-datatest worker with an ~2 MiB stack crashed at depth 19 on
+/// macOS/arm64 when that frame was ~111 KiB; the event loop and pattern
+/// matching took it to ~136 KiB, where `recursion__instance_repr` aborts at 12
+/// and completes at 10. This keeps the same fraction of the measured crash
+/// point the first tuning did. Revalidate on all supported host targets before
+/// raising it.
 ///
 /// A hard safety constant, not a Python-visible setting: unlike ordinary
 /// recursion depth, it does not go through the tracker and cannot be changed
 /// by sandboxed code or test hooks.
 // TODO set this value to custom values per-OS/arch
-pub(crate) const MAX_RUN_REENTRY_DEPTH: u8 = 12;
+pub(crate) const MAX_RUN_REENTRY_DEPTH: u8 = 7;
 
 impl VM<'_> {
     /// Charges one native re-entry level, counting the remaining budget down

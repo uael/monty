@@ -60,6 +60,11 @@ pub fn exc_monty_to_py(py: Python<'_>, mut exc: MontyException) -> PyErr {
         ExcType::GeneratorExit => exceptions::PyGeneratorExit::new_err(msg),
         ExcType::SyntaxError => exceptions::PySyntaxError::new_err(msg),
         ExcType::TimeoutError => exceptions::PyTimeoutError::new_err(msg),
+        // `asyncio`'s own exceptions have no PyO3 constructor, so they cross as
+        // the nearest native base: `CancelledError` derives from
+        // `BaseException`, the other three from `Exception`.
+        ExcType::CancelledError => exceptions::PyBaseException::new_err(msg),
+        ExcType::InvalidStateError | ExcType::QueueEmpty | ExcType::QueueFull => exceptions::PyException::new_err(msg),
         ExcType::TypeError => exceptions::PyTypeError::new_err(msg),
         ExcType::ValueError => exceptions::PyValueError::new_err(msg),
         ExcType::UnicodeDecodeError | ExcType::UnicodeEncodeError => unicode_error_to_py(py, exc_type, exc_data, msg),

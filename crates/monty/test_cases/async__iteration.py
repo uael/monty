@@ -1,5 +1,6 @@
 # run-async
 # `async for`, `async with`, and async generators.
+import asyncio
 
 
 class Ticker:
@@ -242,3 +243,82 @@ try:
     assert False, 'expected TypeError'
 except TypeError as exc:
     assert str(exc) == "'async_generator' object is not iterable"
+
+
+# === non-local exits from an `async with` body ===
+# `return`, `break` and `continue` leave the block without reaching either the
+# normal-exit or the exception path, so the unwind has to emit `__aexit__`
+# itself. Emitting the synchronous `__exit__` there instead raises
+# `AttributeError` on a manager that only defines the async pair.
+async def return_from_block(lock):
+    async with lock as held:
+        return held
+
+
+lock = Lock()
+assert await return_from_block(lock) is lock  # pyright: ignore
+assert not lock.held
+assert lock.seen is None
+
+
+# `break` exits both the block and the loop around it.
+locks = [Lock(), Lock(), Lock()]
+for index, lock in enumerate(locks):
+    async with lock:
+        assert lock.held
+        if index == 1:
+            break
+assert [lock.held for lock in locks] == [False, False, False]
+assert [lock.seen for lock in locks] == [None, None, None]
+
+
+# `continue` exits the block once per iteration.
+locks = [Lock(), Lock()]
+tail = 0
+for lock in locks:
+    async with lock:
+        continue
+    tail += 1
+assert [lock.held for lock in locks] == [False, False]
+assert tail == 0
+
+
+# Nested blocks unwind inner-first, as they exit in reverse order normally.
+order = []
+
+
+class Ordered(Lock):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+    async def __aexit__(self, exc_type, exc, tb):
+        order.append(self.name)
+        return await super().__aexit__(exc_type, exc, tb)
+
+
+async def return_from_nested():
+    async with Ordered('outer'):
+        async with Ordered('inner'):
+            return 'value'
+
+
+assert await return_from_nested() == 'value'  # pyright: ignore
+assert order == ['inner', 'outer']
+
+
+# `__aexit__` may suspend on the unwind path, exactly as on the normal one.
+class Slow(Lock):
+    async def __aexit__(self, exc_type, exc, tb):
+        await asyncio.sleep(0)
+        return await super().__aexit__(exc_type, exc, tb)
+
+
+async def return_awaiting_exit():
+    lock = Slow()
+    async with lock:
+        return lock
+
+
+lock = await return_awaiting_exit()  # pyright: ignore
+assert not lock.held

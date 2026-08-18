@@ -23,7 +23,9 @@ pub use compiler::Compiler;
 pub(crate) use op::MatchShape;
 #[cfg(test)]
 pub(crate) use op::opcode_fingerprint;
-pub(crate) use vm::{CallResult, ContainsVM, GeneratorInput, GeneratorStep, RecursionToken, stop_iteration_with};
+pub(crate) use vm::{
+    CallResult, ContainsVM, GeneratorInput, GeneratorStep, Outcome, RecursionToken, stop_iteration_with,
+};
 pub use vm::{FrameExit, VM, VMSnapshot};
 
 /// Module-level dunder names Monty exposes with fixed values for CPython

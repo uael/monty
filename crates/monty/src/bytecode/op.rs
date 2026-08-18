@@ -405,10 +405,10 @@ pub enum Opcode {
     // === Async/Await ===
     /// Await the TOS value.
     ///
-    /// Handles `ExternalFuture`, `Coroutine`, and `GatherFuture` awaitables.
-    /// For `ExternalFuture`: if resolved, pushes result; if pending, blocks task.
+    /// Handles `Future`, `Coroutine`, and `Combinator` awaitables.
+    /// For `Future`: if resolved, pushes result; if pending, blocks task.
     /// For `Coroutine`: validates state is `New`, then starts execution.
-    /// For `GatherFuture`: spawns all coroutines as tasks and blocks until completion.
+    /// For `Combinator`: spawns all coroutines as tasks and blocks until completion.
     ///
     /// Raises `TypeError` if TOS is not awaitable.
     /// Raises `RuntimeError` if coroutine/future has already been awaited.

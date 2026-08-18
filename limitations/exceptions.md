@@ -14,12 +14,18 @@ on a class that does *not* derive from one raises
 `UnboundLocalError`, `ValueError`, `UnicodeDecodeError`, `UnicodeEncodeError`,
 `ImportError`, `ModuleNotFoundError`, `OSError`, `FileNotFoundError`, `FileExistsError`,
 `IsADirectoryError`, `NotADirectoryError`, `PermissionError`,
-`AssertionError`, `MemoryError`, `StopIteration`, `SyntaxError`,
-`TimeoutError`, `TypeError`.
+`AssertionError`, `MemoryError`, `StopIteration`, `StopAsyncIteration`,
+`GeneratorExit`, `SyntaxError`, `TimeoutError`, `TypeError`.
 
 Module-specific: `json.JSONDecodeError` (subclass of `ValueError`),
 `re.PatternError` / `re.error`, `io.UnsupportedOperation` (catchable as
-both `OSError` and `ValueError`, matching CPython's dual parentage).
+both `OSError` and `ValueError`, matching CPython's dual parentage), and
+`asyncio.CancelledError` (a direct `BaseException` subclass, so
+`except Exception:` does not catch it), `asyncio.InvalidStateError`,
+`asyncio.QueueEmpty`, `asyncio.QueueFull`. None of these are builtins: each
+is reachable only through its module, as in CPython. `asyncio.TimeoutError`
+is the builtin `TimeoutError` re-exported, which is what it has been since
+3.11.
 
 ## Exception classes NOT implemented
 
@@ -29,7 +35,7 @@ both `OSError` and `ValueError`, matching CPython's dual parentage).
 `ConnectionRefusedError`, `ConnectionResetError`,
 `BrokenPipeError`), `BlockingIOError`, `ChildProcessError`,
 `InterruptedError`, `ProcessLookupError`, `ReferenceError`,
-`StopAsyncIteration`, `SystemError`, `TabError`, `IndentationError`,
+`SystemError`, `TabError`, `IndentationError`,
 `UnicodeError` (parent), `UnicodeTranslateError`,
 `EncodingWarning`, `EnvironmentError` / `IOError` aliases,
 `ExceptionGroup` / `BaseExceptionGroup` (see ./language.md).
