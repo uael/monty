@@ -2485,7 +2485,7 @@ mod tests {
     use num_bigint::BigInt;
 
     use super::*;
-    use crate::{heap::HeapReader, intern::InternerBuilder};
+    use crate::{heap::HeapReader, intern::InternerBuilder, namespaces::Scopes};
 
     /// Creates a heap and directly allocates a LongInt with the given BigInt value.
     ///
@@ -2517,7 +2517,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2538,7 +2538,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2561,7 +2561,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2584,7 +2584,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2606,7 +2606,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2627,7 +2627,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2648,7 +2648,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2670,7 +2670,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2692,7 +2692,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,

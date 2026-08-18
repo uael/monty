@@ -173,6 +173,7 @@ impl DecodedChildEvent {
             // child — mapped anyway so this stays total; tag mirrors the oneof
             Kind::Shutdown(value) => (12, value.encode_to_vec()),
             Kind::ParseFacts(value) => (13, value.encode_to_vec()),
+            Kind::NamespaceHandle(value) => (14, value.encode_to_vec()),
         };
         Some(Self { kind, bytes })
     }

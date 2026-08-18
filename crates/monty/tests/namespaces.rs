@@ -7,6 +7,8 @@
 //! through one namespace and reading through the other rather than by
 //! comparing values that merely look alike.
 
+use std::time::Instant;
+
 use monty::{Dump, MontyRepl, ReplProgress, ScopeId, Session, SessionRef, dump};
 use monty_types::{CompileOptions, MontyObject, PrintWriter, ResourceTracker};
 
@@ -293,7 +295,7 @@ fn a_second_namespace_is_readable_while_the_first_is_suspended() {
 
     // The suspended namespace reads as itself.
     assert_eq!(
-        progress.probe(&"x", vec![], PrintWriter::Stdout).unwrap(),
+        progress.probe("x", vec![], PrintWriter::Stdout).unwrap(),
         MontyObject::Int(1)
     );
     // And the other one reads as itself, at the same moment.
@@ -479,8 +481,6 @@ fn a_namespace_is_padded_to_names_added_after_it() {
 /// for the record.
 #[test]
 fn cost_of_a_namespace() {
-    use std::time::Instant;
-
     const NAMES: usize = 200;
     const FRAMES: usize = 500;
 
@@ -492,7 +492,7 @@ fn cost_of_a_namespace() {
 
     let started = Instant::now();
     let kids: Vec<ScopeId> = (0..FRAMES).map(|_| repl.dress_namespace(parent).unwrap()).collect();
-    let dress_each = started.elapsed() / FRAMES as u32;
+    let dress_each = started.elapsed() / u32::try_from(FRAMES).expect("frame count fits");
 
     let bytes = dump("ns.py", None, SessionRef::Idle(&repl)).unwrap();
     let started = Instant::now();

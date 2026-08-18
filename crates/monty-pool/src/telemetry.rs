@@ -259,6 +259,15 @@ impl Recorder {
             }
             // Ends nothing and starts nothing: releasing a reference leaves
             // the session, and any suspension, exactly as it was.
+            Some(pb::parent_request::Kind::Namespace(n)) => {
+                self.turn = Some(start_span(logfire::span!(
+                    parent: self.context_span(),
+                    "namespace {operation}",
+                    operation = namespace_operation(n.op.as_ref()),
+                    // filled in by the `NamespaceHandle` reply
+                    namespace = Empty,
+                )));
+            }
             Some(pb::parent_request::Kind::ReleaseRefs(r)) => {
                 self.turn = Some(start_span(logfire::span!(
                     parent: self.context_span(),
@@ -476,6 +485,12 @@ impl Recorder {
             // a bare acknowledgement ending a housekeeping turn; the turn
             // span itself is the record
             Some(pb::child_event::Kind::Ok(_)) => self.turn = None,
+            Some(pb::child_event::Kind::NamespaceHandle(h)) => {
+                if let Some(turn) = self.turn.take() {
+                    // i64: `tracing` has no typed u32 value.
+                    turn.record("namespace", i64::from(h.namespace));
+                }
+            }
             Some(pb::child_event::Kind::FatalError(f)) => {
                 let (message, cut) = truncate_str(&f.message);
                 logfire::error!(
@@ -1027,6 +1042,17 @@ fn truncate_str(s: &str) -> (String, bool) {
             end -= 1;
         }
         (s[..end].to_owned(), true)
+    }
+}
+
+/// The human name of a namespace operation, for the turn's message.
+fn namespace_operation(op: Option<&pb::namespace::Op>) -> &'static str {
+    match op {
+        Some(pb::namespace::Op::Create(_)) => "create",
+        Some(pb::namespace::Op::Dress(_)) => "dress",
+        Some(pb::namespace::Op::Select(_)) => "select",
+        Some(pb::namespace::Op::Release(_)) => "release",
+        None => "unspecified",
     }
 }
 

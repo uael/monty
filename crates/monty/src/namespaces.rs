@@ -1,5 +1,7 @@
 //! Every global namespace a session holds over one heap.
 
+#[cfg(feature = "ref-count-return")]
+use crate::heap::HeapId;
 use crate::{
     heap::{ContainsHeap, DropWithContext, Heap},
     namespace::ScopeId,
@@ -45,12 +47,11 @@ impl Namespaces {
             .iter()
             .enumerate()
             .position(|(index, slot)| slot.is_none() && index != installed.index());
-        let index = match free {
-            Some(index) => index,
-            None => {
-                self.scopes.push(None);
-                self.scopes.len() - 1
-            }
+        let index = if let Some(index) = free {
+            index
+        } else {
+            self.scopes.push(None);
+            self.scopes.len() - 1
         };
         let id = ScopeId::from_index(index)?;
         self.scopes[index] = Some(Vec::new());
@@ -119,7 +120,7 @@ impl Namespaces {
     /// The leak check needs these as roots: a value a parked namespace names
     /// is reachable, however long it has been since that namespace ran.
     #[cfg(feature = "ref-count-return")]
-    pub(crate) fn root_ids(&self) -> Vec<crate::heap::HeapId> {
+    pub(crate) fn root_ids(&self) -> Vec<HeapId> {
         self.scopes
             .iter()
             .flatten()

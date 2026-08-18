@@ -18,7 +18,7 @@
 
 use std::{borrow::Cow, mem};
 
-use monty::{Dump, MontyRepl, ReplProgress, ReplStartError, Session, SessionRef, dump, parse_facts};
+use monty::{Dump, MontyRepl, ReplProgress, ReplStartError, ScopeId, Session, SessionRef, dump, parse_facts};
 use monty_type_checking::{SourceFile, TypeChecker};
 use monty_types::{
     AssertMessageAnnotations, CompileOptions, ExcType, ExtFunctionResult, FeedOutcome, MontyException, MontyObject,
@@ -237,6 +237,7 @@ impl Child {
             pb::parent_request::Kind::Parse(parse) => self.handle_parse(&parse),
             pb::parent_request::Kind::Probe(probe) => self.handle_probe(probe, sink),
             pb::parent_request::Kind::ReleaseRefs(release) => self.handle_release_refs(&release),
+            pb::parent_request::Kind::Namespace(namespace) => self.handle_namespace(namespace),
             // The Monty sandbox has no host interpreter to install packages for;
             // dependency installation is only supported by the CPython worker.
             // Answer with a session-preserving error rather than a hard failure.
@@ -512,10 +513,11 @@ impl Child {
             Ok(bindings) => bindings,
             Err(event) => return *event,
         };
+        let target = probe.namespace.map(ScopeId::from_raw);
         if let SessionState::Suspended(progress) = &mut self.state {
             progress.tracker().begin_call_steps(probe.max_steps);
             let mut print = ProtoPrint::new(sink);
-            let probed = progress.probe(&probe.expr, bindings, PrintWriter::Callback(&mut print));
+            let probed = progress.probe_in(target, &probe.expr, bindings, PrintWriter::Callback(&mut print));
             print.drain();
             return probe_event(probed);
         }
@@ -528,11 +530,11 @@ impl Child {
         };
         repl.tracker().begin_call_steps(probe.max_steps);
         let mut print = ProtoPrint::new(sink);
-        let result = if bindings.is_empty() {
+        let result = if bindings.is_empty() && target.is_none() {
             repl.probe_start(&probe.expr, PrintWriter::Callback(&mut print))
         } else {
             let mut repl = repl;
-            let probed = repl.probe_scoped(&probe.expr, bindings, PrintWriter::Callback(&mut print));
+            let probed = repl.probe_scoped_in(target, &probe.expr, bindings, PrintWriter::Callback(&mut print));
             print.drain();
             self.state = SessionState::Ready(repl);
             return probe_event(probed);
@@ -540,6 +542,47 @@ impl Child {
         let event = self.drive(result, &mut print);
         print.drain();
         event
+    }
+
+    /// Creates, dresses, selects or releases one of the session's global
+    /// namespaces.
+    ///
+    /// Refused while suspended: every operation here either changes what the
+    /// next feed runs against or frees values, and the suspended snippet is
+    /// holding the namespaces. Reading one meanwhile is what `Probe` is for.
+    fn handle_namespace(&mut self, request: pb::Namespace) -> pb::ChildEvent {
+        if let Err(event) = self.ensure_repl() {
+            return *event;
+        }
+        let repl = match &mut self.state {
+            SessionState::Ready(repl) => repl,
+            SessionState::Suspended(_) => {
+                return protocol_violation("Namespace while a snippet is suspended");
+            }
+            SessionState::Configured(_) => return protocol_violation("Namespace without a session"),
+        };
+        let Some(op) = request.op else {
+            return protocol_violation("Namespace without an operation");
+        };
+        let handle = match op {
+            pb::namespace::Op::Create(pb::Empty {}) => repl.create_namespace(),
+            pb::namespace::Op::Dress(parent) => repl.dress_namespace(ScopeId::from_raw(parent)),
+            pb::namespace::Op::Select(id) => repl
+                .select_namespace(ScopeId::from_raw(id))
+                .map(|()| ScopeId::from_raw(id)),
+            pb::namespace::Op::Release(id) => {
+                let id = ScopeId::from_raw(id);
+                if repl.release_namespace(id) {
+                    Ok(id)
+                } else {
+                    return error_event(ExcType::RuntimeError, "no such namespace");
+                }
+            }
+        };
+        match handle {
+            Ok(id) => namespace_handle_event(id),
+            Err(err) => error_event(ExcType::RuntimeError, err.message().unwrap_or("namespace error")),
+        }
     }
 
     /// Releases the parent's references to exported values.
@@ -920,6 +963,14 @@ pub fn fatal_error_event(message: &str) -> pb::ChildEvent {
 
 fn ok_event() -> pb::ChildEvent {
     event(pb::child_event::Kind::Ok(pb::Ok {}))
+}
+
+/// Turn-ending event naming the namespace a `Namespace` request produced or
+/// acted on.
+fn namespace_handle_event(id: ScopeId) -> pb::ChildEvent {
+    event(pb::child_event::Kind::NamespaceHandle(pb::NamespaceHandle {
+        namespace: id.raw(),
+    }))
 }
 
 /// Builds a turn-ending `Error` event from an exception type and message.

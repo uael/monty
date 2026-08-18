@@ -26,6 +26,7 @@ use crate::{
     exception_private::RunError,
     heap::{ContainsHeap, DropWithContext, Heap, HeapId, HeapReader},
     intern::FunctionId,
+    namespace::ScopeId,
     value::Value,
 };
 
@@ -181,7 +182,7 @@ pub(crate) struct SerializedTaskFrame {
     /// task parked in one namespace resumes in it however many tasks in other
     /// namespaces ran in between. See `CallFrame.scope`.
     #[serde(default)]
-    pub scope: crate::namespace::ScopeId,
+    pub scope: ScopeId,
     /// Base index into the VM-wide `exception_stack` for this frame.
     /// See `CallFrame.exception_stack_base`.
     pub exception_stack_base: usize,

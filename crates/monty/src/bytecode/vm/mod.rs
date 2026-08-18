@@ -42,7 +42,7 @@ use crate::{
     intern::{FunctionId, Interns, StaticStrings, StringId},
     modules::{StandardLib, json::JsonStringCache, re::RePatternCache},
     namespace::ScopeId,
-    namespaces::Scopes,
+    namespaces::{Namespaces, Scopes},
     object_bridge::MontyObjectExt,
     os_dispatch::{PendingOsEffect, listdir_names, release_pending_effect},
     parse::CodeRange,
@@ -697,7 +697,7 @@ pub struct VM<'h> {
 
     /// Every namespace this VM is not currently running in, with a hole where
     /// the installed one was taken from.
-    pub(crate) parked: crate::namespaces::Namespaces,
+    pub(crate) parked: Namespaces,
 
     /// Which namespace `globals` holds.
     ///

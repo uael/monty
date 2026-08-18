@@ -423,7 +423,7 @@ pub struct ParentRequest {
     pub trace_parent: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(
         oneof = "parent_request::Kind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14"
     )]
     pub kind: ::core::option::Option<parent_request::Kind>,
 }
@@ -457,6 +457,8 @@ pub mod parent_request {
         Probe(super::Probe),
         #[prost(message, tag = "13")]
         ReleaseRefs(super::ReleaseRefs),
+        #[prost(message, tag = "14")]
+        Namespace(super::Namespace),
     }
 }
 /// Configures the REPL session this child will serve until `Reset`, sent once
@@ -588,6 +590,57 @@ pub struct Probe {
     /// raises there rather than reaching the parent.
     #[prost(message, repeated, tag = "3")]
     pub bindings: ::prost::alloc::vec::Vec<NamedValue>,
+    /// Which global namespace to evaluate against; the selected one when absent,
+    /// and while suspended, the namespace the suspended snippet is running in.
+    ///
+    /// Nothing runs while a session is suspended, so every namespace it holds is
+    /// readable at that moment, not only the one that asked. That is what lets a
+    /// parent answer a call by looking at a sibling frame.
+    #[prost(uint32, optional, tag = "4")]
+    pub namespace: ::core::option::Option<u32>,
+}
+/// Operates on the session's global namespaces, all of which live over its one
+/// heap and share its one slot map.
+///
+/// A namespace is a name map, not a heap. Dressing one from another copies the
+/// names and shares the objects, so a rebinding through either is invisible to
+/// the other while a mutation of an object both name is seen by both. Copying
+/// the heap instead is `Dump` followed by `Load`, which shares nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Namespace {
+    #[prost(oneof = "namespace::Op", tags = "1, 2, 3, 4")]
+    pub op: ::core::option::Option<namespace::Op>,
+}
+/// Nested message and enum types in `Namespace`.
+pub mod namespace {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Op {
+        /// A namespace binding nothing. It still shares the session's slot map, so
+        /// every name any namespace has bound already has a slot here.
+        #[prost(message, tag = "1")]
+        Create(super::Empty),
+        /// A namespace holding the same values as `parent`, pointing at the same
+        /// live objects.
+        #[prost(uint32, tag = "2")]
+        Dress(u32),
+        /// Makes this namespace the one subsequent feeds and probes act on.
+        #[prost(uint32, tag = "3")]
+        Select(u32),
+        /// Drops a namespace, releasing what it alone held. An object another
+        /// namespace still names outlives it. The selected namespace cannot be
+        /// released: a session always needs somewhere to run.
+        #[prost(uint32, tag = "4")]
+        Release(u32),
+    }
+}
+/// A message with no fields, for a `oneof` arm that is the whole instruction.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Empty {}
+/// The namespace a `Namespace` request produced or acted on.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct NamespaceHandle {
+    #[prost(uint32, tag = "1")]
+    pub namespace: u32,
 }
 /// Releases the parent's references to values the session exported (see
 /// `SessionRef`), letting the session free each one once nothing else holds it.
@@ -703,7 +756,7 @@ pub struct ChildEvent {
     pub restored_script_name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(
         oneof = "child_event::Kind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14"
     )]
     pub kind: ::core::option::Option<child_event::Kind>,
 }
@@ -737,6 +790,8 @@ pub mod child_event {
         Shutdown(super::ShutdownDump),
         #[prost(message, tag = "13")]
         ParseFacts(super::ParseFacts),
+        #[prost(message, tag = "14")]
+        NamespaceHandle(super::NamespaceHandle),
     }
 }
 /// Streamed sandbox print() output. Zero or more of these precede each

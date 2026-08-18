@@ -394,7 +394,7 @@ impl Checkout {
         {
             ControlEvent::Ok => None,
             ControlEvent::Turn(event) => Some(event),
-            other @ (ControlEvent::Dump(_) | ControlEvent::Parse(_)) => {
+            other @ (ControlEvent::Dump(_) | ControlEvent::Parse(_) | ControlEvent::Namespace(_)) => {
                 return Err(self.protocol_violation(format!("unexpected reply to Load: {other:?}")));
             }
         };
@@ -460,6 +460,7 @@ impl Checkout {
         expr: &str,
         bindings: Vec<(String, MontyObject)>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
         on_print: OnPrint<'_>,
     ) -> Result<TurnEvent, PoolError> {
         self.ensure_ready()?;
@@ -474,8 +475,63 @@ impl Checkout {
                     value: Some(value.into()),
                 })
                 .collect(),
+            namespace,
         }));
         self.expect_turn(&request, on_print).await
+    }
+
+    /// Adds a global namespace binding nothing, and returns its handle.
+    ///
+    /// It shares the session's slot map, so a name any namespace has bound
+    /// already has a slot here; this one simply binds none of them.
+    ///
+    /// # Errors
+    /// [`PoolError::Runtime`] when the session cannot hold another; refused
+    /// while a snippet is suspended.
+    pub async fn create_namespace(&mut self) -> Result<u32, PoolError> {
+        self.namespace_op(pb::namespace::Op::Create(pb::Empty {})).await
+    }
+
+    /// Adds a namespace holding the same values as `parent`, pointing at the
+    /// same live objects.
+    ///
+    /// A rebinding through either is invisible to the other; a mutation of an
+    /// object both name is seen by both. Copying the heap instead is
+    /// [`dump`](Self::dump) and load, which shares nothing.
+    ///
+    /// # Errors
+    /// [`PoolError::Runtime`] when `parent` names no namespace.
+    pub async fn dress_namespace(&mut self, parent: u32) -> Result<u32, PoolError> {
+        self.namespace_op(pb::namespace::Op::Dress(parent)).await
+    }
+
+    /// Makes `id` the namespace subsequent feeds and probes act on.
+    ///
+    /// # Errors
+    /// [`PoolError::Runtime`] when `id` names no namespace.
+    pub async fn select_namespace(&mut self, id: u32) -> Result<u32, PoolError> {
+        self.namespace_op(pb::namespace::Op::Select(id)).await
+    }
+
+    /// Drops a namespace, releasing what it alone held.
+    ///
+    /// # Errors
+    /// [`PoolError::Runtime`] when `id` names no namespace, or names the
+    /// selected one, which a session always needs.
+    pub async fn release_namespace(&mut self, id: u32) -> Result<u32, PoolError> {
+        self.namespace_op(pb::namespace::Op::Release(id)).await
+    }
+
+    /// Shared body of the namespace operations: one request, one handle back.
+    async fn namespace_op(&mut self, op: pb::namespace::Op) -> Result<u32, PoolError> {
+        self.ensure_ready()?;
+        let request = request(pb::parent_request::Kind::Namespace(pb::Namespace { op: Some(op) }));
+        let mut no_print = on_print_sync(|_, _| {});
+        let deadline = self.pool.config.request_timeout;
+        match self.request_turn(&request, deadline, &mut no_print).await? {
+            ControlEvent::Namespace(id) => Ok(id),
+            other => Err(self.protocol_violation(format!("unexpected reply to Namespace: {other:?}"))),
+        }
     }
 
     /// Releases the host's references to values this session exported, letting
@@ -1223,6 +1279,9 @@ impl Checkout {
                     return Err(PoolError::Typing(typing.diagnostics));
                 }
                 Some(pb::child_event::Kind::Ok(_)) => return Ok(ControlEvent::Ok),
+                Some(pb::child_event::Kind::NamespaceHandle(handle)) => {
+                    return Ok(ControlEvent::Namespace(handle.namespace));
+                }
                 Some(pb::child_event::Kind::DumpResult(dump)) => return Ok(ControlEvent::Dump(dump.state)),
                 Some(pb::child_event::Kind::FatalError(fatal)) => {
                     return Err(self.fatal_error(&fatal.message).await);
@@ -1435,6 +1494,7 @@ enum ControlEvent {
     Ok,
     Dump(Vec<u8>),
     Parse(ParseFacts),
+    Namespace(u32),
 }
 
 /// How long a child that announced a `FatalError` is given to exit on its own

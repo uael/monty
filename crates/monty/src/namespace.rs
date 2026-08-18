@@ -60,4 +60,20 @@ impl ScopeId {
     pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// Rebuilds a handle a host is giving back, as it crossed the boundary.
+    ///
+    /// A handle naming no namespace is refused where it is used, not here, so
+    /// a stale one from a released namespace or another session reads as "no
+    /// such namespace" rather than addressing whatever now sits at its index.
+    #[must_use]
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The handle as it crosses to a host.
+    #[must_use]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
 }

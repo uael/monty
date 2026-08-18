@@ -1059,6 +1059,7 @@ mod tests {
     use crate::{
         heap::{Heap, HeapReader},
         intern::{InternerBuilder, Interns},
+        namespaces::Scopes,
         types::LongInt,
     };
 
@@ -1097,7 +1098,7 @@ mod tests {
 
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let mut vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -1136,7 +1137,7 @@ mod tests {
 
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let mut vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -1172,7 +1173,7 @@ mod tests {
 
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let mut vm = VM::new(
-                crate::namespaces::Scopes::new(),
+                Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,

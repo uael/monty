@@ -143,6 +143,7 @@ pub(crate) fn feed_start_sync(
         max_steps,
         // a probe is driven to a value, never to a snapshot
         probe: _,
+        namespace: _,
         script_name: feed_name,
         os,
         print_target,
@@ -179,6 +180,7 @@ pub(crate) fn feed_start_async(
         max_steps,
         // a probe is driven to a value, never to a snapshot
         probe: _,
+        namespace: _,
         script_name: feed_name,
         os,
         print_target,
@@ -415,6 +417,7 @@ impl SnapshotState {
         expr: &str,
         bindings: Vec<(String, MontyObject)>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let checkout = SharedCheckout::clone(&self.ctx.checkout);
         let resumed = &self.resumed;
@@ -428,7 +431,13 @@ impl SnapshotState {
                     }
                     match guard.as_mut() {
                         Some(checkout) => checkout
-                            .probe(&expr, bindings, max_steps, &mut monty_pool::on_print_sync(|_, _| {}))
+                            .probe(
+                                &expr,
+                                bindings,
+                                max_steps,
+                                namespace,
+                                &mut monty_pool::on_print_sync(|_, _| {}),
+                            )
                             .await
                             .map(Some),
                         None => Err(PoolError::Finished),
@@ -723,16 +732,17 @@ impl PyFunctionSnapshot {
     /// expression runs to completion, since the suspension is already the one
     /// turn in flight: a name `bindings` does not supply raises `NameError`
     /// rather than reaching back out to the host.
-    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None, namespace=None))]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &str,
         bindings: Option<&Bound<'_, PyDict>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
-        self.0.snapshot.probe(py, expr, bindings, max_steps)
+        self.0.snapshot.probe(py, expr, bindings, max_steps, namespace)
     }
 
     /// Releases the host's references to values this session exported, letting
@@ -887,16 +897,17 @@ impl PyAsyncFunctionSnapshot {
     /// expression runs to completion, since the suspension is already the one
     /// turn in flight: a name `bindings` does not supply raises `NameError`
     /// rather than reaching back out to the host.
-    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None, namespace=None))]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &str,
         bindings: Option<&Bound<'_, PyDict>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
-        self.0.snapshot.probe(py, expr, bindings, max_steps)
+        self.0.snapshot.probe(py, expr, bindings, max_steps, namespace)
     }
 
     /// Releases the host's references to values this session exported, letting
@@ -1018,16 +1029,17 @@ impl PyNameLookupSnapshot {
     /// expression runs to completion, since the suspension is already the one
     /// turn in flight: a name `bindings` does not supply raises `NameError`
     /// rather than reaching back out to the host.
-    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None, namespace=None))]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &str,
         bindings: Option<&Bound<'_, PyDict>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
-        self.0.snapshot.probe(py, expr, bindings, max_steps)
+        self.0.snapshot.probe(py, expr, bindings, max_steps, namespace)
     }
 
     /// Releases the host's references to values this session exported, letting
@@ -1102,16 +1114,17 @@ impl PyAsyncNameLookupSnapshot {
     /// expression runs to completion, since the suspension is already the one
     /// turn in flight: a name `bindings` does not supply raises `NameError`
     /// rather than reaching back out to the host.
-    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None, namespace=None))]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &str,
         bindings: Option<&Bound<'_, PyDict>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
-        self.0.snapshot.probe(py, expr, bindings, max_steps)
+        self.0.snapshot.probe(py, expr, bindings, max_steps, namespace)
     }
 
     /// Releases the host's references to values this session exported, letting
@@ -1212,16 +1225,17 @@ impl PyFutureSnapshot {
     /// expression runs to completion, since the suspension is already the one
     /// turn in flight: a name `bindings` does not supply raises `NameError`
     /// rather than reaching back out to the host.
-    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None, namespace=None))]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &str,
         bindings: Option<&Bound<'_, PyDict>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
-        self.0.snapshot.probe(py, expr, bindings, max_steps)
+        self.0.snapshot.probe(py, expr, bindings, max_steps, namespace)
     }
 
     /// Releases the host's references to values this session exported, letting
@@ -1308,16 +1322,17 @@ impl PyAsyncFutureSnapshot {
     /// expression runs to completion, since the suspension is already the one
     /// turn in flight: a name `bindings` does not supply raises `NameError`
     /// rather than reaching back out to the host.
-    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None, namespace=None))]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &str,
         bindings: Option<&Bound<'_, PyDict>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
-        self.0.snapshot.probe(py, expr, bindings, max_steps)
+        self.0.snapshot.probe(py, expr, bindings, max_steps, namespace)
     }
 
     /// Releases the host's references to values this session exported, letting

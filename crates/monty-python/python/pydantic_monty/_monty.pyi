@@ -769,6 +769,7 @@ class MontySession:
         print_callback: PrintCallback | None = None,
         os: OsHandler | None = None,
         max_steps: int | None = None,
+        namespace: int | None = None,
     ) -> Any:
         """
         Evaluate one expression against the session's namespace and return its
@@ -857,6 +858,33 @@ class MontySession:
         `FutureSnapshot`'s pending coroutines are gone (they lived in the
         previous process), so `resume_auto()` on it raises — resolve it manually
         with `resume({call_id: ...})`.
+        """
+
+    def create_namespace(self) -> int:
+        """Add a global namespace binding nothing, and return its handle.
+
+        Every namespace of a session lives over its one heap and shares its one
+        slot map, so a name any of them has bound already has a slot here; this
+        one simply binds none of them.
+        """
+
+    def dress_namespace(self, parent: int) -> int:
+        """Add a namespace holding the same values as `parent`, pointing at the
+        same live objects.
+
+        A rebinding through either is invisible to the other, and a mutation of
+        an object both name is seen by both. Copying the heap instead is
+        `dump()` and `load()`, which shares nothing.
+        """
+
+    def select_namespace(self, namespace: int) -> int:
+        """Make `namespace` the one subsequent feeds and probes act on."""
+
+    def release_namespace(self, namespace: int) -> int:
+        """Drop a namespace, releasing what it alone held.
+
+        An object another namespace still names outlives it, which is the point
+        of sharing. The selected namespace cannot be released.
         """
 
     def release_refs(self, *tokens: int) -> None:
@@ -1170,6 +1198,7 @@ class AsyncMontySession:
         print_callback: PrintCallback | None = None,
         os: OsHandler | None = None,
         max_steps: int | None = None,
+        namespace: int | None = None,
     ) -> Any:
         """
         Async counterpart of `MontySession.probe`: evaluate one expression
@@ -1205,6 +1234,18 @@ class AsyncMontySession:
         restored-snapshot caveats as the sync method (a restored `FutureSnapshot`
         cannot be driven with `resume_auto()` — its pending coroutines are gone).
         """
+
+    async def create_namespace(self) -> int:
+        """Async counterpart of `MontySession.create_namespace`."""
+
+    async def dress_namespace(self, parent: int) -> int:
+        """Async counterpart of `MontySession.dress_namespace`."""
+
+    async def select_namespace(self, namespace: int) -> int:
+        """Async counterpart of `MontySession.select_namespace`."""
+
+    async def release_namespace(self, namespace: int) -> int:
+        """Async counterpart of `MontySession.release_namespace`."""
 
     async def release_refs(self, *tokens: int) -> None:
         """Async counterpart of `MontySession.release_refs`: release your
@@ -1340,7 +1381,14 @@ class FunctionSnapshot:
         `NameError` (as in `feed_run`). A coroutine external raises
         `RuntimeError` — use `AsyncMonty` for async externals."""
 
-    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+    def probe(
+        self,
+        expr: str,
+        *,
+        bindings: dict[str, Any] | None = None,
+        max_steps: int | None = None,
+        namespace: int | None = None,
+    ) -> Any:
         """Evaluate one expression against the suspended session and return its
         value, leaving this suspension resumable.
 
@@ -1385,7 +1433,14 @@ class NameLookupSnapshot:
         `external_lookup=`, then return the next snapshot (or `MontyComplete`). A
         name absent from the lookup makes the sandbox raise `NameError`."""
 
-    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+    def probe(
+        self,
+        expr: str,
+        *,
+        bindings: dict[str, Any] | None = None,
+        max_steps: int | None = None,
+        namespace: int | None = None,
+    ) -> Any:
         """Evaluate one expression against the suspended session and return its
         value, leaving this suspension resumable.
 
@@ -1430,7 +1485,14 @@ class FutureSnapshot:
         externals. Resolve the pending futures manually with `resume({...})`, or
         use `AsyncMonty`. Does not consume the snapshot."""
 
-    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+    def probe(
+        self,
+        expr: str,
+        *,
+        bindings: dict[str, Any] | None = None,
+        max_steps: int | None = None,
+        namespace: int | None = None,
+    ) -> Any:
         """Evaluate one expression against the suspended session and return its
         value, leaving this suspension resumable.
 
@@ -1483,7 +1545,14 @@ class AsyncFunctionSnapshot:
         is spawned and answered with a pending future, so other sandbox tasks
         keep running; it is later settled by `AsyncFutureSnapshot.resume_auto`."""
 
-    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+    def probe(
+        self,
+        expr: str,
+        *,
+        bindings: dict[str, Any] | None = None,
+        max_steps: int | None = None,
+        namespace: int | None = None,
+    ) -> Any:
         """Evaluate one expression against the suspended session and return its
         value, leaving this suspension resumable.
 
@@ -1521,7 +1590,14 @@ class AsyncNameLookupSnapshot:
     async def resume_auto(self) -> AsyncSnapshot:
         """Async sibling of `NameLookupSnapshot.resume_auto`."""
 
-    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+    def probe(
+        self,
+        expr: str,
+        *,
+        bindings: dict[str, Any] | None = None,
+        max_steps: int | None = None,
+        namespace: int | None = None,
+    ) -> Any:
         """Evaluate one expression against the suspended session and return its
         value, leaving this suspension resumable.
 
@@ -1562,7 +1638,14 @@ class AsyncFutureSnapshot:
         snapshot. Raises if there are no pending coroutines to await (e.g. a
         snapshot restored via `load_snapshot`)."""
 
-    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+    def probe(
+        self,
+        expr: str,
+        *,
+        bindings: dict[str, Any] | None = None,
+        max_steps: int | None = None,
+        namespace: int | None = None,
+    ) -> Any:
         """Evaluate one expression against the suspended session and return its
         value, leaving this suspension resumable.
 

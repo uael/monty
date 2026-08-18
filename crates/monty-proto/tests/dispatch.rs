@@ -277,6 +277,7 @@ fn probe_evaluates_against_the_session() {
         bindings: vec![],
         expr: "scale * 7".to_owned(),
         max_steps: None,
+        namespace: None,
     }));
     let (bytes, outcome) = dispatch_frame(&mut child, &request);
     assert_eq!(outcome, HandleOutcome::Continue);

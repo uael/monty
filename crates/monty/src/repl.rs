@@ -460,6 +460,11 @@ impl MontyRepl {
     /// Returns `MontyException` for a handle naming no namespace, a rejected
     /// expression, one that raises, or one that reaches a name the bindings do
     /// not supply.
+    ///
+    /// # Panics
+    /// If the namespace that was selected on entry has gone by the time the
+    /// probe returns. Nothing here can release one, so this is an invariant
+    /// rather than a case a caller can reach.
     pub fn probe_scoped_in(
         &mut self,
         target: Option<ScopeId>,
@@ -1705,6 +1710,10 @@ struct SessionParts<'a> {
 /// can answer raises `NameError` rather than suspending, because this is
 /// itself reachable from inside a suspension and a second one would have
 /// nowhere to go. Anything the expression needs is a binding.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session's pieces plus what one probe is: splitting them would only name the same call twice"
+)]
 fn probe_scoped_in(
     parts: SessionParts<'_>,
     target: Option<ScopeId>,

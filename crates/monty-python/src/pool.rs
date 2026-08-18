@@ -446,6 +446,38 @@ impl PyMontySession {
         .map_err(|e| pool_err_to_py(py, e))
     }
 
+    /// Adds a global namespace binding nothing, and returns its handle.
+    ///
+    /// Every namespace of a session lives over its one heap and shares its one
+    /// slot map, so a name any of them has bound already has a slot here; this
+    /// one simply binds none of them.
+    fn create_namespace(&self, py: Python<'_>) -> PyResult<u32> {
+        self.namespace_op(py, NamespaceOp::Create)
+    }
+
+    /// Adds a namespace holding the same values as `parent`, pointing at the
+    /// same live objects.
+    ///
+    /// A rebinding through either is invisible to the other, and a mutation of
+    /// an object both name is seen by both. Copying the heap instead is
+    /// `dump()` and `load()`, which shares nothing.
+    fn dress_namespace(&self, py: Python<'_>, parent: u32) -> PyResult<u32> {
+        self.namespace_op(py, NamespaceOp::Dress(parent))
+    }
+
+    /// Makes `namespace` the one subsequent feeds and probes act on.
+    fn select_namespace(&self, py: Python<'_>, namespace: u32) -> PyResult<u32> {
+        self.namespace_op(py, NamespaceOp::Select(namespace))
+    }
+
+    /// Drops a namespace, releasing what it alone held.
+    ///
+    /// An object another namespace still names outlives it, which is the point
+    /// of sharing. The selected namespace cannot be released.
+    fn release_namespace(&self, py: Python<'_>, namespace: u32) -> PyResult<u32> {
+        self.namespace_op(py, NamespaceOp::Release(namespace))
+    }
+
     /// Serializes the worker's session state (idle or suspended) into opaque
     /// bytes via monty's existing dump format. The session stays usable.
     fn dump<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -464,8 +496,11 @@ impl PyMontySession {
     /// quietly leaving the session changed; what the expression *calls* can of
     /// course still mutate what it reaches. Suspensions are answered from
     /// `external_lookup` / `os` exactly as in `feed_run`.
-    #[pyo3(signature = (expr, *, bindings=None, external_lookup=None, print_callback=None, os=None, max_steps=None))]
-    #[expect(clippy::too_many_arguments, reason = "each is one keyword argument of the Python method")]
+    #[pyo3(signature = (expr, *, bindings=None, external_lookup=None, print_callback=None, os=None, max_steps=None, namespace=None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is one keyword argument of the Python method"
+    )]
     fn probe(
         &self,
         py: Python<'_>,
@@ -475,6 +510,7 @@ impl PyMontySession {
         print_callback: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -489,7 +525,7 @@ impl PyMontySession {
             false,
             max_steps,
         )?
-        .probing();
+        .probing(namespace);
         drive_sync(py, args, external_lookup)
     }
 
@@ -541,7 +577,38 @@ impl PyMontySession {
     }
 }
 
+/// Which namespace operation a `namespace_op` call is making.
+#[derive(Clone, Copy)]
+enum NamespaceOp {
+    Create,
+    Dress(u32),
+    Select(u32),
+    Release(u32),
+}
+
 impl PyMontySession {
+    /// Runs one namespace operation off the GIL and hands back the handle it
+    /// produced or acted on.
+    fn namespace_op(&self, py: Python<'_>, op: NamespaceOp) -> PyResult<u32> {
+        self.used.store(true, Ordering::Relaxed);
+        let checkout = SharedCheckout::clone(&self.checkout);
+        py.detach(|| {
+            block_on_sync(async {
+                let mut guard = checkout.lock().await;
+                let Some(checkout) = guard.as_mut() else {
+                    return Err(PoolError::Finished);
+                };
+                match op {
+                    NamespaceOp::Create => checkout.create_namespace().await,
+                    NamespaceOp::Dress(parent) => checkout.dress_namespace(parent).await,
+                    NamespaceOp::Select(id) => checkout.select_namespace(id).await,
+                    NamespaceOp::Release(id) => checkout.release_namespace(id).await,
+                }
+            })
+        })?
+        .map_err(|e| pool_err_to_py(py, e))
+    }
+
     /// Claims the fresh session (rejecting a reused one) and runs the low-level
     /// restore off the GIL, returning the re-announced suspension (`Some`) or
     /// `None` for an idle dump, paired with the dump's adopted script name (for
@@ -1030,6 +1097,26 @@ impl PyAsyncMontySession {
         })
     }
 
+    /// Async counterpart of [`PyMontySession::create_namespace`].
+    fn create_namespace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.namespace_op(py, NamespaceOp::Create)
+    }
+
+    /// Async counterpart of [`PyMontySession::dress_namespace`].
+    fn dress_namespace<'py>(&self, py: Python<'py>, parent: u32) -> PyResult<Bound<'py, PyAny>> {
+        self.namespace_op(py, NamespaceOp::Dress(parent))
+    }
+
+    /// Async counterpart of [`PyMontySession::select_namespace`].
+    fn select_namespace<'py>(&self, py: Python<'py>, namespace: u32) -> PyResult<Bound<'py, PyAny>> {
+        self.namespace_op(py, NamespaceOp::Select(namespace))
+    }
+
+    /// Async counterpart of [`PyMontySession::release_namespace`].
+    fn release_namespace<'py>(&self, py: Python<'py>, namespace: u32) -> PyResult<Bound<'py, PyAny>> {
+        self.namespace_op(py, NamespaceOp::Release(namespace))
+    }
+
     /// Serializes the worker's session state (idle or suspended) into opaque
     /// bytes via monty's existing dump format. The session stays usable.
     fn dump<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1045,8 +1132,11 @@ impl PyAsyncMontySession {
     /// Async counterpart of [`PyMontySession::probe`]: the returned coroutine
     /// resolves to the expression's value. Coroutine externals are awaited as
     /// in `feed_run`.
-    #[pyo3(signature = (expr, *, bindings=None, external_lookup=None, print_callback=None, os=None, max_steps=None))]
-    #[expect(clippy::too_many_arguments, reason = "each is one keyword argument of the Python method")]
+    #[pyo3(signature = (expr, *, bindings=None, external_lookup=None, print_callback=None, os=None, max_steps=None, namespace=None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is one keyword argument of the Python method"
+    )]
     fn probe<'py>(
         &self,
         py: Python<'py>,
@@ -1056,6 +1146,7 @@ impl PyAsyncMontySession {
         print_callback: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         max_steps: Option<u64>,
+        namespace: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -1070,7 +1161,7 @@ impl PyAsyncMontySession {
             false,
             max_steps,
         )?
-        .probing();
+        .probing(namespace);
         let ext = external_lookup.map(|d| d.clone().unbind());
         let abandoned = Arc::clone(&self.drive_abandoned);
         future_into_py(py, async move { drive_async(args, ext, abandoned).await })
@@ -1120,6 +1211,28 @@ impl PyAsyncMontySession {
     #[getter]
     fn worker_pid(&self) -> Option<u32> {
         self.checkout.try_lock().ok()?.as_ref().and_then(Checkout::pid)
+    }
+}
+
+impl PyAsyncMontySession {
+    /// Runs one namespace operation as a coroutine resolving to the handle it
+    /// produced or acted on.
+    fn namespace_op<'py>(&self, py: Python<'py>, op: NamespaceOp) -> PyResult<Bound<'py, PyAny>> {
+        self.used.store(true, Ordering::Relaxed);
+        let checkout = Arc::clone(&self.checkout);
+        future_into_py(py, async move {
+            let mut guard = checkout.lock().await;
+            let Some(checkout) = guard.as_mut() else {
+                return Err(Python::attach(|py| pool_err_to_py(py, PoolError::Finished)));
+            };
+            match op {
+                NamespaceOp::Create => checkout.create_namespace().await,
+                NamespaceOp::Dress(parent) => checkout.dress_namespace(parent).await,
+                NamespaceOp::Select(id) => checkout.select_namespace(id).await,
+                NamespaceOp::Release(id) => checkout.release_namespace(id).await,
+            }
+            .map_err(|e| Python::attach(|py| pool_err_to_py(py, e)))
+        })
     }
 }
 
@@ -1274,7 +1387,10 @@ fn parse_websocket_config(
 
 /// Builds the worker-side REPL session config from the (shared) `checkout`
 /// arguments.
-#[expect(clippy::too_many_arguments, reason = "each is one keyword argument of the `checkout` methods")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is one keyword argument of the `checkout` methods"
+)]
 pub(crate) fn parse_repl_config(
     py: Python<'_>,
     script_name: &str,
@@ -1390,6 +1506,9 @@ pub(crate) struct FeedArgs {
     /// feed. Only the opening turn differs; every suspension after it is
     /// answered the same way.
     pub(crate) probe: bool,
+    /// Which global namespace a probe evaluates against; the selected one when
+    /// absent. A feed always runs in the selected one.
+    pub(crate) namespace: Option<u32>,
     /// Filename this snippet's frames carry; empty takes the session's
     /// generated `<python-input-N>`.
     pub(crate) script_name: String,
@@ -1421,6 +1540,7 @@ impl FeedArgs {
             skip_type_check,
             max_steps,
             probe: false,
+            namespace: None,
             script_name: String::new(),
             os,
             print_target: PrintTarget::from_py(print_callback)?,
@@ -1437,8 +1557,9 @@ impl FeedArgs {
         self
     }
 
-    pub(crate) fn probing(mut self) -> Self {
+    pub(crate) fn probing(mut self, namespace: Option<u32>) -> Self {
         self.probe = true;
+        self.namespace = namespace;
         self
     }
 }
@@ -1540,6 +1661,7 @@ fn drive_sync(py: Python<'_>, args: FeedArgs, external_lookup: Option<&Bound<'_,
         skip_type_check,
         max_steps,
         probe,
+        namespace,
         script_name: feed_name,
         os,
         print_target,
@@ -1554,9 +1676,10 @@ fn drive_sync(py: Python<'_>, args: FeedArgs, external_lookup: Option<&Bound<'_,
         turn_fn(move |c, p| {
             Box::pin(async move {
                 if probe {
-                    c.probe(&code, inputs, max_steps, p).await
+                    c.probe(&code, inputs, max_steps, namespace, p).await
                 } else {
-                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p).await
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p)
+                        .await
                 }
             })
         }),
@@ -1729,6 +1852,7 @@ async fn drive_async_inner(
         skip_type_check,
         max_steps,
         probe,
+        namespace,
         script_name: feed_name,
         os,
         print_target,
@@ -1747,9 +1871,10 @@ async fn drive_async_inner(
             started.store(true, Ordering::Release);
             Box::pin(async move {
                 if probe {
-                    c.probe(&code, inputs, max_steps, p).await
+                    c.probe(&code, inputs, max_steps, namespace, p).await
                 } else {
-                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p).await
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p)
+                        .await
                 }
             })
         }),

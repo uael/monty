@@ -8,6 +8,8 @@ pub use monty_types::CompileOptions;
 use monty_types::{ExcType, MontyException, MontyObject, PrintWriter, ResourceTracker};
 use ruff_python_stdlib::identifiers::is_identifier;
 
+#[cfg(feature = "ref-count-return")]
+use crate::value::Value;
 use crate::{
     bytecode::{Code, Compiler, FrameExit, VM},
     exception_private::{ExcTypeExt, RunResult},
@@ -470,9 +472,10 @@ impl Executor {
 
             vm.__force_gc_for_tests();
 
-            // Take globals out of the VM so we can inspect them, but keep VM alive
-            // for heap access and later conversion.
-            let globals = vm.take_globals();
+            // Take the namespaces out of the VM so we can inspect them, but keep
+            // the VM alive for heap access and later conversion.
+            let scopes = vm.take_scopes();
+            let globals = &scopes.globals;
 
             // Read refcounts BEFORE converting the return value, because
             // `frame_exit_to_object` drops the return value (decrementing its refcount).
@@ -506,8 +509,12 @@ impl Executor {
             // for the same reason: the reference lives outside the sandbox, so no
             // name in here explains it and it is not a leak.
             roots.extend(vm.heap.export_ids());
+            // A namespace that is not the running one is a root as much as the
+            // running one is: a value it names is reachable however long it has
+            // been since that namespace last ran.
+            roots.extend(scopes.parked.root_ids());
             // Those are the only roots: locals are gone once the module frame exits, so
-            // anything still live must hang off a name, the result, or one of those two
+            // anything still live must hang off a name, the result, or one of those
             // owners to not be a leak.
             let unreachable: Vec<String> = vm
                 .heap
@@ -522,8 +529,8 @@ impl Executor {
             let py_object = frame_exit_to_object(frame_exit_result, &mut vm)
                 .map_err(|e| e.into_python_exception(&program.interns, |_| Some(executor.code.as_str())))?;
 
-            // Drop globals with proper ref counting
-            globals.drop_with(vm.heap);
+            // Release every namespace with proper ref counting
+            scopes.drop_with(vm.heap);
 
             let allocations_since_gc = vm.heap.get_allocations_since_gc();
 
