@@ -176,12 +176,9 @@ fn normalize_bool(value: Value) -> Value {
 ///
 /// Negative counts clamp to zero (`repeat(x, -1)` is empty) and a `times` too
 /// large for a machine integer raises `OverflowError`, matching the conversion
-/// to `Py_ssize_t`. `bool` is accepted because it is an `int` subclass.
+/// to `Py_ssize_t`.
 fn repeat_times(value: &Value, vm: &VM<'_>) -> RunResult<usize> {
-    let count = match value {
-        Value::Bool(b) => i64::from(*b),
-        other => other.as_int(vm)?,
-    };
+    let count = value.as_int(vm)?;
     // Saturates rather than wrapping on a 32-bit host, where a `times` between
     // `usize::MAX` and `i64::MAX` is still effectively infinite.
     Ok(usize::try_from(count.max(0)).unwrap_or(usize::MAX))
@@ -336,7 +333,6 @@ enum IsliceBound {
 fn islice_index(value: &Value, vm: &VM<'_>) -> IsliceBound {
     let index = match value {
         Value::None => return IsliceBound::Unbounded,
-        Value::Bool(b) => i64::from(*b),
         other => match other.as_int(vm) {
             Ok(index) => index,
             Err(_) => return IsliceBound::Invalid,

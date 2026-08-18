@@ -36,7 +36,7 @@ use crate::{
     intern::StaticStrings,
     modules::ModuleFunctions,
     types::{LongInt, Module, allocate_tuple},
-    value::Value,
+    value::{Value, immediate_int},
 };
 
 // ==========================
@@ -953,15 +953,11 @@ fn math_factorial(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     let value = args.get_one_arg("math.factorial", vm.heap)?;
     defer_drop!(value, vm);
 
-    let n = match value {
-        Value::Int(n) => *n,
-        Value::Bool(b) => i64::from(*b),
-        _ => {
-            return Err(ExcType::type_error(format!(
-                "'{}' object cannot be interpreted as an integer",
-                value.py_type_name(vm)
-            )));
-        }
+    let Some(n) = immediate_int(value) else {
+        return Err(ExcType::type_error(format!(
+            "'{}' object cannot be interpreted as an integer",
+            value.py_type_name(vm)
+        )));
     };
 
     if n < 0 {
@@ -1361,17 +1357,15 @@ fn value_to_float(value: &Value, vm: &VM<'_>) -> RunResult<f64> {
 
 /// Converts a `Value` to `i64`, raising `TypeError` if the value is not an integer.
 ///
-/// Accepts `Int` and `Bool` values. For other types, raises a `TypeError`
-/// with a message matching CPython's format.
+/// Accepts only an immediate int; an int too wide for `i64` reaches the same
+/// `TypeError` as a non-integer, which is where these functions stop.
 fn value_to_int(value: &Value, vm: &VM<'_>) -> RunResult<i64> {
-    match value {
-        Value::Int(n) => Ok(*n),
-        Value::Bool(b) => Ok(i64::from(*b)),
-        _ => Err(ExcType::type_error(format!(
+    immediate_int(value).ok_or_else(|| {
+        ExcType::type_error(format!(
             "'{}' object cannot be interpreted as an integer",
             value.py_type_name(vm)
-        ))),
-    }
+        ))
+    })
 }
 
 /// Requires that a float is finite, raising ValueError if it's inf or nan.

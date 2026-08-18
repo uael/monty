@@ -46,7 +46,7 @@ use crate::{
         str::allocate_string,
         tuple::TupleVec,
     },
-    value::{EitherStr, VALUE_SIZE, Value},
+    value::{EitherStr, VALUE_SIZE, Value, immediate_int},
 };
 
 /// Python named tuple value stored on the heap.
@@ -380,12 +380,10 @@ impl<'h> PyTrait<'h> for HeapRead<'h, NamedTuple> {
             return Ok(allocate_tuple(items, vm.heap));
         }
 
-        // Extract integer index from key, returning TypeError if not an int
-        let index = match key {
-            Value::Int(i) => *i,
-            // Reported as `tuple`, not `namedtuple`: CPython raises this from the
-            // inherited `tuple.__getitem__`, so the subclass name never appears.
-            _ => return Err(ExcType::type_error_indices(Type::Tuple, &key.py_type_name(vm))),
+        // Reported as `tuple`, not `namedtuple`: CPython raises this from the
+        // inherited `tuple.__getitem__`, so the subclass name never appears.
+        let Some(index) = immediate_int(key) else {
+            return Err(ExcType::type_error_indices(Type::Tuple, &key.py_type_name(vm)));
         };
 
         // Get by index with bounds checking

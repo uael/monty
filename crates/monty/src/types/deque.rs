@@ -10,7 +10,7 @@ use crate::{
     intern::StaticStrings,
     resource_checks::{check_estimated_size, check_repeat_size},
     types::{LazyHeapSet, Type, list::repr_items_fmt, long_int::repeat_count},
-    value::{EitherStr, VALUE_SIZE, Value},
+    value::{EitherStr, VALUE_SIZE, Value, immediate_int},
 };
 
 /// `deque([iterable[, maxlen]])` — both positional-or-keyword, both defaulted.
@@ -236,8 +236,7 @@ fn check_maxlen(n: i64) -> RunResult<usize> {
 /// `IndexError` for subscript).
 fn read_ssize(value: &Value, vm: &VM<'_>, overflow: fn() -> RunError) -> Option<RunResult<i64>> {
     match value {
-        Value::Int(i) => Some(Ok(*i)),
-        Value::Bool(b) => Some(Ok(i64::from(*b))),
+        _ if let Some(i) = immediate_int(value) => Some(Ok(i)),
         Value::Ref(id) if let HeapData::LongInt(li) = vm.heap.get(*id) => Some(li.to_i64().ok_or_else(overflow)),
         _ => None,
     }
@@ -955,8 +954,7 @@ fn bound_arg(value: Option<Value>, default: usize, len: usize, vm: &mut VM<'_>) 
     // Match by reference so there is exactly one `drop_with` for the bound, on
     // every path — the accepted ones as well as the rejection below.
     let raw = match &value {
-        Value::Int(i) => Some(*i),
-        Value::Bool(b) => Some(i64::from(*b)),
+        v if let Some(i) = immediate_int(v) => Some(i),
         // Out of `i64` range entirely — saturate to the end the sign points at.
         Value::Ref(heap_id) if let HeapData::LongInt(li) = vm.heap.get(*heap_id) => {
             Some(li.to_i64().unwrap_or(if li.is_negative() { 0 } else { len_i64 }))

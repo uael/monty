@@ -88,7 +88,7 @@ use crate::{
         long_int::repeat_count,
         slice::{normalize_sequence_index, slice_collect_iterator},
     },
-    value::{EitherStr, Value, eq_bytes},
+    value::{EitherStr, Value, eq_bytes, immediate_int},
 };
 
 // =============================================================================
@@ -194,14 +194,14 @@ impl Bytes {
         }
         let new_data = match source {
             None => Vec::new(),
-            Some(Value::Int(n)) => {
-                if *n < 0 {
+            Some(v) if let Some(n) = immediate_int(v) => {
+                if n < 0 {
                     return Err(ExcType::value_error_negative_bytes_count());
                 }
                 // Fallible on a 32-bit target (`wasm32-wasip1`), where `bytes(2**40)`
                 // is a count no `usize` can hold. On 64-bit the conversion always
                 // succeeds and the size check below rejects it with `MemoryError`.
-                let size = usize::try_from(*n).map_err(|_| ExcType::overflow_index_sized_int())?;
+                let size = usize::try_from(n).map_err(|_| ExcType::overflow_index_sized_int())?;
                 // Pre-check the requested size against resource limits before
                 // touching the global allocator. Without this, `bytes(n)` for a
                 // very large `n` would attempt the native allocation directly
@@ -2413,8 +2413,7 @@ pub(crate) fn bytes_contains(container: &[u8], item: &Value, vm: &VM<'_>) -> Run
     // error in one place. A `LongInt` never fits in a `u8` by construction — it
     // exists precisely because the value overflowed `i64`.
     let byte = match item {
-        Value::Int(i) => Some(*i),
-        Value::Bool(b) => Some(i64::from(*b)),
+        _ if let Some(i) = immediate_int(item) => Some(i),
         Value::InternLongInt(_) => None,
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::LongInt(_)) => None,
         // A bytes-like probe is a substring test.

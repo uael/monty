@@ -12,7 +12,7 @@ use crate::{
     heap::HeapData,
     resource_checks::check_div_size,
     types::{LongInt, allocate_tuple},
-    value::{Value, floor_divmod},
+    value::{Value, floor_divmod, immediate_int_value},
 };
 
 /// Implementation of the divmod() builtin function.
@@ -21,8 +21,8 @@ use crate::{
 /// Equivalent to (a // b, a % b).
 pub fn builtin_divmod(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     let (a, b) = args.get_two_args("divmod", vm.heap)?;
-    let a = super::round::normalize_bool_to_int(a);
-    let b = super::round::normalize_bool_to_int(b);
+    let a = immediate_int_value(a);
+    let b = immediate_int_value(b);
     defer_drop!(a, vm);
     defer_drop!(b, vm);
 

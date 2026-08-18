@@ -8,15 +8,8 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, RunResult, SimpleException},
     types::LongInt,
-    value::Value,
+    value::{Value, immediate_int, immediate_int_value},
 };
-
-pub fn normalize_bool_to_int(value: Value) -> Value {
-    match value {
-        Value::Bool(b) => Value::Int(i64::from(b)),
-        other => other,
-    }
-}
 
 /// Argument shape for `round(number, ndigits=None)` — CPython parses it with
 /// `PyArg_ParseTupleAndKeywords("O|O:round")`, so both arguments are
@@ -37,15 +30,14 @@ struct RoundArgs {
 /// Uses banker's rounding (round half to even).
 pub fn builtin_round(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     let RoundArgs { number, ndigits } = RoundArgs::from_args(args, vm)?;
-    let number = normalize_bool_to_int(number);
+    let number = immediate_int_value(number);
     defer_drop!(number, vm);
     defer_drop!(ndigits, vm);
 
     // Determine the number of digits (None means round to integer)
     let digits: Option<i64> = match ndigits {
         Value::None => None,
-        Value::Int(n) => Some(*n),
-        Value::Bool(b) => Some(i64::from(*b)),
+        _ if let Some(n) = immediate_int(ndigits) => Some(n),
         // A genuine int wider than i64: clamp by sign — the saturating paths
         // below then return the number unchanged (huge positive) or 0 / ±0.0
         // (huge negative), matching CPython's `Py_ssize_t` clamp for floats.

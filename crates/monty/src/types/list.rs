@@ -18,7 +18,7 @@ use crate::{
         long_int::repeat_count,
         slice::{normalize_sequence_index, slice_collect_iterator},
     },
-    value::{EitherStr, VALUE_SIZE, Value},
+    value::{EitherStr, VALUE_SIZE, Value, immediate_int},
 };
 
 /// Python list type, wrapping a Vec of Values.
@@ -367,13 +367,12 @@ impl<'h> HeapRead<'h, List> {
     /// assignment-flavoured errors (`list indices must be integers or slices`,
     /// `list assignment index out of range`) rather than the read-flavoured ones.
     ///
-    /// Accepts `Int`, `Bool` (`True` is 1) and `LongInt`. The `LongInt` arm is
-    /// defensive: `into_value` demotes anything that fits `i64`, so a heap
+    /// Accepts whatever `immediate_int` does plus `LongInt`. The `LongInt` arm
+    /// is defensive: `into_value` demotes anything that fits `i64`, so a heap
     /// `LongInt` here can only come from crafted snapshot data.
     fn assignment_index(&self, key: &Value, vm: &mut VM<'h>) -> RunResult<usize> {
         let index = match *key {
-            Value::Int(i) => i,
-            Value::Bool(b) => i64::from(b),
+            _ if let Some(i) = immediate_int(key) => i,
             Value::Ref(heap_id) => {
                 if let HeapData::LongInt(li) = vm.heap.get(heap_id) {
                     li.to_i64().ok_or_else(ExcType::index_error_int_too_large)?

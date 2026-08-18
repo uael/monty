@@ -22,7 +22,7 @@ use crate::{
         str::StringRepr,
         suppress, timedelta,
     },
-    value::Value,
+    value::{Value, immediate_int},
 };
 
 /// Represents the Python type of a value.
@@ -624,8 +624,7 @@ impl Type {
                 defer_drop!(v, vm);
                 match v {
                     Value::Float(f) => Ok(Value::Float(*f)),
-                    Value::Int(i) => Ok(Value::Float(*i as f64)),
-                    Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                    _ if let Some(i) = immediate_int(v) => Ok(Value::Float(i as f64)),
                     Value::InternString(string_id) => {
                         Ok(Value::Float(parse_f64_from_str(interns.get_str(*string_id))?))
                     }
@@ -760,9 +759,8 @@ fn int_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 fn int_convert(x: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
     let interns = vm.interns;
     match x {
-        Value::Int(i) => Ok(Value::Int(*i)),
+        _ if let Some(i) = immediate_int(x) => Ok(Value::Int(i)),
         Value::Float(f) => Ok(Value::Int(f64_to_i64_truncate(*f))),
-        Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
         Value::InternString(string_id) => parse_int_from_str(interns.get_str(*string_id), 10, vm.heap),
         Value::InternBytes(bytes_id) => parse_int_from_bytes(interns.get_bytes(*bytes_id), 10, vm.heap),
         Value::Ref(heap_id) => match vm.heap.get(*heap_id) {
@@ -784,8 +782,7 @@ fn int_convert(x: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
 fn int_base(base: Value, vm: &mut VM<'_>) -> RunResult<u32> {
     defer_drop!(base, vm);
     let n = match base {
-        Value::Bool(b) => i64::from(*b),
-        Value::Int(i) => *i,
+        _ if let Some(i) = immediate_int(base) => i,
         // Clamped by PyNumber_AsSsize_t: any i64-overflowing int is out of range.
         _ if is_long_int(base, vm) => i64::MAX,
         _ => return Err(ExcType::type_error_not_integer(&base.py_type_name(vm))),

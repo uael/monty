@@ -663,20 +663,17 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `+`.
     fn py_add_impl(&self, other: &Self, vm: &mut VM<'_>, _self_id: Option<HeapId>) -> RunResult<Option<Self>> {
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            return Ok(Some(match a.checked_add(b) {
+                Some(sum) => Self::Int(sum),
+                None => wide_i128_into_value(i128::from(a) + i128::from(b), vm.heap),
+            }));
+        }
+        if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
+            return Ok(Some(Self::Float(a + b)));
+        }
         let interns = vm.interns;
         match (self, other) {
-            // Int + Int with overflow detection
-            (Self::Int(a), Self::Int(b)) => {
-                if let Some(result) = a.checked_add(*b) {
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    Ok(Some(wide_i128_into_value(i128::from(*a) + i128::from(*b), vm.heap)))
-                }
-            }
-            (Self::Float(v1), Self::Float(v2)) => Ok(Some(Self::Float(v1 + v2))),
-            // Int + Float and Float + Int
-            (Self::Int(a), Self::Float(b)) => Ok(Some(Self::Float(*a as f64 + b))),
-            (Self::Float(a), Self::Int(b)) => Ok(Some(Self::Float(a + *b as f64))),
             (Self::InternString(s1), Self::InternString(s2)) => Ok(Some(concat_allocate_str(
                 interns.get_str(*s1),
                 interns.get_str(*s2),
@@ -711,22 +708,19 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `-`.
     fn py_sub_impl(&self, other: &Self, vm: &mut VM<'_>, _self_id: Option<HeapId>) -> RunResult<Option<Self>> {
-        match (self, other) {
-            // Int - Int with overflow detection
-            (Self::Int(a), Self::Int(b)) => {
-                if let Some(result) = a.checked_sub(*b) {
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    Ok(Some(wide_i128_into_value(i128::from(*a) - i128::from(*b), vm.heap)))
-                }
-            }
-            // Float - Float
-            (Self::Float(a), Self::Float(b)) => Ok(Some(Self::Float(a - b))),
-            // Int - Float and Float - Int
-            (Self::Int(a), Self::Float(b)) => Ok(Some(Self::Float(*a as f64 - b))),
-            (Self::Float(a), Self::Int(b)) => Ok(Some(Self::Float(a - *b as f64))),
-            (Self::Ref(id), _) => vm.heap.read(*id).py_sub_impl(other, vm, Some(*id)),
-            _ => Ok(None),
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            return Ok(Some(match a.checked_sub(b) {
+                Some(difference) => Self::Int(difference),
+                None => wide_i128_into_value(i128::from(a) - i128::from(b), vm.heap),
+            }));
+        }
+        if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
+            return Ok(Some(Self::Float(a - b)));
+        }
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_sub_impl(other, vm, Some(*id))
+        } else {
+            Ok(None)
         }
     }
 
@@ -741,22 +735,16 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `*`.
     fn py_mul_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            return Ok(Some(match a.checked_mul(b) {
+                Some(product) => Self::Int(product),
+                None => wide_i128_into_value(i128::from(a) * i128::from(b), vm.heap),
+            }));
+        }
+        if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
+            return Ok(Some(Self::Float(a * b)));
+        }
         match (self, other) {
-            (Self::Int(a), Self::Int(b)) => {
-                if let Some(result) = a.checked_mul(*b) {
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    Ok(Some(wide_i128_into_value(i128::from(*a) * i128::from(*b), vm.heap)))
-                }
-            }
-            (Self::Float(a), Self::Float(b)) => Ok(Some(Self::Float(a * b))),
-            (Self::Int(a), Self::Float(b)) => Ok(Some(Self::Float(*a as f64 * b))),
-            (Self::Float(a), Self::Int(b)) => Ok(Some(Self::Float(a * *b as f64))),
-            (Self::Bool(a), Self::Int(b)) => Ok(Some(Self::Int(i64::from(*a) * b))),
-            (Self::Int(a), Self::Bool(b)) => Ok(Some(Self::Int(a * i64::from(*b)))),
-            (Self::Bool(a), Self::Float(b)) => Ok(Some(Self::Float(f64::from(*a) * b))),
-            (Self::Float(a), Self::Bool(b)) => Ok(Some(Self::Float(a * f64::from(*b)))),
-            (Self::Bool(a), Self::Bool(b)) => Ok(Some(Self::Int(i64::from(*a) * i64::from(*b)))),
             (Self::InternString(id), count) | (count, Self::InternString(id)) => {
                 let Some(count) = repeat_count(count, vm)? else {
                     return Ok(None);
@@ -785,74 +773,18 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `/`.
     fn py_truediv_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        match (self, other) {
-            // True division always returns float
-            (Self::Int(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(*a as f64 / *b as f64)))
-                }
+        // True division always returns a float, so int and float operands share
+        // one arm; no immediate int is large enough to round to zero here.
+        if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
+            if b == 0.0 {
+                return Err(ExcType::zero_division().into());
             }
-            (Self::Float(a), Self::Float(b)) => {
-                if *b == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(a / b)))
-                }
-            }
-            (Self::Int(a), Self::Float(b)) => {
-                if *b == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(*a as f64 / b)))
-                }
-            }
-            (Self::Float(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(a / *b as f64)))
-                }
-            }
-            // Bool division (True=1, False=0)
-            (Self::Bool(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(f64::from(*a) / *b as f64)))
-                }
-            }
-            (Self::Int(a), Self::Bool(b)) => {
-                if *b {
-                    Ok(Some(Self::Float(*a as f64))) // a / 1 = a
-                } else {
-                    Err(ExcType::zero_division().into())
-                }
-            }
-            (Self::Bool(a), Self::Float(b)) => {
-                if *b == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(f64::from(*a) / b)))
-                }
-            }
-            (Self::Float(a), Self::Bool(b)) => {
-                if *b {
-                    Ok(Some(Self::Float(*a))) // a / 1.0 = a
-                } else {
-                    Err(ExcType::zero_division().into())
-                }
-            }
-            (Self::Bool(a), Self::Bool(b)) => {
-                if *b {
-                    Ok(Some(Self::Float(f64::from(*a)))) // a / 1 = a
-                } else {
-                    Err(ExcType::zero_division().into())
-                }
-            }
-            (Self::Ref(id), _) => vm.heap.read(*id).py_truediv_impl(other, vm),
-            _ => Ok(None),
+            return Ok(Some(Self::Float(a / b)));
+        }
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_truediv_impl(other, vm)
+        } else {
+            Ok(None)
         }
     }
 
@@ -867,85 +799,27 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `//`.
     fn py_floordiv_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        match (self, other) {
-            // Floor division: int // int returns int
-            (Self::Int(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else if let Some((d, _)) = floor_divmod(*a, *b) {
-                    Ok(Some(Self::Int(d)))
-                } else {
-                    Ok(Some(wide_i128_into_value(
-                        i128::from(*a).div_euclid(i128::from(*b)),
-                        vm.heap,
-                    )))
-                }
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            if b == 0 {
+                return Err(ExcType::zero_division().into());
             }
-            // Float floor division returns float
-            (Self::Float(a), Self::Float(b)) => {
-                if *b == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float((a / b).floor())))
-                }
+            // `floor_divmod` declines only on `i64::MIN // -1`, an exact
+            // division whose quotient needs the wider type.
+            return Ok(Some(match floor_divmod(a, b) {
+                Some((quotient, _)) => Self::Int(quotient),
+                None => wide_i128_into_value(i128::from(a).div_euclid(i128::from(b)), vm.heap),
+            }));
+        }
+        if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
+            if b == 0.0 {
+                return Err(ExcType::zero_division().into());
             }
-            (Self::Int(a), Self::Float(b)) => {
-                if *b == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float((*a as f64 / b).floor())))
-                }
-            }
-            (Self::Float(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float((a / *b as f64).floor())))
-                }
-            }
-            // Bool floor division (True=1, False=0)
-            (Self::Bool(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    let a_int = i64::from(*a);
-                    // Use same floor division logic as Int // Int
-                    let d = a_int / b;
-                    let r = a_int % b;
-                    let result = if r != 0 && (a_int < 0) != (*b < 0) { d - 1 } else { d };
-                    Ok(Some(Self::Int(result)))
-                }
-            }
-            (Self::Int(a), Self::Bool(b)) => {
-                if *b {
-                    Ok(Some(Self::Int(*a))) // a // 1 = a
-                } else {
-                    Err(ExcType::zero_division().into())
-                }
-            }
-            (Self::Bool(a), Self::Float(b)) => {
-                if *b == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float((f64::from(*a) / b).floor())))
-                }
-            }
-            (Self::Float(a), Self::Bool(b)) => {
-                if *b {
-                    Ok(Some(Self::Float(a.floor()))) // a // 1.0 = floor(a)
-                } else {
-                    Err(ExcType::zero_division().into())
-                }
-            }
-            (Self::Bool(a), Self::Bool(b)) => {
-                if *b {
-                    Ok(Some(Self::Int(i64::from(*a)))) // a // 1 = a
-                } else {
-                    Err(ExcType::zero_division().into())
-                }
-            }
-            (Self::Ref(id), _) => vm.heap.read(*id).py_floordiv_impl(other, vm),
-            _ => Ok(None),
+            return Ok(Some(Self::Float((a / b).floor())));
+        }
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_floordiv_impl(other, vm)
+        } else {
+            Ok(None)
         }
     }
 
@@ -960,42 +834,27 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `%`.
     fn py_mod_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        match (self, other) {
-            (Self::Int(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else if let Some(r) = a.checked_rem(*b) {
-                    // Python modulo: result has the same sign as divisor (b)
-                    let result = if r != 0 && (*a < 0) != (*b < 0) { r + *b } else { r };
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    // Overflow - i64::MIN % -1 is 0
-                    Ok(Some(Self::Int(0)))
-                }
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            if b == 0 {
+                return Err(ExcType::zero_division().into());
             }
-            (Self::Float(v1), Self::Float(v2)) => {
-                if *v2 == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(py_float_mod(*v1, *v2))))
-                }
+            // The remainder takes the divisor's sign, unlike Rust's `%`.
+            // `checked_rem` declines only on `i64::MIN % -1`, which is 0.
+            let result = a
+                .checked_rem(b)
+                .map_or(0, |r| if r != 0 && (a < 0) != (b < 0) { r + b } else { r });
+            return Ok(Some(Self::Int(result)));
+        }
+        if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
+            if b == 0.0 {
+                return Err(ExcType::zero_division().into());
             }
-            (Self::Float(v1), Self::Int(v2)) => {
-                if *v2 == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(py_float_mod(*v1, *v2 as f64))))
-                }
-            }
-            (Self::Int(v1), Self::Float(v2)) => {
-                if *v2 == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(py_float_mod(*v1 as f64, *v2))))
-                }
-            }
-            (Self::Ref(id), _) => vm.heap.read(*id).py_mod_impl(other, vm),
-            _ => Ok(None),
+            return Ok(Some(Self::Float(py_float_mod(a, b))));
+        }
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_mod_impl(other, vm)
+        } else {
+            Ok(None)
         }
     }
 
@@ -1010,136 +869,32 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `** or pow()`.
     fn py_pow_impl(&self, other: &Self, modulus: Option<&Self>, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        if modulus.is_some() {
-            if let Self::Ref(id) = self {
-                vm.heap.read(*id).py_pow_impl(other, modulus, vm)
-            } else {
-                Ok(None)
+        // Three-argument `pow` is implemented only on the heap side.
+        if modulus.is_none() {
+            if let (Some(base), Some(exp)) = (immediate_int(self), immediate_int(other)) {
+                return immediate_int_pow(base, exp, vm).map(Some);
             }
+            // A float base keeps `powi` for an exponent an `i32` can hold.
+            if let (Self::Float(base), Some(exp)) = (self, immediate_int(other)) {
+                if *base == 0.0 && exp < 0 {
+                    return Err(ExcType::zero_negative_power());
+                }
+                return Ok(Some(Self::Float(match i32::try_from(exp) {
+                    Ok(exp) => base.powi(exp),
+                    Err(_) => base.powf(exp as f64),
+                })));
+            }
+            if let (Some(base), Some(exp)) = (immediate_f64(self), immediate_f64(other)) {
+                if base == 0.0 && exp < 0.0 {
+                    return Err(ExcType::zero_negative_power());
+                }
+                return Ok(Some(Self::Float(base.powf(exp))));
+            }
+        }
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_pow_impl(other, modulus, vm)
         } else {
-            match (self, other) {
-                (Self::Int(base), Self::Int(exp)) => {
-                    if *base == 0 && *exp < 0 {
-                        Err(ExcType::zero_negative_power())
-                    } else if *exp >= 0 {
-                        // Positive exponent: try to return int, promote to LongInt on overflow
-                        if let Ok(exp_u32) = u32::try_from(*exp) {
-                            if let Some(result) = base.checked_pow(exp_u32) {
-                                Ok(Some(Self::Int(result)))
-                            } else if let Some(result) = i128::from(*base).checked_pow(exp_u32) {
-                                Ok(Some(wide_i128_into_value(result, vm.heap)))
-                            } else {
-                                check_pow_size(i64_bits(*base), u64::from(exp_u32), &vm.heap.tracker)?;
-                                let bi = BigInt::from(*base).pow(exp_u32);
-                                Ok(Some(LongInt::new(bi).into_value(vm.heap)))
-                            }
-                        } else {
-                            // exp > u32::MAX - use BigInt with modpow-style exponentiation
-                            // For very large exponents, we still need LongInt
-                            // Safety: exp >= 0 is guaranteed by the outer if condition
-                            #[expect(clippy::cast_sign_loss)]
-                            let exp_u64 = *exp as u64;
-                            // Check size before computing to prevent DoS
-                            check_pow_size(i64_bits(*base), exp_u64, &vm.heap.tracker)?;
-                            let bi = bigint_pow(BigInt::from(*base), exp_u64);
-                            Ok(Some(LongInt::new(bi).into_value(vm.heap)))
-                        }
-                    } else {
-                        // Negative exponent: return float
-                        // Use powi if exp fits in i32, otherwise use powf
-                        if let Ok(exp_i32) = i32::try_from(*exp) {
-                            Ok(Some(Self::Float((*base as f64).powi(exp_i32))))
-                        } else {
-                            Ok(Some(Self::Float((*base as f64).powf(*exp as f64))))
-                        }
-                    }
-                }
-                (Self::Float(base), Self::Float(exp)) => {
-                    if *base == 0.0 && *exp < 0.0 {
-                        Err(ExcType::zero_negative_power())
-                    } else {
-                        Ok(Some(Self::Float(base.powf(*exp))))
-                    }
-                }
-                (Self::Int(base), Self::Float(exp)) => {
-                    if *base == 0 && *exp < 0.0 {
-                        Err(ExcType::zero_negative_power())
-                    } else {
-                        Ok(Some(Self::Float((*base as f64).powf(*exp))))
-                    }
-                }
-                (Self::Float(base), Self::Int(exp)) => {
-                    if *base == 0.0 && *exp < 0 {
-                        Err(ExcType::zero_negative_power())
-                    } else if let Ok(exp_i32) = i32::try_from(*exp) {
-                        // Use powi if exp fits in i32
-                        Ok(Some(Self::Float(base.powi(exp_i32))))
-                    } else {
-                        // Fall back to powf for exponents outside i32 range
-                        Ok(Some(Self::Float(base.powf(*exp as f64))))
-                    }
-                }
-                // Bool power operations (True=1, False=0)
-                (Self::Bool(base), Self::Int(exp)) => {
-                    let base_int = i64::from(*base);
-                    if base_int == 0 && *exp < 0 {
-                        Err(ExcType::zero_negative_power())
-                    } else if *exp >= 0 {
-                        // Positive exponent: 1**n=1, 0**n=0 (for n>0), 0**0=1
-                        if let Ok(exp_u32) = u32::try_from(*exp) {
-                            match base_int.checked_pow(exp_u32) {
-                                Some(result) => Ok(Some(Self::Int(result))),
-                                None => Ok(Some(Self::Float((base_int as f64).powf(*exp as f64)))),
-                            }
-                        } else {
-                            Ok(Some(Self::Float((base_int as f64).powf(*exp as f64))))
-                        }
-                    } else {
-                        // Negative exponent: return float (1**-n=1.0)
-                        if let Ok(exp_i32) = i32::try_from(*exp) {
-                            Ok(Some(Self::Float((base_int as f64).powi(exp_i32))))
-                        } else {
-                            Ok(Some(Self::Float((base_int as f64).powf(*exp as f64))))
-                        }
-                    }
-                }
-                (Self::Int(base), Self::Bool(exp)) => {
-                    // n ** True = n, n ** False = 1
-                    if *exp {
-                        Ok(Some(Self::Int(*base)))
-                    } else {
-                        Ok(Some(Self::Int(1)))
-                    }
-                }
-                (Self::Bool(base), Self::Float(exp)) => {
-                    let base_float = f64::from(*base);
-                    if base_float == 0.0 && *exp < 0.0 {
-                        Err(ExcType::zero_negative_power())
-                    } else {
-                        Ok(Some(Self::Float(base_float.powf(*exp))))
-                    }
-                }
-                (Self::Float(base), Self::Bool(exp)) => {
-                    // base ** True = base, base ** False = 1.0
-                    if *exp {
-                        Ok(Some(Self::Float(*base)))
-                    } else {
-                        Ok(Some(Self::Float(1.0)))
-                    }
-                }
-                (Self::Bool(base), Self::Bool(exp)) => {
-                    // True ** True = 1, True ** False = 1, False ** True = 0, False ** False = 1
-                    let base_int = i64::from(*base);
-                    let exp_int = i64::from(*exp);
-                    if exp_int == 0 {
-                        Ok(Some(Self::Int(1))) // anything ** 0 = 1
-                    } else {
-                        Ok(Some(Self::Int(base_int))) // base ** 1 = base
-                    }
-                }
-                (Self::Ref(id), _) => vm.heap.read(*id).py_pow_impl(other, modulus, vm),
-                _ => Ok(None),
-            }
+            Ok(None)
         }
     }
 
@@ -1302,11 +1057,8 @@ impl<'h> PyTrait<'h> for Value {
                     return Ok(allocate_string(result_str, vm.heap));
                 }
 
-                // Handle interned string indexing, accepting Int and Bool
-                let index = match key {
-                    Self::Int(i) => *i,
-                    Self::Bool(b) => i64::from(*b),
-                    _ => return Err(ExcType::type_error_indices(Type::Str, &key.py_type_name(vm))),
+                let Some(index) = immediate_int(key) else {
+                    return Err(ExcType::type_error_indices(Type::Str, &key.py_type_name(vm)));
                 };
 
                 let s = interns.get_str(*string_id);
@@ -1324,11 +1076,9 @@ impl<'h> PyTrait<'h> for Value {
                     return Ok(Self::Ref(heap_id));
                 }
 
-                // Handle interned bytes indexing - returns integer byte value
-                let index = match key {
-                    Self::Int(i) => *i,
-                    Self::Bool(b) => i64::from(*b),
-                    _ => return Err(ExcType::type_error_indices(Type::Bytes, &key.py_type_name(vm))),
+                // Indexing interned bytes yields the byte's integer value.
+                let Some(index) = immediate_int(key) else {
+                    return Err(ExcType::type_error_indices(Type::Bytes, &key.py_type_name(vm)));
                 };
 
                 let bytes = interns.get_bytes(*bytes_id);
@@ -1885,54 +1635,48 @@ impl Value {
 
     /// Extracts an integer value from the Value.
     ///
-    /// Accepts `Int` and `LongInt` (if it fits in i64). Returns a `TypeError` for other types
-    /// and an `OverflowError` if the `LongInt` value is too large.
+    /// Accepts whatever [`immediate_int`] does, `bool` included, plus a
+    /// `LongInt` that fits in i64. Returns a `TypeError` for other types and an
+    /// `OverflowError` if the `LongInt` value is too large.
     ///
     /// Note: The LongInt-to-i64 conversion path is defensive code. In normal execution,
     /// heap-allocated `LongInt` values always exceed i64 range because `LongInt::into_value()`
     /// automatically demotes i64-fitting values to `Value::Int`. However, this path could be
     /// reached via deserialization of crafted snapshot data.
     pub fn as_int(&self, vm: &VM<'_>) -> RunResult<i64> {
-        match self {
-            Self::Int(i) => Ok(*i),
-            Self::Ref(heap_id) => {
-                if let HeapData::LongInt(li) = vm.heap.get(*heap_id) {
-                    li.to_i64().ok_or_else(ExcType::overflow_c_ssize_t)
-                } else {
-                    let msg = format!("'{}' object cannot be interpreted as an integer", self.py_type_name(vm));
-                    Err(SimpleException::new_msg(ExcType::TypeError, msg).into())
-                }
-            }
-            _ => {
-                let msg = format!("'{}' object cannot be interpreted as an integer", self.py_type_name(vm));
-                Err(SimpleException::new_msg(ExcType::TypeError, msg).into())
-            }
+        if let Some(int) = immediate_int(self) {
+            return Ok(int);
         }
+        if let Self::Ref(heap_id) = self
+            && let HeapData::LongInt(li) = vm.heap.get(*heap_id)
+        {
+            return li.to_i64().ok_or_else(ExcType::overflow_c_ssize_t);
+        }
+        let msg = format!("'{}' object cannot be interpreted as an integer", self.py_type_name(vm));
+        Err(SimpleException::new_msg(ExcType::TypeError, msg).into())
     }
 
     /// Extracts an index value for sequence operations.
     ///
-    /// Accepts `Int`, `Bool` (True=1, False=0), and `LongInt` (if it fits in i64).
-    /// Returns a `TypeError` for other types with the container type name included.
-    /// Returns an `IndexError` if the `LongInt` value is too large to use as an index.
+    /// Accepts whatever [`immediate_int`] does, `bool` included, plus a
+    /// `LongInt` that fits in i64. Returns a `TypeError` for other types with
+    /// the container type name included, and an `IndexError` if the `LongInt`
+    /// value is too large to use as an index.
     ///
     /// Note: The LongInt-to-i64 conversion path is defensive code. In normal execution,
     /// heap-allocated `LongInt` values always exceed i64 range because `LongInt::into_value()`
     /// automatically demotes i64-fitting values to `Value::Int`. However, this path could be
     /// reached via deserialization of crafted snapshot data.
     pub fn as_index(&self, vm: &VM<'_>, container_type: Type) -> RunResult<i64> {
-        match self {
-            Self::Int(i) => Ok(*i),
-            Self::Bool(b) => Ok(i64::from(*b)),
-            Self::Ref(heap_id) => {
-                if let HeapData::LongInt(li) = vm.heap.get(*heap_id) {
-                    li.to_i64().ok_or_else(ExcType::index_error_int_too_large)
-                } else {
-                    Err(ExcType::type_error_indices(container_type, &self.py_type_name(vm)))
-                }
-            }
-            _ => Err(ExcType::type_error_indices(container_type, &self.py_type_name(vm))),
+        if let Some(int) = immediate_int(self) {
+            return Ok(int);
         }
+        if let Self::Ref(heap_id) = self
+            && let HeapData::LongInt(li) = vm.heap.get(*heap_id)
+        {
+            return li.to_i64().ok_or_else(ExcType::index_error_int_too_large);
+        }
+        Err(ExcType::type_error_indices(container_type, &self.py_type_name(vm)))
     }
 
     /// True when this is a `LongInt`-valued int (interned or heap-allocated)
@@ -2497,11 +2241,73 @@ impl Marker {
 }
 
 /// Extracts an immediate integer without promoting it to `BigInt`.
-fn immediate_int(value: &Value) -> Option<i64> {
+///
+/// Python's `bool` is a subclass of `int`, so `True` and `False` *are* the ints
+/// `1` and `0` everywhere an int is accepted. This function is where the
+/// interpreter takes that decision; every operator, builtin and argument parser
+/// reads an immediate int through it, or through [`immediate_f64`] /
+/// [`immediate_int_value`] below, rather than matching [`Value::Bool`] itself,
+/// so one added later cannot silently reject a bool.
+///
+/// A `LongInt` is deliberately not immediate: it is wider than `i64` and lives
+/// on the heap or in the intern table, so the callers that accept one reach for
+/// it by name.
+pub(crate) fn immediate_int(value: &Value) -> Option<i64> {
     match value {
         Value::Int(value) => Some(*value),
         Value::Bool(value) => Some(i64::from(*value)),
         _ => None,
+    }
+}
+
+/// [`immediate_int`] widened, plus `float`: the mixed arm of an arithmetic
+/// operator. Those try their all-int arm first, so reaching this one means at
+/// least one side really is a float.
+fn immediate_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        _ => immediate_int(value).map(|value| value as f64),
+    }
+}
+
+/// [`immediate_int`] as a rewrite, for a caller that goes on to match `Value`
+/// variants rather than read an `i64`. Only a bool changes; the moved-out
+/// original is never a `Ref`, so nothing is left holding a reference.
+pub(crate) fn immediate_int_value(value: Value) -> Value {
+    match immediate_int(&value) {
+        Some(int) => Value::Int(int),
+        None => value,
+    }
+}
+
+/// `base ** exp` for two immediate ints.
+///
+/// A negative exponent gives a float; a positive one stays an int, widening to
+/// `i128` and then to a `BigInt` rather than wrapping. The size check guards the
+/// `BigInt` paths, where the digit count is the attack surface.
+fn immediate_int_pow(base: i64, exp: i64, vm: &mut VM<'_>) -> RunResult<Value> {
+    if base == 0 && exp < 0 {
+        return Err(ExcType::zero_negative_power());
+    }
+    if exp < 0 {
+        return Ok(Value::Float(match i32::try_from(exp) {
+            Ok(exp) => (base as f64).powi(exp),
+            Err(_) => (base as f64).powf(exp as f64),
+        }));
+    }
+    let Ok(exp_u32) = u32::try_from(exp) else {
+        #[expect(clippy::cast_sign_loss, reason = "the branch above leaves only exp >= 0")]
+        let exp_u64 = exp as u64;
+        check_pow_size(i64_bits(base), exp_u64, &vm.heap.tracker)?;
+        return Ok(LongInt::new(bigint_pow(BigInt::from(base), exp_u64)).into_value(vm.heap));
+    };
+    if let Some(result) = base.checked_pow(exp_u32) {
+        Ok(Value::Int(result))
+    } else if let Some(result) = i128::from(base).checked_pow(exp_u32) {
+        Ok(wide_i128_into_value(result, vm.heap))
+    } else {
+        check_pow_size(i64_bits(base), u64::from(exp_u32), &vm.heap.tracker)?;
+        Ok(LongInt::new(BigInt::from(base).pow(exp_u32)).into_value(vm.heap))
     }
 }
 

@@ -19,7 +19,7 @@ use crate::{
     hash::HashValue,
     heap::{Heap, HeapData, HeapId, HeapItem, HeapRead, HeapReadOutput},
     types::{LazyHeapSet, PyTrait, Type},
-    value::Value,
+    value::{Value, immediate_int},
 };
 
 /// Python range object representing an immutable sequence of integers.
@@ -195,8 +195,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Range> {
     fn py_contains_impl(&self, _self_id: HeapId, item: &Value, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
         let range = self.get(vm.heap);
         let n = match item {
-            Value::Int(i) => *i,
-            Value::Bool(b) => i64::from(*b),
+            _ if let Some(i) = immediate_int(item) => i,
             Value::Float(f) => {
                 if f.fract() != 0.0 {
                     return Ok(Some(false));

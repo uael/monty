@@ -26,7 +26,7 @@ use crate::{
         long_int::repeat_count,
         slice::{normalize_sequence_index, slice_collect_iterator},
     },
-    value::{EitherStr, Value, eq_str},
+    value::{EitherStr, Value, eq_str, immediate_int},
 };
 
 /// Python string value stored on the heap.
@@ -1177,18 +1177,15 @@ fn extract_string_arg(value: &Value, vm: &mut VM<'_>) -> RunResult<String> {
 
 /// Extracts an integer from a Value, returning an error if not an integer.
 fn extract_int_arg(value: &Value, vm: &mut VM<'_>) -> RunResult<i64> {
-    match value {
-        Value::Int(i) => Ok(*i),
-        Value::Ref(heap_id) => {
-            if let HeapData::LongInt(li) = vm.heap.get(*heap_id) {
-                // Try to convert to i64
-                li.to_i64().ok_or_else(|| ExcType::type_error("integer too large"))
-            } else {
-                Err(ExcType::type_error("expected int"))
-            }
-        }
-        _ => Err(ExcType::type_error("expected int")),
+    if let Some(int) = immediate_int(value) {
+        return Ok(int);
     }
+    if let Value::Ref(heap_id) = value
+        && let HeapData::LongInt(li) = vm.heap.get(*heap_id)
+    {
+        return li.to_i64().ok_or_else(|| ExcType::type_error("integer too large"));
+    }
+    Err(ExcType::type_error("expected int"))
 }
 
 /// Extracts an optional slice index from a `Value`, treating `None` as `default`.
