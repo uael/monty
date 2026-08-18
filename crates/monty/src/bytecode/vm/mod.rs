@@ -19,7 +19,7 @@ mod scheduler;
 use std::mem;
 
 pub(crate) use call::CallResult;
-use generator::{GenActivation, GeneratorYield, ResumeMode};
+use generator::{GenActivation, GeneratorYield, ResumeMode, SendIterStep};
 pub(crate) use generator::{GeneratorInput, GeneratorStep, stop_iteration_with};
 use monty_types::{InvalidInputError, MontyObject, OsFunctionCall, PrintWriter};
 pub(crate) use recursion::{ContainsVM, RecursionToken};
@@ -1993,8 +1993,18 @@ impl<'h> VM<'h> {
                     let loop_end = jump_target(cached_frame.ip, offset);
                     self.current_frame_mut().ip = cached_frame.ip;
                     match self.exec_send_iter(loop_end) {
-                        Ok(true) => reload_cache!(self, cached_frame),
-                        Ok(false) => cached_frame.ip = loop_end,
+                        Ok(SendIterStep::Resumed) => reload_cache!(self, cached_frame),
+                        Ok(SendIterStep::Exhausted) => cached_frame.ip = loop_end,
+                        // `exec_send_iter` already aimed the frame at `loop_end`,
+                        // so every outcome of the wait resumes there.
+                        Ok(SendIterStep::Awaited(AwaitResult::ValueReady(value))) => {
+                            self.push(value);
+                            cached_frame.ip = loop_end;
+                        }
+                        Ok(SendIterStep::Awaited(AwaitResult::FramePushed)) => reload_cache!(self, cached_frame),
+                        Ok(SendIterStep::Awaited(AwaitResult::Yield(pending))) => {
+                            return Ok(FrameExit::ResolveFutures(pending));
+                        }
                         Err(e) => catch_sync!(self, cached_frame, e),
                     }
                 }
@@ -2035,6 +2045,26 @@ impl<'h> VM<'h> {
                         }
                         Err(e) => {
                             catch_sync!(self, cached_frame, e);
+                        }
+                    }
+                }
+                Opcode::GetAwaitable => {
+                    // Syncing first: resolving `__await__` pushes a frame.
+                    self.current_frame_mut().ip = cached_frame.ip;
+                    handle_call_result!(self, cached_frame, self.exec_get_awaitable_iter());
+                }
+                Opcode::GetYieldFromIter => {
+                    // Generators and awaitables are already what a delegation
+                    // drives; only everything else goes through `iter()`.
+                    let passthrough = matches!(*self.peek(), Value::Ref(id)
+                        if matches!(self.heap.get(id), HeapData::Generator(_)) || self.is_native_awaitable(id));
+                    if !passthrough {
+                        let value = self.pop();
+                        let iterator = value.py_iter(self);
+                        value.drop_with(self);
+                        match iterator {
+                            Ok(iterator) => self.push(iterator),
+                            Err(e) => catch_sync!(self, cached_frame, e),
                         }
                     }
                 }
@@ -2779,6 +2809,7 @@ impl Drop for VM<'_> {
             raised.drop_with(self.heap);
         }
         self.exception_stack.drain(..).drop_with(self.heap);
+        self.gen_activations.drain(..).drop_with(self.heap);
         self.cleanup_current_task();
         self.scheduler.cleanup(self.heap);
         self.globals.drain(..).drop_with(self.heap);

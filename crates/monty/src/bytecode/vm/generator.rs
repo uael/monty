@@ -79,6 +79,12 @@ pub(crate) struct GenActivation {
     mode: ResumeMode,
 }
 
+impl<C: ContainsHeap> DropWithContext<C> for GenActivation {
+    fn drop_with(self, heap: &mut C) {
+        heap.heap_mut().dec_ref(self.gen_id);
+    }
+}
+
 /// What one generator step produced.
 pub(crate) enum GeneratorStep {
     /// Paused at a `yield` with this value.
@@ -526,17 +532,22 @@ impl VM<'_> {
     /// delegate was resumed (the run loop must reload its frame), and
     /// `Ok(false)` when it was already exhausted and the caller should take the
     /// jump with the `yield from` value now on the stack.
-    pub(super) fn exec_send_iter(&mut self, loop_end: usize) -> RunResult<bool> {
+    pub(super) fn exec_send_iter(&mut self, loop_end: usize) -> RunResult<SendIterStep> {
         let sent = self.pop();
+        // Only two sites emit `SendIter`: a `yield from`, whose delegate came
+        // through `GetYieldFromIter` and so is a generator, an awaitable or a
+        // real iterator; and the `await` loop, whose delegate is whatever
+        // `__await__` returned. So a delegate that is none of those three is
+        // always a bad `__await__` result, and says so.
         let Value::Ref(delegate_id) = *self.peek() else {
             sent.drop_with(self);
             let name = self.peek().py_type_name(self);
-            return Err(ExcType::type_error_not_iterator(&name));
+            return Err(await_returned_non_iterator(&name));
         };
 
         if self.is_sync_generator(delegate_id) {
             if self.generator_resume_op(delegate_id, ResumeMode::Delegate { loop_end }, sent)? {
-                return Ok(true);
+                return Ok(SendIterStep::Resumed);
             }
             // Already exhausted, so its parked return value is the `yield from`
             // expression's value.
@@ -544,7 +555,24 @@ impl VM<'_> {
             delegate.drop_with(self);
             let value = self.take_generator_result(delegate_id);
             self.push(value);
-            return Ok(false);
+            return Ok(SendIterStep::Exhausted);
+        }
+
+        // An awaitable delegate ends the delegation in one step: waiting on it
+        // *is* the whole `yield from`, so the frame is aimed at `loop_end`
+        // first and the awaited value lands there however the wait ends. This
+        // is the route `yield from coro.__await__()` takes, and the one the
+        // `await` loop takes for everything the VM drives natively.
+        if self.is_native_awaitable(delegate_id) {
+            sent.drop_with(self);
+            self.current_frame_mut().ip = loop_end;
+            return self.exec_get_awaitable().map(SendIterStep::Awaited);
+        }
+
+        if !self.heap.read(delegate_id).py_is_iterator(self) {
+            sent.drop_with(self);
+            let name = self.peek().py_type_name(self);
+            return Err(await_returned_non_iterator(&name));
         }
 
         // A plain iterator has no `send`; only the implicit `None` of the
@@ -558,14 +586,14 @@ impl VM<'_> {
 
         if let Some(value) = self.heap.read(delegate_id).py_next(Some(delegate_id), self)? {
             self.push(value);
-            Ok(true)
+            Ok(SendIterStep::Resumed)
         } else {
             let delegate = self.pop();
             delegate.drop_with(self);
             // A non-generator iterator has no return value, so the `yield from`
             // evaluates to `None`.
             self.push(Value::None);
-            Ok(false)
+            Ok(SendIterStep::Exhausted)
         }
     }
 
@@ -638,6 +666,17 @@ fn check_send(value: &Value, started: bool, is_async: bool) -> RunResult<()> {
     }
 }
 
+/// What one `SendIter` step did, and so where the run loop goes next.
+pub(super) enum SendIterStep {
+    /// The delegate is running; reload the cached frame and carry on.
+    Resumed,
+    /// The delegate was exhausted and its value is on the stack; take the jump.
+    Exhausted,
+    /// The delegate was an awaitable and was waited on in place. The frame's
+    /// `ip` is already the jump target, so the value arrives there.
+    Awaited(super::AwaitResult),
+}
+
 /// What the `Yield` opcode should do once the generator has been drained out.
 pub(super) enum GeneratorYield {
     /// The value went onto the driving frame's operand stack; carry on.
@@ -668,6 +707,16 @@ impl<C: ContainsHeap> DropWithContext<C> for GeneratorInput {
 fn already_executing(is_async: bool) -> RunError {
     let kind = if is_async { "async generator" } else { "generator" };
     SimpleException::new_msg(ExcType::ValueError, format!("{kind} already executing")).into()
+}
+
+/// `TypeError: __await__() returned non-iterator of type 'X'` — an `await`
+/// whose object handed back something the send loop cannot drive.
+fn await_returned_non_iterator(type_name: &str) -> RunError {
+    SimpleException::new_msg(
+        ExcType::TypeError,
+        format!("__await__() returned non-iterator of type '{type_name}'"),
+    )
+    .into()
 }
 
 /// `StopAsyncIteration`, which ends an `async for`.

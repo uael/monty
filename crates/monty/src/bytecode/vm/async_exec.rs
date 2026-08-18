@@ -12,8 +12,9 @@ use ahash::AHashMap;
 use monty_types::MontyException;
 use smallvec::{SmallVec, smallvec};
 
-use super::{AwaitResult, CallFrame, FrameExit, VM};
+use super::{AwaitResult, CallFrame, CallResult, FrameExit, VM};
 use crate::{
+    args::ArgValues,
     asyncio::{
         AwaitedGather, Awaiter, CallId, Coroutine, CoroutineState, ExternalFuture, ExternalFutureState, GatherFuture,
         GatherState, TaskId,
@@ -25,14 +26,54 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{DropGuard, DropWithContext, HeapData, HeapId, HeapRead, HeapReadOutput, HeapReader},
-    intern::FunctionId,
+    intern::{FunctionId, StaticStrings},
     object_bridge::MontyObjectExt,
     run_progress::{ExtFunctionResult, ExtFunctionResultExt},
-    types::List,
+    types::{
+        List,
+        instance::{class_defines, instance_class_id},
+    },
     value::Value,
 };
 
 impl<'h> VM<'h> {
+    /// Whether `id` names something the `Await` opcode drives on its own, with
+    /// no `__await__` call in between.
+    ///
+    /// The one list of them: `GetAwaitable` passes these through untouched,
+    /// `GetYieldFromIter` does too, and `SendIter` ends its delegation on one.
+    pub(super) fn is_native_awaitable(&self, id: HeapId) -> bool {
+        match self.heap.get(id) {
+            HeapData::Coroutine(_) | HeapData::GatherFuture(_) | HeapData::ExternalFuture(_) => true,
+            HeapData::Generator(generator) => generator.is_async,
+            _ => false,
+        }
+    }
+
+    /// Executes the `GetAwaitable` opcode: turns TOS into the iterator the
+    /// `await` loop drives.
+    ///
+    /// Natively awaitable objects are handed straight back. Anything else must
+    /// define `__await__`, and calling it pushes a frame whose return value
+    /// takes its place — the same shape CPython's `GET_AWAITABLE` has, where
+    /// the slot call runs before the send loop starts.
+    pub(super) fn exec_get_awaitable_iter(&mut self) -> RunResult<CallResult> {
+        let obj = self.pop();
+        let defines_await = match obj {
+            Value::Ref(id) if self.is_native_awaitable(id) => return Ok(CallResult::Value(obj)),
+            Value::Ref(id) => {
+                instance_class_id(id, self).is_some_and(|class_id| class_defines(class_id, "__await__", self))
+            }
+            _ => false,
+        };
+        if !defines_await {
+            let name = obj.py_type_name(self);
+            obj.drop_with(self);
+            return Err(ExcType::object_not_awaitable(&name));
+        }
+        self.call_attr(obj, StaticStrings::DunderAwait.into(), ArgValues::Empty)
+    }
+
     /// Executes the Await opcode.
     ///
     /// Pops the awaitable from the stack and handles it based on its type:
@@ -528,6 +569,7 @@ impl<'h> VM<'h> {
         task.frames = frames;
         task.stack = mem::take(&mut self.stack);
         task.exception_stack = mem::take(&mut self.exception_stack);
+        task.gen_activations = mem::take(&mut self.gen_activations);
         task.instruction_ip = self.instruction_ip;
     }
 
@@ -545,6 +587,7 @@ impl<'h> VM<'h> {
         let frames = mem::take(&mut task.frames);
         let stack = mem::take(&mut task.stack);
         let exception_stack = mem::take(&mut task.exception_stack);
+        let gen_activations = mem::take(&mut task.gen_activations);
         let instruction_ip = task.instruction_ip;
         let coroutine_id = task.coroutine_id;
 
@@ -556,6 +599,7 @@ impl<'h> VM<'h> {
             // Task has existing context - restore it
             self.stack = stack;
             self.exception_stack = exception_stack;
+            self.gen_activations = gen_activations;
             self.instruction_ip = instruction_ip;
 
             // Reconstruct CallFrames from serialized form

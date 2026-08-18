@@ -594,13 +594,7 @@ pub enum Opcode {
     /// `[..., aiter, exc]`: a `StopAsyncIteration` pops both, clears the active
     /// exception and jumps to the loop end; anything else propagates.
     EndAsyncFor = 130,
-    /// Return TOS out of a module body, marking the exit as a written `return`.
-    ///
-    /// Identical to [`Self::ReturnValue`] at runtime; the separate opcode is
-    /// what lets a host tell a snippet that returned from one that simply ran
-    /// out of statements, since the value of a trailing expression is returned
-    /// through `ReturnValue` by the same frame.
-    ReturnModule = 141,
+
     /// Push a fresh PEP 695 `typing.TypeVar`. Operand: u16 name_id (its
     /// `__name__`). Emitted once per execution of the `class C[T]` statement
     /// that declares it, so `T is T` holds inside the class.
@@ -617,6 +611,31 @@ pub enum Opcode {
     /// tuple of matched attributes, or `None` when the subject is not an
     /// instance or an attribute is missing.
     MatchClass = 133,
+
+    /// Return TOS out of a module body, marking the exit as a written `return`.
+    ///
+    /// Identical to [`Self::ReturnValue`] at runtime; the separate opcode is
+    /// what lets a host tell a snippet that returned from one that simply ran
+    /// out of statements, since the value of a trailing expression is returned
+    /// through `ReturnValue` by the same frame.
+    ReturnModule = 141,
+
+    // === asyncio (lane w2-asyncio; opcodes start at 151) ===
+    /// Resolve TOS into the iterator `await` drives. Stack `[..., obj]` ->
+    /// `[..., awaitable]`.
+    ///
+    /// Anything the VM awaits natively (a coroutine, a future, a task, an async
+    /// generator) is left alone; anything else must supply `__await__`, whose
+    /// call pushes a frame and whose result replaces the object. CPython's
+    /// `GET_AWAITABLE` under another name.
+    GetAwaitable = 151,
+    /// Resolve TOS into the iterator a `yield from` delegates to. Stack
+    /// `[..., obj]` -> `[..., iterator]`.
+    ///
+    /// Generators and awaitables pass through untouched so `yield from
+    /// coro.__await__()` reaches [`Self::SendIter`] with the coroutine itself;
+    /// everything else goes through `iter()`. CPython's `GET_YIELD_FROM_ITER`.
+    GetYieldFromIter = 152,
 }
 
 /// Which operation a [`Opcode::MatchShape`] performs.
@@ -728,6 +747,8 @@ impl Opcode {
             | Self::BinarySubscr
             | Self::StoreSubscr
             | Self::GetIter
+            | Self::GetAwaitable
+            | Self::GetYieldFromIter
             | Self::Raise
             | Self::RaiseFrom
             | Self::Reraise
@@ -1011,7 +1032,7 @@ impl Opcode {
             (BuildInterpolation, Operand::None) => -3,
             // Two tuples in, one `Template` out.
             (BuildTemplate, Operand::None) => -1,
-            (GetIter | Await, Operand::None) => 0,
+            (GetIter | Await | GetAwaitable | GetYieldFromIter, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (RaiseFrom, Operand::None) => -2,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,

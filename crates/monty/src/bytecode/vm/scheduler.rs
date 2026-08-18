@@ -13,6 +13,7 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::{
     asyncio::{Awaiter, CallId, ExternalFutureState, TaskId},
+    bytecode::vm::generator::GenActivation,
     exception_private::RunError,
     heap::{ContainsHeap, DropWithContext, Heap, HeapId, HeapReadOutput, HeapReader},
     intern::FunctionId,
@@ -74,6 +75,10 @@ pub(crate) struct Task {
     pub stack: Vec<Value>,
     /// Exception stack for nested except blocks.
     pub exception_stack: Vec<Value>,
+    /// In-flight generator steps, saved with the frames they run in. A step
+    /// records positions in this task's own three stacks, so it has to travel
+    /// with them or the next task's `yield` pops a stranger's activation.
+    pub gen_activations: Vec<GenActivation>,
     /// VM-level instruction_ip (for exception table lookup).
     pub instruction_ip: usize,
     /// Coroutine being executed by this task (if any).
@@ -91,6 +96,7 @@ impl<C: ContainsHeap> DropWithContext<C> for Task {
     fn drop_with(mut self, heap: &mut C) {
         self.stack.drain(..).drop_with(heap);
         self.exception_stack.drain(..).drop_with(heap);
+        self.gen_activations.drain(..).drop_with(heap);
         self.state.drop_with(heap);
         if let Some(coro_id) = self.coroutine_id.take() {
             heap.heap_mut().dec_ref(coro_id);
@@ -139,6 +145,7 @@ impl Task {
             frames: Vec::new(),
             stack: Vec::new(),
             exception_stack: Vec::new(),
+            gen_activations: Vec::new(),
             instruction_ip: 0,
             coroutine_id,
             gather_id,

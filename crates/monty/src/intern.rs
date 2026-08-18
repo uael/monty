@@ -1234,6 +1234,10 @@ pub enum StaticStrings {
     /// tests an instance for.
     #[strum(serialize = "__protocol_attrs__")]
     DunderProtocolAttrs,
+    // `asyncio` strings.
+    /// `__await__`, the protocol method `await` drives an arbitrary object through.
+    #[strum(serialize = "__await__")]
+    DunderAwait,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

@@ -820,6 +820,18 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                 self,
                 |value| Ok(value.py_call_attr(self_id, vm, attr, args)?),
                 else {
+                    // What the VM awaits natively is its own `__await__`
+                    // iterator, so `yield from coro.__await__()` reaches
+                    // `SendIter` with the coroutine and waits on it there.
+                    // CPython interposes a `coroutine_wrapper` object; the
+                    // only difference that leaves is the type name.
+                    if attr.as_str(vm.interns) == "__await__"
+                        && matches!(self, Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_))
+                    {
+                        args.check_zero_args("__await__", vm.heap)?;
+                        vm.heap.inc_ref(self_id);
+                        return Ok(CallResult::Value(Value::Ref(self_id)));
+                    }
                     args.drop_with(vm);
                     let type_name = vm.heap.read(self_id).py_type(vm).name(vm.heap, vm.interns);
                     Err(ExcType::attribute_error(type_name, attr.as_str(vm.interns)))

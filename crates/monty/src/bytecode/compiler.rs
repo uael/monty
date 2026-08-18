@@ -1963,12 +1963,10 @@ impl<'a> Compiler<'a> {
             }
 
             Expr::Await(value) => {
-                // Await expressions: compile the inner expression, then emit Await
-                // Await handles ExternalFuture, Coroutine, and GatherFuture
                 self.compile_expr(value)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
-                self.code.emit(Opcode::Await)?;
+                self.compile_await()?;
             }
 
             Expr::Slice { lower, upper, step } => {
@@ -3124,7 +3122,7 @@ impl<'a> Compiler<'a> {
     fn compile_yield_from(&mut self, value: &ExprLoc, position: CodeRange) -> Result<(), CompileError> {
         self.compile_expr(value)?;
         self.code.set_location(position, None);
-        self.code.emit(Opcode::GetIter)?;
+        self.code.emit(Opcode::GetYieldFromIter)?;
         // The first step always sends `None`; later ones send what the outer
         // generator was sent.
         self.code.emit(Opcode::LoadNone)?;
@@ -3132,6 +3130,26 @@ impl<'a> Compiler<'a> {
         let loop_start = self.code.current_jump_target();
         let end_jump = self.code.emit_jump(Opcode::SendIter)?;
         self.code.emit_u8(Opcode::Yield, YIELD_DELEGATING)?;
+        self.code.emit_jump_to(Opcode::Jump, loop_start)?;
+        self.code.patch_jump(end_jump)?;
+        Ok(())
+    }
+
+    /// Compiles the `await` of a value already on the stack.
+    ///
+    /// The shape is `yield from`'s with the re-yield replaced by [`Opcode::Await`]:
+    /// each step of the awaitable's iterator hands back the thing to wait on,
+    /// `Await` waits on it, and the value it produces is sent back in. That is
+    /// what makes a Python-written `__await__` work at all, since its `yield`s
+    /// have to reach the scheduler and its `return` has to become the value of
+    /// the whole expression. Awaitables the VM drives natively skip the loop:
+    /// `SendIter` waits on them directly and jumps straight to `loop_end`.
+    fn compile_await(&mut self) -> Result<(), CompileError> {
+        self.code.emit(Opcode::GetAwaitable)?;
+        self.code.emit(Opcode::LoadNone)?;
+        let loop_start = self.code.current_jump_target();
+        let end_jump = self.code.emit_jump(Opcode::SendIter)?;
+        self.code.emit(Opcode::Await)?;
         self.code.emit_jump_to(Opcode::Jump, loop_start)?;
         self.code.patch_jump(end_jump)?;
         Ok(())
@@ -3173,7 +3191,7 @@ impl<'a> Compiler<'a> {
         let region = Region::open(self.code.current_offset(), stack_depth + 1, self.exc_stack_count());
         self.code.emit(Opcode::Dup)?;
         self.code.emit_u16_u8(Opcode::CallAttr, anext_idx, 0)?;
-        self.code.emit(Opcode::Await)?;
+        self.compile_await()?;
         // The awaited step's `StopAsyncIteration` surfaces at the caller's
         // *resume* offset, one past `Await`, so that offset has to be inside
         // the region for the handler lookup to find it.
@@ -4376,7 +4394,7 @@ impl<'a> Compiler<'a> {
         self.code.set_location(position, None);
         self.code.emit(Opcode::Dup)?;
         self.code.emit_u16_u8(Opcode::CallAttr, aenter_idx, 0)?;
-        self.code.emit(Opcode::Await)?;
+        self.compile_await()?;
 
         // === Body (protected region) ===
         // The context manager remains below the protected body's operands.
@@ -4403,7 +4421,7 @@ impl<'a> Compiler<'a> {
         self.code.emit(Opcode::LoadNone)?;
         self.code.emit(Opcode::LoadNone)?;
         self.code.emit_u16_u8(Opcode::CallAttr, aexit_idx, 3)?;
-        self.code.emit(Opcode::Await)?;
+        self.compile_await()?;
         self.code.emit(Opcode::Pop)?;
         let end_jump = self.code.emit_jump(Opcode::Jump)?;
 
@@ -4416,7 +4434,7 @@ impl<'a> Compiler<'a> {
         self.code.emit(Opcode::Rot2)?;
         self.code.emit(Opcode::LoadNone)?;
         self.code.emit_u16_u8(Opcode::CallAttr, aexit_idx, 3)?;
-        self.code.emit(Opcode::Await)?;
+        self.compile_await()?;
         let swallow_jump = self.code.emit_jump(Opcode::JumpIfTrue)?;
         self.code.emit(Opcode::Reraise)?;
 
