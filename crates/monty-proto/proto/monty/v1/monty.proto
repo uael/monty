@@ -82,7 +82,24 @@ message MontyObject {
     // reconstructed from a name).
     string instance_type = 28;
     Unit not_implemented = 29;
+    Instance instance = 30;
   }
+}
+
+// An instance of a class the sandbox itself defined.
+//
+// Two sessions share no pointers, so an instance crossing between them is
+// matched to a class by shape: the receiving session looks for a class of this
+// name, defined in its own namespace, whose members are exactly `members`. A
+// session with no such class rejects the instance as an input, since there
+// would be nothing for it to be an instance of.
+message Instance {
+  // The class name, as the defining source spelled it.
+  string class_name = 1;
+  // The class's member names (methods and class variables), sorted.
+  repeated string members = 2;
+  // Instance attributes, in `__dict__` order.
+  Dict attrs = 3;
 }
 
 message ObjectList {
@@ -360,6 +377,8 @@ message ParentRequest {
     Load load = 8;
     Reset reset = 9;
     Shutdown shutdown = 10;
+    Parse parse = 11;
+    Probe probe = 12;
   }
 
   // W3C `traceparent` identifying the caller's span, so a child that exports
@@ -433,6 +452,34 @@ message Feed {
   repeated NamedValue inputs = 2;
   // Skip type checking for this feed even when the session enables it.
   bool skip_type_check = 3;
+  // Instructions this feed alone may execute, at dispatch-checkpoint
+  // granularity, counted from zero at the start of the feed. Independent of
+  // the session's own `ResourceLimits.max_steps`, which keeps applying
+  // underneath; whichever is tighter trips first. Deterministic, so the same
+  // source under the same budget fails with the same message every time.
+  optional uint64 max_steps = 4;
+}
+
+// Reads a snippet and answers what is statically true of it, running none of
+// it. Turn ends with `ParseFacts`. Valid with or without a session, since
+// nothing about the answer depends on one.
+message Parse {
+  string code = 1;
+  // Filename the syntax error's traceback names; the session's script name
+  // when empty.
+  string script_name = 2;
+  // Names to report a module-level binding of, echoed back in
+  // `ParseFacts.stores`.
+  repeated string stores = 3;
+}
+
+// Evaluates one expression against the session's namespace and answers with
+// its value. Binds nothing, so the session is left as it was. Turn ends with
+// `Complete`, `Error`, or a suspension, exactly as a `Feed` does.
+message Probe {
+  string expr = 1;
+  // Instructions the expression may execute, as in `Feed.max_steps`.
+  optional uint64 max_steps = 2;
 }
 
 // Answers a `FunctionCall` or `OsCall` suspension. `call_id` must match the
@@ -517,6 +564,7 @@ message ChildEvent {
     Ok ok = 10;
     FatalError fatal_error = 11;
     ShutdownDump shutdown = 12;
+    ParseFacts parse_facts = 13;
   }
 
   // Cumulative execution time consumed by the session's sandbox code, in
@@ -663,6 +711,30 @@ message ResolveFutures {
 // the next `Feed`.
 message Complete {
   MontyObject value = 1;
+  // True when a module-level `return` ended the snippet, false when the body
+  // ran out of statements (whether or not a trailing expression supplied the
+  // value). CPython rejects such a return at compile time; Monty runs it and
+  // reports it here, so a host can tell a chunk that closed itself from one
+  // that merely finished.
+  bool returned = 2;
+}
+
+// Turn end: what `Parse` read off the snippet. Nothing ran, and no session
+// state changed.
+message ParseFacts {
+  // False only when the snippet is unfinished rather than wrong: an open
+  // bracket, an unterminated triple-quoted string, or a block header with no
+  // body. That is a request for more input, so `error` is then absent. Same
+  // line CPython's `codeop.compile_command` draws for an interactive prompt.
+  bool complete = 1;
+  // The syntax error a `Feed` of this snippet would raise; absent when it
+  // parses, and when it is merely unfinished.
+  RaisedException error = 2;
+  // Whether a `global` statement appears anywhere in the snippet, in any scope.
+  bool binds_global = 3;
+  // Which of the request's `stores` the snippet binds at module level, in the
+  // order asked.
+  repeated string stores = 4;
 }
 
 // Turn end: the snippet (or request) failed with a Python exception. The

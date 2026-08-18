@@ -17,7 +17,7 @@ use crate::{
     heap::{DropGuard, Heap, HeapData, HeapId, HeapReadOutput},
     intern::Interns,
     types::{
-        Dataclass, LongInt, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type, allocate_tuple,
+        Dataclass, Instance, LongInt, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type, allocate_tuple,
         bytes::Bytes,
         date as date_type, datetime as datetime_type,
         dict::Dict,
@@ -197,6 +197,21 @@ impl MontyObjectExt for MontyObject {
                     .map_err(|_| InvalidInputError::invalid_type("unhashable dataclass attr keys"))?;
                 let dc = Dataclass::new(name, type_id, field_names, dict, frozen);
                 Ok(Value::Ref(vm.heap.allocate(HeapData::Dataclass(Box::new(dc)))))
+            }
+            Self::Instance { class, members, attrs } => {
+                let class_id = session_class(&class, &members, vm).ok_or_else(|| {
+                    InvalidInputError::invalid_type(format!(
+                        "{class} names no class this session defines with those members"
+                    ))
+                })?;
+                let pairs = convert_pairs(attrs, vm)?;
+                let dict = Dict::from_pairs(pairs, vm)
+                    .map_err(|_| InvalidInputError::invalid_type("unhashable instance attr keys"))?;
+                let instance = Instance::new(class_id, dict);
+                let id = vm.heap.allocate(HeapData::Instance(Box::new(instance)));
+                // The instance now owns a reference to its class object.
+                vm.heap.inc_ref(class_id);
+                Ok(Value::Ref(id))
             }
             Self::Path(s) => Ok(Value::Ref(vm.heap.allocate(HeapData::Path(Path::new(s))))),
             Self::FileHandle(handle) => {
@@ -499,6 +514,19 @@ impl MontyObjectExt for MontyObject {
                         name: function.get(vm.heap).as_str().to_owned(),
                         docstring: None,
                     },
+                    HeapReadOutput::Instance(instance) => {
+                        let class_id = instance.get(vm.heap).class();
+                        let (class, members) = class_signature(class_id, vm);
+                        // Snapshot before recursing: attrs are mutable via `setattr`,
+                        // and a nested `__repr__` can run arbitrary sandbox code.
+                        let children = snapshot_dict_pairs(instance.get(vm.heap).attrs(), vm.heap);
+                        defer_drop!(children, vm);
+                        Self::Instance {
+                            class,
+                            members,
+                            attrs: pairs_to_objects(children, vm, visited).into(),
+                        }
+                    }
                     _ => repr_or_error(object, vm),
                 };
 
@@ -818,6 +846,46 @@ fn snapshot_dict_pairs(dict: &Dict, heap: &Heap) -> Vec<(Value, Value)> {
             )
         })
         .collect()
+}
+
+/// The name and sorted member names of the class at `class_id`.
+///
+/// The member names are what a receiving session matches its own classes
+/// against, so they are sorted: a dict preserves insertion order, and two
+/// sessions that defined the same class need not have written its members in
+/// the same order for the class to be the same one.
+fn class_signature(class_id: HeapId, vm: &VM<'_>) -> (String, Vec<String>) {
+    let HeapReadOutput::Class(class) = vm.heap.read(class_id) else {
+        unreachable!("an instance's class id always reads back as a class");
+    };
+    let class_ref = class.get(vm.heap);
+    let name = class_ref.name().as_str(vm.interns).to_owned();
+    let namespace = class_ref.namespace();
+    let mut members: Vec<String> = (0..namespace.len())
+        .filter_map(|i| namespace.key_at(i))
+        .filter_map(|key| key.to_str(vm).ok().map(str::to_owned))
+        .collect();
+    members.sort_unstable();
+    (name, members)
+}
+
+/// The class this session defines under `name` whose members are exactly
+/// `members`, if it has one.
+///
+/// The registry is the session's own module namespace rather than a host-side
+/// table: an instance crossing in belongs to a class the receiving session
+/// itself defined, and two sessions share no heap ids, so the match is on shape.
+/// A class bound to no name is not part of the session's vocabulary and so is
+/// not matched.
+fn session_class(name: &str, members: &[String], vm: &VM<'_>) -> Option<HeapId> {
+    vm.globals.iter().find_map(|value| {
+        let Value::Ref(id) = value else { return None };
+        if !matches!(vm.heap.get(*id), HeapData::Class(_)) {
+            return None;
+        }
+        let (found, found_members) = class_signature(*id, vm);
+        (found == name && found_members == members).then_some(*id)
+    })
 }
 
 /// Converts a value to its repr string for `MontyObject`, falling back to a

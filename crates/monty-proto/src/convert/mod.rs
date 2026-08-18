@@ -85,16 +85,16 @@ const MAX_PROTO_VALUE_DEPTH: usize = PROST_RECURSION_LIMIT - FRAME_WRAPPER_DEPTH
 const LIST_COST: usize = 2;
 /// Proto message levels per dict level (`MontyObject` + `Dict` + `Pair`).
 const DICT_COST: usize = 3;
-/// Proto message levels per dataclass level (`MontyObject` +
-/// `Dataclass` + the attrs `Dict` + `Pair`).
+/// Proto message levels per dataclass or instance level (`MontyObject` +
+/// `Dataclass`/`Instance` + the attrs `Dict` + `Pair`).
 const DATACLASS_COST: usize = 4;
 
 /// Maximum nesting depth of a *list-like* value that can safely cross the
 /// wire (the cheapest container shape, and so the deepest possible nesting).
 ///
 /// Containers consume differing proto message levels against prost's decode
-/// recursion limit (two per list-like, three per dict, four per dataclass), so
-/// dicts only nest to ~32 levels and dataclasses to ~24.
+/// recursion limit (two per list-like, three per dict, four per dataclass or
+/// instance), so dicts only nest to ~32 levels and dataclasses to ~24.
 /// [`exceeds_max_value_depth`] applies the exact per-shape accounting; this
 /// constant is the headline bound for docs and error messages.
 pub const MAX_VALUE_DEPTH: usize = (MAX_PROTO_VALUE_DEPTH - 1) / LIST_COST;
@@ -119,7 +119,9 @@ fn depth_exceeds(value: &MontyObject, budget: usize) -> bool {
         | MontyObject::FrozenSet(items) => seq_exceeds(items, budget, LIST_COST),
         MontyObject::NamedTuple { values, .. } => seq_exceeds(values, budget, LIST_COST),
         MontyObject::Dict(pairs) => pairs_exceed(pairs, budget, DICT_COST),
-        MontyObject::Dataclass { attrs, .. } => pairs_exceed(attrs, budget, DATACLASS_COST),
+        MontyObject::Dataclass { attrs, .. } | MontyObject::Instance { attrs, .. } => {
+            pairs_exceed(attrs, budget, DATACLASS_COST)
+        }
         // a scalar is one `MontyObject` message level
         _ => budget == 0,
     }

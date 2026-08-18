@@ -809,6 +809,14 @@ pub struct VM<'h> {
     /// UTF-8 byte cap for each operand repr in introspected assert messages.
     /// Supplied by the executor on construction, so it is not snapshotted.
     pub(crate) assert_repr_max_bytes: u32,
+
+    /// Whether a written module-level `return` ended this run, as opposed to
+    /// the body running out of statements.
+    ///
+    /// Not snapshotted: `ReturnModule` and the frame exit it produces are one
+    /// step with no suspension between them, so a resumed VM has never seen
+    /// the return it will make.
+    module_returned: bool,
 }
 
 impl<'h> VM<'h> {
@@ -843,6 +851,7 @@ impl<'h> VM<'h> {
             run_reentry_depth: recursion::MAX_RUN_REENTRY_DEPTH,
             re_pattern_cache: RePatternCache::default(),
             assert_repr_max_bytes,
+            module_returned: false,
         }
     }
 
@@ -923,6 +932,7 @@ impl<'h> VM<'h> {
             run_reentry_depth: recursion::MAX_RUN_REENTRY_DEPTH,
             re_pattern_cache: RePatternCache::default(),
             assert_repr_max_bytes,
+            module_returned: false,
         }
     }
 
@@ -1861,7 +1871,11 @@ impl<'h> VM<'h> {
                     }
                 }
                 // Return - reload cache after popping frame
-                Opcode::ReturnValue => {
+                Opcode::ReturnValue | Opcode::ReturnModule => {
+                    // The compiler emits `ReturnModule` only for a written
+                    // module-level `return`; everything else about the exit is
+                    // identical, so the two share this arm.
+                    self.module_returned |= matches!(opcode, Opcode::ReturnModule);
                     let value = self.pop();
                     // A generator's own `return` ends the generator rather than
                     // the frame stack: the mode that drove the step decides
@@ -2055,6 +2069,14 @@ impl<'h> VM<'h> {
                 }
             }
         }
+    }
+
+    /// Whether a written module-level `return` ended this run.
+    ///
+    /// False when the body simply ran out of statements, including when its
+    /// trailing expression supplied the frame's value.
+    pub(crate) fn module_returned(&self) -> bool {
+        self.module_returned
     }
 
     /// Loads a built-in module and pushes it onto the stack.

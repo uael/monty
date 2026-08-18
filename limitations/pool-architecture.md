@@ -159,10 +159,29 @@ properties that real CPython does not provide, per the caveat above.
 - Values are encoded as protobuf (`proto/monty/v1/monty.proto`); every
   `MontyObject` variant round-trips, but nesting depth is bounded by prost's
   decode recursion limit. The exact bound depends on container shape: roughly
-  48 nested list-like containers, 32 nested dicts, or 24 nested dataclasses.
+  48 nested list-like containers, 32 nested dicts, or 24 nested dataclasses or
+  instances.
   Deeper values fail the protocol turn rather than crossing the boundary.
 - `Cycle` markers (self-referential containers) can be *received* from a
   worker but are rejected as inputs.
+- **An instance of a class the sandbox defined crosses as `MontyInstance`**
+  (`{ __monty_type__: 'Instance', ... }` in JS), a data holder carrying the
+  class name, the class's member names, and the instance's attributes (read
+  through `attrs`, since what crosses is the shape rather than a live object). The class object itself
+  cannot cross: it lives on the session's heap and means nothing outside it.
+  Passing the instance back into a session rebuilds it against *that session's*
+  own class of the same name and members, so an instance moves between sessions
+  (typically one woken from the other's `dump()`) and stays usable there:
+  attribute access, `isinstance`, and method calls all work, because the
+  rebuilt instance is bound to the receiving session's class object. A session
+  that defines no class of that shape rejects the instance rather than
+  inventing one, with `RuntimeError: invalid input type: <Class> names no class
+  this session defines with those members`. Only classes bound in the module
+  namespace are matched; a class defined inside a function is not part of the
+  session's vocabulary. What crosses is the attributes, not behaviour: methods
+  come from the receiving session's class, so two sessions whose classes share
+  a name and member list but differ in what a method *does* will behave
+  differently, and nothing detects that.
 - A single value whose encoded form would exceed the wire frame limit
   (256 MiB) — a feed input, external-function argument or return value, or a
   snippet's final result — cannot cross the boundary. This is a
@@ -199,6 +218,26 @@ properties that real CPython does not provide, per the caveat above.
 
 ## Host-API behaviour notes
 
+- **`session.parse(code)` reads source and runs none of it.** It answers
+  `ParseFacts`: whether the text is finished (`complete`), the
+  `MontySyntaxError` a feed of it would raise (`error`), whether a `global`
+  statement appears anywhere in it (`binds_global`), and which of the names
+  asked about it binds at module level (`stores`). `complete` is `False` only
+  for input that is unfinished rather than wrong (an open bracket, an
+  unterminated triple-quoted string, a block header with no body), which is
+  where CPython's `codeop.compile_command` returns `None`; `error` is then
+  absent. Nothing about the answer depends on session state and nothing about
+  the session changes, so a host can classify input before deciding to run it
+  without carrying a second Python parser.
+- **`session.probe(expr)` evaluates one expression against the session's
+  namespace** and returns its value, binding nothing. Anything that could bind
+  is refused with `MontySyntaxError` rather than quietly leaving the session
+  changed: a statement, several statements, or an expression containing `:=`.
+  What the expression *calls* can of course still mutate what it reaches;
+  the guarantee is that the probe itself binds no name. Suspensions are
+  answered from `external_lookup` / `os` exactly as `feed_run`'s are, and a
+  probe's traceback frames are named `<probe-N>` rather than
+  `<python-input-N>`.
 - **Typing errors** (`checkout(type_check=True)`) raise `MontyTypingError`
   whose diagnostics were rendered *in the worker*, so the format is a
   checkout argument (`type_check_format=`, `type_check_color=`; JS

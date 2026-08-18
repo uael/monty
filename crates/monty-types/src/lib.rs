@@ -37,7 +37,7 @@ pub use crate::{
         BASELINE_MEMORY, DEFAULT_MAX_RECURSION_DEPTH, LARGE_RESULT_THRESHOLD, LIVE_MEMORY, OOM_EXIT_CODE,
         ResourceError, ResourceLimits, ResourceTracker,
     },
-    results::{ExtFunctionResult, NameLookupResult},
+    results::{ExtFunctionResult, FeedOutcome, NameLookupResult, ParseFacts},
     run_options::{AssertMessageAnnotations, CompileOptions},
     type_checking::{TypeCheckState, TypeCheckingConfig, TypeCheckingFormat},
 };

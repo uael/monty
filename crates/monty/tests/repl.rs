@@ -9,7 +9,7 @@ use monty::{
     detect_repl_continuation_mode, dump,
 };
 use monty_types::{
-    CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, PrintWriter, ResourceTracker,
+    CompileOptions, ExcType, ExtFunctionResult, FeedOutcome, MontyException, MontyObject, PrintWriter, ResourceTracker,
 };
 
 #[test]
@@ -28,6 +28,12 @@ fn repl_executes_only_new_code() {
 }
 
 fn feed_run_print(repl: &mut MontyRepl, code: &str) -> Result<MontyObject, MontyException> {
+    feed_outcome(repl, code).map(|outcome| outcome.value)
+}
+
+/// The whole outcome, for the tests that care whether a `return` is what ended
+/// the feed rather than only what it produced.
+fn feed_outcome(repl: &mut MontyRepl, code: &str) -> Result<FeedOutcome, MontyException> {
     repl.feed_run(code, vec![], PrintWriter::Stdout)
 }
 
@@ -42,6 +48,14 @@ fn init_repl(code: &str) -> (MontyRepl, MontyObject) {
 fn round_trip_repl(repl: &MontyRepl) -> MontyRepl {
     let bytes = dump("repl.py", None, SessionRef::Idle(repl)).unwrap();
     match Dump::load(&bytes).unwrap().state {
+        Session::Idle(repl) => *repl,
+        _ => panic!("dumped an idle session, loaded something else"),
+    }
+}
+
+/// Wakes an idle session from dump bytes, so one snapshot can seed several.
+fn load_idle(bytes: &[u8]) -> MontyRepl {
+    match Dump::load(bytes).unwrap().state {
         Session::Idle(repl) => *repl,
         _ => panic!("dumped an idle session, loaded something else"),
     }
@@ -213,6 +227,111 @@ fn repl_detects_continuation_mode_for_common_cases() {
         detect_repl_continuation_mode("[1,\n"),
         ReplContinuationMode::IncompleteImplicit
     );
+    // A triple-quoted string can be closed by a later line, so it continues;
+    // a single-quoted one ends at the newline and no later line can close it.
+    assert_eq!(
+        detect_repl_continuation_mode("text = '''abc\n"),
+        ReplContinuationMode::IncompleteImplicit
+    );
+    assert_eq!(
+        detect_repl_continuation_mode("text = rb\"\"\"abc\n"),
+        ReplContinuationMode::IncompleteImplicit
+    );
+    assert_eq!(
+        detect_repl_continuation_mode("text = 'abc\n"),
+        ReplContinuationMode::Complete
+    );
+}
+
+/// A written module-level `return` ends a snippet early and says so; the value
+/// a body merely ends on comes back the same way but claims nothing.
+#[test]
+fn repl_reports_a_written_return_apart_from_a_trailing_value() {
+    let (mut repl, _) = init_repl("");
+
+    let returned = feed_outcome(&mut repl, "x = 1\nreturn x + 41\nx = 99").unwrap();
+    assert_eq!(returned.value, MontyObject::Int(42));
+    assert!(returned.returned);
+    // the `return` cut the body short, so the line after it never ran
+    assert_eq!(feed_run_print(&mut repl, "x").unwrap(), MontyObject::Int(1));
+
+    let trailing = feed_outcome(&mut repl, "x + 1").unwrap();
+    assert_eq!(trailing.value, MontyObject::Int(2));
+    assert!(!trailing.returned);
+
+    let neither = feed_outcome(&mut repl, "y = 5").unwrap();
+    assert_eq!(neither.value, MontyObject::None);
+    assert!(!neither.returned);
+
+    // a bare `return` closes with None, and still says it returned
+    let bare = feed_outcome(&mut repl, "return").unwrap();
+    assert_eq!(bare.value, MontyObject::None);
+    assert!(bare.returned);
+
+    // a `return` inside a function is the function's, not the module's
+    let inside = feed_outcome(&mut repl, "def f():\n    return 7\nf()").unwrap();
+    assert_eq!(inside.value, MontyObject::Int(7));
+    assert!(!inside.returned);
+}
+
+/// A probe reads the session's namespace and leaves it as it was.
+#[test]
+fn repl_probes_one_expression_without_binding() {
+    let (repl, _) = init_repl("items = [1, 2]\nfactor = 10");
+
+    let (repl, outcome) = repl
+        .probe_start("sum(items) * factor", PrintWriter::Stdout)
+        .unwrap()
+        .into_complete()
+        .expect("a probe of defined names completes");
+    assert_eq!(outcome.value, MontyObject::Int(30));
+    assert!(!outcome.returned);
+
+    // the probe bound nothing, so the names it read still mean what they did
+    let mut repl = repl;
+    assert_eq!(
+        feed_run_print(&mut repl, "items").unwrap(),
+        MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2)])
+    );
+}
+
+/// A probe refuses anything that could bind, since looking at a session must
+/// not change it.
+#[test]
+fn repl_refuses_to_probe_anything_that_binds() {
+    let (repl, _) = init_repl("value = 1");
+
+    let err = repl.probe_start("value = 2", PrintWriter::Stdout).unwrap_err();
+    assert_eq!(
+        err.error.summary(),
+        "SyntaxError: a probe evaluates one expression, not a statement"
+    );
+
+    let repl = err.repl;
+    let err = repl.probe_start("(spare := 2)", PrintWriter::Stdout).unwrap_err();
+    assert_eq!(
+        err.error.summary(),
+        "SyntaxError: a probe evaluates an expression that binds nothing"
+    );
+
+    let repl = err.repl;
+    let err = repl.probe_start("1 +", PrintWriter::Stdout).unwrap_err();
+    assert_eq!(err.error.summary(), "SyntaxError: Expected an expression");
+
+    // every refusal left the session intact
+    let mut repl = err.repl;
+    assert_eq!(feed_run_print(&mut repl, "value").unwrap(), MontyObject::Int(1));
+}
+
+/// A probe frame is named apart from a fed snippet's, so a traceback says
+/// which produced it.
+#[test]
+fn repl_probe_frames_are_named_as_probes() {
+    let (repl, _) = init_repl("");
+    let err = repl.probe_start("[][0]", PrintWriter::Stdout).unwrap_err();
+    let traceback = format!("{}", err.error);
+    assert!(traceback.contains("<probe-0>"), "got: {traceback}");
+    assert!(!traceback.contains("<python-input-"), "got: {traceback}");
 }
 
 #[test]
@@ -290,6 +409,102 @@ fn repl_imports_one_module_object_per_name() {
     );
 }
 
+/// A dump is a seed, not a share: two sessions woken from one snapshot hold
+/// their own copy of everything, so what one does to a mutable value the other
+/// never sees.
+#[test]
+fn repl_two_sessions_woken_from_one_dump_share_nothing() {
+    let (mut origin, _) = init_repl("items = [1]\ncount = 0");
+    feed_run_print(&mut origin, "items.append(2)").unwrap();
+    let bytes = dump("repl.py", None, SessionRef::Idle(&origin)).unwrap();
+
+    let mut first = load_idle(&bytes);
+    let mut second = load_idle(&bytes);
+
+    feed_run_print(&mut first, "items.append(3)\ncount = 1").unwrap();
+    assert_eq!(
+        feed_run_print(&mut first, "items").unwrap(),
+        MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2), MontyObject::Int(3)])
+    );
+    assert_eq!(feed_run_print(&mut first, "count").unwrap(), MontyObject::Int(1));
+
+    // the second woke from the same bytes and saw none of that
+    assert_eq!(
+        feed_run_print(&mut second, "items").unwrap(),
+        MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2)])
+    );
+    assert_eq!(feed_run_print(&mut second, "count").unwrap(), MontyObject::Int(0));
+
+    // nor did the session they were both woken from
+    assert_eq!(feed_run_print(&mut origin, "count").unwrap(), MontyObject::Int(0));
+}
+
+/// An instance of a class the sandbox defined is usable in another session,
+/// matched to that session's own class by shape rather than by a heap id no
+/// crossing preserves.
+#[test]
+fn repl_carries_an_instance_into_a_woken_session() {
+    let (mut origin, _) = init_repl(
+        "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\n    def total(self):\n        return self.x + self.y",
+    );
+    let carried = feed_run_print(&mut origin, "Point(1, 41)").unwrap();
+    let MontyObject::Instance { ref class, .. } = carried else {
+        panic!("an instance crosses out as an instance, got {carried:?}");
+    };
+    assert_eq!(class, "Point");
+
+    let bytes = dump("repl.py", None, SessionRef::Idle(&origin)).unwrap();
+    let mut woken = load_idle(&bytes);
+    let carry = vec![("carried".to_owned(), carried)];
+
+    // attribute access, isinstance and a method call, all against the woken
+    // session's own class object
+    let outcome = woken
+        .feed_run(
+            "(carried.x, isinstance(carried, Point), carried.total())",
+            carry,
+            PrintWriter::Stdout,
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.value,
+        MontyObject::Tuple(vec![MontyObject::Int(1), MontyObject::Bool(true), MontyObject::Int(42)])
+    );
+}
+
+/// A session that defines no class of that shape refuses the instance rather
+/// than inventing one to hold it.
+#[test]
+fn repl_refuses_an_instance_no_class_matches() {
+    let (mut origin, _) = init_repl("class Point:\n    def __init__(self, x):\n        self.x = x");
+    let carried = feed_run_print(&mut origin, "Point(1)").unwrap();
+
+    let mut stranger = MontyRepl::new("repl.py", ResourceTracker::default(), CompileOptions::default());
+    let err = stranger
+        .feed_run(
+            "carried",
+            vec![("carried".to_owned(), carried.clone())],
+            PrintWriter::Stdout,
+        )
+        .unwrap_err();
+    assert_eq!(
+        err.summary(),
+        "RuntimeError: invalid input type: Point names no class this session defines with those members"
+    );
+
+    // and neither does a session whose class of that name is a different one
+    let (mut other, _) = init_repl(
+        "class Point:\n    def __init__(self, x):\n        self.x = x\n    def spare(self):\n        return 1",
+    );
+    let err = other
+        .feed_run("carried", vec![("carried".to_owned(), carried)], PrintWriter::Stdout)
+        .unwrap_err();
+    assert!(
+        err.summary().contains("names no class this session defines"),
+        "got: {err}"
+    );
+}
+
 #[test]
 fn repl_dump_load_preserves_heap_aliasing() {
     let (mut repl, _) = init_repl("a = []\nb = a");
@@ -321,7 +536,8 @@ fn repl_start_external_call_resumes_to_updated_repl() {
     assert_eq!(call.args, vec![MontyObject::Int(41)]);
 
     let progress = call.resume(MontyObject::Int(41), PrintWriter::Stdout).unwrap();
-    let (mut repl, value) = progress.into_complete().expect("expected completion");
+    let (mut repl, outcome) = progress.into_complete().expect("expected completion");
+    let value = outcome.value;
     assert_eq!(value, MontyObject::Int(42));
     assert_eq!(feed_run_print(&mut repl, "x = 5").unwrap(), MontyObject::None);
     assert_eq!(feed_run_print(&mut repl, "x").unwrap(), MontyObject::Int(5));
@@ -338,7 +554,8 @@ fn repl_feed_start_restores_comprehension_slots_before_next_turn() {
             PrintWriter::Stdout,
         )
         .unwrap();
-    let (repl, value) = progress.into_complete().expect("expected completion");
+    let (repl, outcome) = progress.into_complete().expect("expected completion");
+    let value = outcome.value;
     assert_eq!(value, MontyObject::None);
 
     let progress = repl.feed_start("foo()", vec![], PrintWriter::Stdout).unwrap();
@@ -376,7 +593,8 @@ fn repl_progress_dump_load_roundtrip() {
     assert_eq!(call.args, vec![MontyObject::Int(20)]);
 
     let progress = call.resume(MontyObject::Int(20), PrintWriter::Stdout).unwrap();
-    let (mut repl, value) = progress.into_complete().expect("expected completion");
+    let (mut repl, outcome) = progress.into_complete().expect("expected completion");
+    let value = outcome.value;
     assert_eq!(value, MontyObject::Int(42));
     assert_eq!(feed_run_print(&mut repl, "z = 1").unwrap(), MontyObject::None);
     assert_eq!(feed_run_print(&mut repl, "z").unwrap(), MontyObject::Int(1));
@@ -411,7 +629,8 @@ async def main():
             PrintWriter::Stdout,
         )
         .unwrap();
-    let (mut repl, value) = progress.into_complete().expect("expected completion");
+    let (mut repl, outcome) = progress.into_complete().expect("expected completion");
+    let value = outcome.value;
     assert_eq!(value, MontyObject::Int(42));
     assert_eq!(
         feed_run_print(&mut repl, "final_value = 42").unwrap(),
@@ -495,7 +714,8 @@ fn repl_dataclass_method_call_yields_function_call_with_method_flag() {
 
     // Resume with a return value (sum of x + y = 3)
     let progress = call.resume(MontyObject::Int(3), PrintWriter::Stdout).unwrap();
-    let (mut repl, value) = progress.into_complete().expect("expected completion");
+    let (mut repl, outcome) = progress.into_complete().expect("expected completion");
+    let value = outcome.value;
     assert_eq!(value, MontyObject::Int(3));
 
     // Verify REPL state is preserved after method call
@@ -517,7 +737,8 @@ fn repl_start_new_external_function_in_later_block() {
     assert_eq!(call.args, vec![MontyObject::Int(15)]);
 
     let progress = call.resume(MontyObject::Int(100), PrintWriter::Stdout).unwrap();
-    let (mut repl, value) = progress.into_complete().expect("expected completion");
+    let (mut repl, outcome) = progress.into_complete().expect("expected completion");
+    let value = outcome.value;
     assert_eq!(value, MontyObject::Int(100));
 
     // REPL state from before the external call is still intact.

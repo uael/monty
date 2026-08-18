@@ -7,9 +7,9 @@
 use std::mem;
 
 use ahash::AHashMap;
-use monty_types::{ExcType, MontyException, MontyObject, OsFunctionCall, PrintWriter, ResourceTracker};
+use monty_types::{ExcType, FeedOutcome, MontyException, MontyObject, OsFunctionCall, PrintWriter, ResourceTracker};
 use ruff_python_ast::token::TokenKind;
-use ruff_python_parser::{InterpolatedStringErrorType, LexicalErrorType, ParseErrorType, parse_module};
+use ruff_python_parser::{InterpolatedStringErrorType, LexicalErrorType, ParseError, ParseErrorType, parse_module};
 
 use crate::{
     args::{ArgValues, KwargsValues},
@@ -21,6 +21,7 @@ use crate::{
     intern::{InternerBuilder, Interns},
     name_map::NameMap,
     object_bridge::MontyObjectExt,
+    parse::check_probe_expression,
     run::{CompileOptions, Executor},
     run_progress::{ConvertedExit, ExtFunctionResult, ExtFunctionResultExt, NameLookupResult, convert_frame_exit},
     value::Value,
@@ -137,17 +138,56 @@ impl MontyRepl {
         inputs: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<ReplProgress, Box<ReplStartError>> {
+        self.start(code, inputs, print, SnippetKind::Feed)
+    }
+
+    /// Evaluates one expression against the session's namespace and hands back
+    /// its value, binding nothing.
+    ///
+    /// This is how a host turns words into a value: an annotation, a contract,
+    /// a name it wants the meaning of in the scope that defined it. Source that
+    /// is not a single expression, or that could bind a name through `:=`, is
+    /// refused rather than quietly leaving the session changed; what the
+    /// expression *calls* can of course still mutate what it reaches.
+    ///
+    /// Suspends and resumes exactly as [`feed_start`](Self::feed_start) does,
+    /// so an expression naming something the host provides is answered the same
+    /// way.
+    ///
+    /// # Errors
+    /// Returns `Err(Box<ReplStartError>)` for a rejected or failing expression;
+    /// the session is preserved inside the error.
+    pub fn probe_start(self, expr: &str, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
+        if let Err(error) = check_probe_expression(expr, &self.script_name) {
+            return Err(Box::new(ReplStartError { repl: self, error }));
+        }
+        self.start(expr, Vec::new(), print, SnippetKind::Probe)
+    }
+
+    /// Shared body of [`feed_start`](Self::feed_start) and
+    /// [`probe_start`](Self::probe_start); `kind` only decides what the
+    /// snippet's generated filename says.
+    fn start(
+        self,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+        kind: SnippetKind,
+    ) -> Result<ReplProgress, Box<ReplStartError>> {
         let mut this = self;
         if code.is_empty() {
             return Ok(ReplProgress::Complete {
                 repl: this,
-                value: MontyObject::None,
+                outcome: FeedOutcome {
+                    value: MontyObject::None,
+                    returned: false,
+                },
             });
         }
 
         let (input_names, input_values): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
 
-        let input_script_name = this.next_input_script_name();
+        let input_script_name = this.next_input_script_name(kind);
         // Preserve this snippet's source (see `feed_run` for rationale).
         this.sources.insert(input_script_name.clone(), code.to_owned());
         let executor = match Executor::new_repl_snippet(
@@ -211,14 +251,17 @@ impl MontyRepl {
         code: &str,
         inputs: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
-    ) -> Result<MontyObject, MontyException> {
+    ) -> Result<FeedOutcome, MontyException> {
         if code.is_empty() {
-            return Ok(MontyObject::None);
+            return Ok(FeedOutcome {
+                value: MontyObject::None,
+                returned: false,
+            });
         }
 
         let (input_names, input_values): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
 
-        let input_script_name = self.next_input_script_name();
+        let input_script_name = self.next_input_script_name(SnippetKind::Feed);
         // Preserve this snippet's source before anything can fail, so later
         // tracebacks with frames from this snippet can still resolve line/
         // column/preview information — `Executor.code` only survives until
@@ -250,10 +293,11 @@ impl MontyRepl {
             }
 
             let result = executor.run_to_completion(&mut vm);
+            let returned = vm.module_returned();
 
             // Reclaim globals before cleanup.
             self.globals = vm.take_globals();
-            Ok(result)
+            Ok((result, returned))
         })?;
 
         // Commit compiler metadata even on runtime errors.
@@ -269,7 +313,10 @@ impl MontyRepl {
 
         // Resolve every traceback frame against the source of the snippet that
         // produced it — frames from earlier snippets live in `self.sources`.
-        result.map_err(|e| e.into_python_exception(&self.interns, |fname| self.sources.get(fname).map(String::as_str)))
+        let (result, returned) = result;
+        result
+            .map(|value| FeedOutcome { value, returned })
+            .map_err(|e| e.into_python_exception(&self.interns, |fname| self.sources.get(fname).map(String::as_str)))
     }
 
     /// Calls a Python function defined in the session by name.
@@ -390,11 +437,16 @@ impl MontyRepl {
     ///
     /// CPython labels interactive snippets as `<python-input-N>` and increments
     /// N for each feed attempt. Matching this improves traceback ergonomics and
-    /// makes REPL errors easier to correlate with user input history.
-    fn next_input_script_name(&mut self) -> String {
+    /// makes REPL errors easier to correlate with user input history. A probe
+    /// takes a name of its own from the same counter, so a traceback says which
+    /// of the two produced the frame and no two snippets ever share a name.
+    fn next_input_script_name(&mut self, kind: SnippetKind) -> String {
         let input_id = self.next_input_id;
         self.next_input_id += 1;
-        format!("<python-input-{input_id}>")
+        match kind {
+            SnippetKind::Feed => format!("<python-input-{input_id}>"),
+            SnippetKind::Probe => format!("<probe-{input_id}>"),
+        }
     }
 }
 
@@ -407,6 +459,16 @@ impl Drop for MontyRepl {
 // ---------------------------------------------------------------------------
 // ReplProgress and per-variant structs
 // ---------------------------------------------------------------------------
+
+/// Which of the two things a snippet is, for the sake of the filename its
+/// frames carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnippetKind {
+    /// A chunk of source fed to the session.
+    Feed,
+    /// One expression evaluated against the session's namespace.
+    Probe,
+}
 
 /// Result of a single suspendable REPL snippet execution.
 ///
@@ -424,12 +486,12 @@ pub enum ReplProgress {
     ResolveFutures(ReplResolveFutures),
     /// Execution paused for an unresolved name lookup.
     NameLookup(ReplNameLookup),
-    /// Snippet execution completed with the updated REPL and result value.
+    /// Snippet execution completed with the updated REPL and its outcome.
     Complete {
         /// Updated REPL session state to continue feeding snippets.
         repl: MontyRepl,
-        /// Final result produced by the snippet.
-        value: MontyObject,
+        /// What the snippet produced, and whether a `return` is what ended it.
+        outcome: FeedOutcome,
     },
 }
 
@@ -475,11 +537,11 @@ impl ReplProgress {
         }
     }
 
-    /// Consumes the progress and returns the completed REPL and value.
+    /// Consumes the progress and returns the completed REPL and its outcome.
     #[must_use]
-    pub fn into_complete(self) -> Option<(MontyRepl, MontyObject)> {
+    pub fn into_complete(self) -> Option<(MontyRepl, FeedOutcome)> {
         match self {
-            Self::Complete { repl, value } => Some((repl, value)),
+            Self::Complete { repl, outcome } => Some((repl, outcome)),
             _ => None,
         }
     }
@@ -854,17 +916,35 @@ pub enum ReplContinuationMode {
 ///   syntax error that should be shown immediately).
 #[must_use]
 pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
-    let Err(error) = parse_module(source) else {
-        return ReplContinuationMode::Complete;
-    };
+    match parse_module(source) {
+        Ok(_) => ReplContinuationMode::Complete,
+        Err(error) => continuation_mode_of(source, &error),
+    }
+}
 
-    match error.error {
+/// Classifies a parse failure as incomplete input or a real error.
+///
+/// Split from [`detect_repl_continuation_mode`] so a caller that already holds
+/// the failure (having parsed for other reasons) draws the same line without
+/// parsing the source a second time. `source` is the text the failure came
+/// from: one case is decided by what stands at the error, not by its type.
+pub(crate) fn continuation_mode_of(source: &str, error: &ParseError) -> ReplContinuationMode {
+    match &error.error {
         ParseErrorType::OtherError(msg) => {
             if msg.starts_with("Expected an indented block after ") {
                 ReplContinuationMode::IncompleteBlock
             } else {
                 ReplContinuationMode::Complete
             }
+        }
+        // A string the lexer never saw closed is unfinished input when it was
+        // opened with a triple quote, and a plain error otherwise: a `'` with
+        // no partner ends at the newline and no further line can close it.
+        // The two arrive as one error type, so the opening quote decides.
+        ParseErrorType::Lexical(LexicalErrorType::UnclosedStringError)
+            if opens_triple_quoted(source, error.location.start().to_usize()) =>
+        {
+            ReplContinuationMode::IncompleteImplicit
         }
         ParseErrorType::Lexical(LexicalErrorType::Eof)
         | ParseErrorType::ExpectedToken {
@@ -877,6 +957,15 @@ pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
         }
         _ => ReplContinuationMode::Complete,
     }
+}
+
+/// Whether the string literal starting at `offset` opens with a triple quote.
+///
+/// The offset is the whole token's start, so any prefix letters (`r`, `rb`,
+/// `f`) come first; what follows them is the quote run.
+fn opens_triple_quoted(source: &str, offset: usize) -> bool {
+    let rest = source[offset.min(source.len())..].trim_start_matches(char::is_alphabetic);
+    rest.starts_with("\"\"\"") || rest.starts_with("'''")
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,7 +1098,7 @@ fn build_repl_progress(
     }
 
     match converted {
-        ConvertedExit::Complete(obj) => {
+        ConvertedExit::Complete(outcome) => {
             let Executor {
                 globals: snippet_globals,
                 interns,
@@ -1017,7 +1106,7 @@ fn build_repl_progress(
             } = executor;
             repl.global_names = snippet_globals;
             repl.interns = interns;
-            Ok(ReplProgress::Complete { repl, value: obj })
+            Ok(ReplProgress::Complete { repl, outcome })
         }
         ConvertedExit::FunctionCall {
             function_name,

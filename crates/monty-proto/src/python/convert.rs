@@ -164,6 +164,22 @@ pub fn py_to_monty(obj: &Bound<'_, PyAny>, dc_registry: &DcRegistry, mut depth: 
         // Handle pathlib.PurePosixPath and thereby pathlib.PosixPath objects
         let path_str: String = obj.str()?.extract()?;
         Ok(MontyObject::Path(path_str))
+    } else if let Ok(instance) = obj.cast::<PyMontyInstance>() {
+        // Carry an instance back into a session: the class is matched there by
+        // the shape recorded here, since no heap id survives the crossing.
+        let instance = instance.get();
+        let mut attrs = Vec::new();
+        for (key, value) in instance.attrs.bind(obj.py()) {
+            attrs.push((
+                py_to_monty(&key, dc_registry, depth)?,
+                py_to_monty(&value, dc_registry, depth)?,
+            ));
+        }
+        Ok(MontyObject::Instance {
+            class: instance.class_name.clone(),
+            members: instance.members.clone(),
+            attrs: attrs.into(),
+        })
     } else if let Ok(handle) = obj.cast::<PyMontyFileHandle>() {
         // Round-trip a `MontyFileHandle` returned from Python (e.g. as the
         // result of an `Open` OS callback) back into `MontyObject::FileHandle`.
@@ -416,6 +432,24 @@ pub(crate) fn monty_to_py_inner(
         // callers can inspect `path`, `mode`, `position`, and `id` directly
         // instead of parsing the repr string.
         MontyObject::FileHandle(handle) => Ok(Py::new(py, PyMontyFileHandle::from_inner(handle.clone()))?.into_any()),
+        MontyObject::Instance { class, members, attrs } => {
+            let py_attrs = PyDict::new(py);
+            for (key, value) in attrs {
+                py_attrs.set_item(
+                    monty_to_py_inner(py, key, dc_registry, depth)?,
+                    monty_to_py_inner(py, value, dc_registry, depth)?,
+                )?;
+            }
+            Ok(Py::new(
+                py,
+                PyMontyInstance {
+                    class_name: class.clone(),
+                    members: members.clone(),
+                    attrs: py_attrs.unbind(),
+                },
+            )?
+            .into_any())
+        }
         // Output-only types - convert to string representation
         MontyObject::Repr(s) => Ok(PyString::new(py, s).into_any().unbind()),
         MontyObject::Cycle(_, placeholder) => Ok(PyString::new(py, placeholder).into_any().unbind()),
@@ -722,6 +756,70 @@ fn get_pure_path(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static PUREPATH: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
     PUREPATH.import(py, "pathlib", "PurePath")
+}
+
+/// Host-side mirror of [`MontyObject::Instance`]: an instance of a class the
+/// sandbox itself defined.
+///
+/// The host cannot be handed the class, which lives on the session's heap and
+/// means nothing outside it, so it is handed the shape instead: the class name,
+/// its member names, and the instance's attributes. Passing this object back
+/// into a session rebuilds the instance against that session's own class of the
+/// same shape, which is how an instance moves from one session to another.
+///
+/// A data holder, deliberately: the host is handed the instance's shape, not a
+/// live object, so the attributes are read through `attrs` rather than as
+/// attributes of this mirror.
+#[pyclass(name = "MontyInstance", module = "pydantic_monty", frozen)]
+pub struct PyMontyInstance {
+    class_name: String,
+    members: Vec<String>,
+    attrs: Py<PyDict>,
+}
+
+#[pymethods]
+impl PyMontyInstance {
+    /// Constructs a `MontyInstance` from Python, for a host building one rather
+    /// than round-tripping one it received.
+    ///
+    /// `members` must name exactly the members of the class the receiving
+    /// session defines, which is why a host normally passes back the object it
+    /// was given instead of assembling one.
+    #[new]
+    #[pyo3(signature = (class_name, members, attrs))]
+    fn py_new(class_name: String, members: Vec<String>, attrs: Py<PyDict>) -> Self {
+        Self {
+            class_name,
+            members,
+            attrs,
+        }
+    }
+
+    /// The class name, as the defining sandbox source spelled it.
+    #[getter]
+    fn class_name(&self) -> &str {
+        &self.class_name
+    }
+
+    /// The class's member names (methods and class variables), sorted.
+    #[getter]
+    fn members(&self) -> Vec<String> {
+        self.members.clone()
+    }
+
+    /// The instance attributes (`__dict__`), in insertion order.
+    #[getter]
+    fn attrs(&self, py: Python<'_>) -> Py<PyDict> {
+        self.attrs.clone_ref(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut rendered = Vec::new();
+        for (key, value) in self.attrs.bind(py) {
+            rendered.push(format!("{}={}", key.str()?, value.repr()?));
+        }
+        Ok(format!("{}({})", self.class_name, rendered.join(", ")))
+    }
 }
 
 /// Host-side mirror of [`MontyObject::FileHandle`]: a thin PyO3 wrapper holding

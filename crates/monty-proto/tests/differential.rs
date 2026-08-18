@@ -178,6 +178,20 @@ fn corpus() -> Vec<MontyObject> {
         MontyObject::Repr("<unrepresentable>".to_owned()),
         MontyObject::Cycle(0, "[...]".to_owned()), // zero identity is a default-skipped field
         MontyObject::Cycle(7, "{...}".to_owned()),
+        MontyObject::Instance {
+            class: String::new(),
+            members: vec![],
+            attrs: DictPairs::from(Vec::new()),
+        },
+        MontyObject::Instance {
+            class: "Point".to_owned(),
+            members: vec![String::new(), "total".to_owned()],
+            attrs: vec![
+                (MontyObject::String("x".to_owned()), MontyObject::Int(1)),
+                (MontyObject::String("y".to_owned()), MontyObject::None),
+            ]
+            .into(),
+        },
     ]
 }
 
@@ -265,6 +279,11 @@ fn to_oracle(obj: &MontyObject) -> oracle::MontyObject {
             field_names: field_names.clone(),
             attrs: Some(oracle_dict(attrs)),
             frozen: *frozen,
+        }),
+        MontyObject::Instance { class, members, attrs } => Kind::Instance(oracle::Instance {
+            class_name: class.clone(),
+            members: members.clone(),
+            attrs: Some(oracle_dict(attrs)),
         }),
         MontyObject::Function { name, docstring } => Kind::Function(oracle::Function {
             name: name.clone(),

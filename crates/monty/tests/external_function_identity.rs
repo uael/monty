@@ -192,7 +192,8 @@ fn repl_extfunction_identity_across_feeds() {
             PrintWriter::Stdout,
         )
         .unwrap();
-    let (_repl, result) = progress.into_complete().expect("feed 2 should complete");
+    let (_repl, outcome) = progress.into_complete().expect("feed 2 should complete");
+    let result = outcome.value;
 
     // The second conversion reuses the live function object cached by name.
     assert_eq!(
@@ -295,7 +296,8 @@ fn repl_extfunction_cache_does_not_retain_freed_id() {
             PrintWriter::Stdout,
         )
         .unwrap();
-    let (_repl, result) = progress.into_complete().expect("feed 3 should complete");
+    let (_repl, outcome) = progress.into_complete().expect("feed 3 should complete");
+    let result = outcome.value;
 
     assert_eq!(
         result,

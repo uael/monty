@@ -204,6 +204,7 @@ mod tag {
     pub const CYCLE: u32 = 27;
     pub const INSTANCE_TYPE: u32 = 28;
     pub const NOT_IMPLEMENTED: u32 = 29;
+    pub const INSTANCE: u32 = 30;
 }
 
 // ============================================================================
@@ -311,6 +312,15 @@ fn encode_object(obj: &MontyObject, buf: &mut impl BufMut) {
                 encoding::bool::encode(5, frozen, buf);
             }
         }
+        MontyObject::Instance { class, members, attrs } => {
+            encode_message_key(tag::INSTANCE, instance_len(class, members, attrs), buf);
+            encode_str(1, class, buf);
+            encode_repeated_str(2, members, buf);
+            // attrs is a non-optional message field that senders always
+            // populate, so it encodes even when empty (message presence)
+            encode_message_key(3, dict_len(attrs), buf);
+            encode_dict(attrs, buf);
+        }
         MontyObject::Function { name, docstring } => {
             encode_message_key(
                 tag::FUNCTION,
@@ -378,6 +388,9 @@ fn object_len(obj: &MontyObject) -> usize {
             tag::DATACLASS,
             dataclass_len(name, *type_id, field_names, attrs, *frozen),
         ),
+        MontyObject::Instance { class, members, attrs } => {
+            submessage_len(tag::INSTANCE, instance_len(class, members, attrs))
+        }
         MontyObject::Function { name, docstring } => {
             submessage_len(tag::FUNCTION, str_len(1, name) + opt_str_len(2, docstring.as_deref()))
         }
@@ -512,6 +525,12 @@ fn dataclass_len(name: &str, type_id: u64, field_names: &[String], attrs: &DictP
         } else {
             0
         }
+}
+
+/// `Instance` body: `string class_name = 1; repeated string members = 2;
+/// Dict attrs = 3`.
+fn instance_len(class: &str, members: &[String], attrs: &DictPairs) -> usize {
+    str_len(1, class) + repeated_str_len(2, members) + submessage_len(3, dict_len(attrs))
 }
 
 // --- proto3 field helpers, mirroring prost's generated default-skipping ---
@@ -723,6 +742,17 @@ fn decode_field(
                 field_names: dc.field_names,
                 attrs: DictPairs::from(attrs.0),
                 frozen: dc.frozen,
+            }
+        }
+        tag::INSTANCE => {
+            let inst: InstanceBody = merge_message(wire_type, buf, ctx)?;
+            let attrs = inst
+                .attrs
+                .ok_or_else(|| to_decode_err(ProtoConvertError::MissingField("Instance.attrs")))?;
+            MontyObject::Instance {
+                class: inst.class_name,
+                members: inst.members,
+                attrs: DictPairs::from(attrs.0),
             }
         }
         tag::FUNCTION => {
@@ -943,6 +973,49 @@ impl Message for NamedTupleBody {
         self.type_name.clear();
         self.field_names.clear();
         self.values.clear();
+    }
+}
+
+/// Decode-only `prost::Message` for `Instance`, decoding `attrs` straight into
+/// [`DictPairs`] via [`PairList`], exactly as [`DataclassBody`] does. `attrs`
+/// stays `Option` so an absent message field is rejected as missing rather than
+/// defaulted.
+#[derive(Default)]
+struct InstanceBody {
+    class_name: String,
+    members: Vec<String>,
+    attrs: Option<PairList>,
+}
+
+impl Message for InstanceBody {
+    fn merge_field(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut impl Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError> {
+        // Field numbers from `Instance` in monty.proto; unknown → skip.
+        match tag {
+            1 => encoding::string::merge(wire_type, &mut self.class_name, buf, ctx),
+            2 => encoding::string::merge_repeated(wire_type, &mut self.members, buf, ctx),
+            3 => encoding::message::merge(wire_type, self.attrs.get_or_insert_with(PairList::default), buf, ctx),
+            _ => skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+
+    fn encode_raw(&self, _buf: &mut impl BufMut) {
+        unreachable!("InstanceBody is decode-only")
+    }
+
+    fn encoded_len(&self) -> usize {
+        unreachable!("InstanceBody is decode-only")
+    }
+
+    fn clear(&mut self) {
+        self.class_name.clear();
+        self.members.clear();
+        self.attrs = None;
     }
 }
 

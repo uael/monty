@@ -594,6 +594,13 @@ pub enum Opcode {
     /// `[..., aiter, exc]`: a `StopAsyncIteration` pops both, clears the active
     /// exception and jumps to the loop end; anything else propagates.
     EndAsyncFor = 130,
+    /// Return TOS out of a module body, marking the exit as a written `return`.
+    ///
+    /// Identical to [`Self::ReturnValue`] at runtime; the separate opcode is
+    /// what lets a host tell a snippet that returned from one that simply ran
+    /// out of statements, since the value of a trailing expression is returned
+    /// through `ReturnValue` by the same frame.
+    ReturnModule = 141,
 }
 
 /// [`Opcode::Yield`] flag: the `yield` belongs to a `yield from` loop.
@@ -689,6 +696,7 @@ impl Opcode {
             | Self::ClearException
             | Self::CheckExcMatch
             | Self::ReturnValue
+            | Self::ReturnModule
             | Self::Await
             | Self::Nop
             | Self::BeforeWith
@@ -958,7 +966,7 @@ impl Opcode {
             (Raise, Operand::None) => -1,
             (RaiseFrom, Operand::None) => -2,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
-            (ReturnValue, Operand::None) => -1,
+            (ReturnValue | ReturnModule, Operand::None) => -1,
             (Nop, Operand::None) => 0,
 
             // === Fixed-effect, I8 operand ===

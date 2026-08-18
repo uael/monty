@@ -24,6 +24,7 @@
 //! - `MontyObject::BuiltinFunction` → `{ __monty_type__: 'BuiltinFunction', value }`
 //! - `MontyObject::Dataclass` → `{ __monty_type__: 'Dataclass', name, fields, ... }`
 //! - `MontyObject::FileHandle` ↔ `{ __monty_type__: 'FileHandle', path, mode, position }`
+//! - `MontyObject::Instance` ↔ `{ __monty_type__: 'Instance', className, members, attrs }`
 //! - `MontyObject::Repr` → plain `string`
 //! - `MontyObject::Cycle` → placeholder `string`
 #![expect(unsafe_code, reason = "napi API is unsafe")]
@@ -87,6 +88,7 @@ pub fn monty_to_js<'e>(obj: &MontyObject, env: &'e Env) -> Result<JsMontyObject<
             attrs,
             frozen,
         } => create_js_dataclass(name, *type_id, field_names, attrs, *frozen, env)?,
+        MontyObject::Instance { class, members, attrs } => create_js_instance(class, members, attrs, env)?,
         MontyObject::Path(p) => env.create_string(p)?.into_unknown(env)?,
         MontyObject::FileHandle(handle) => create_js_file_handle(handle, env)?,
         MontyObject::Repr(s) | MontyObject::Cycle(_, s) => env.create_string(s)?.into_unknown(env)?,
@@ -437,6 +439,30 @@ fn create_js_dataclass<'e>(
     obj.into_unknown(env)
 }
 
+/// Creates a JS object mirroring an instance of a sandbox-defined class:
+/// `{ __monty_type__: 'Instance', className, members, attrs }`.
+///
+/// The class itself lives on the session's heap and means nothing outside it,
+/// so the mirror carries the shape instead; passing this object back into a
+/// session rebuilds the instance against that session's own class of the same
+/// shape. `attrs` is a `Map`, as a dict is, since attribute names are
+/// sandbox-controlled and a plain object would let one reach the prototype.
+fn create_js_instance<'e>(class: &str, members: &[String], attrs: &DictPairs, env: &'e Env) -> Result<Unknown<'e>> {
+    let mut obj = Object::new(env)?;
+    obj.set_named_property("__monty_type__", "Instance")?;
+    obj.set_named_property("className", class)?;
+    let mut members_arr = env.create_array(members.len().try_into().expect("members size overflows u32"))?;
+    for (i, member) in members.iter().enumerate() {
+        members_arr.set(
+            i.try_into().expect("overflow on members index"),
+            env.create_string(member)?,
+        )?;
+    }
+    obj.set_named_property("members", members_arr)?;
+    obj.set_named_property("attrs", create_js_map(attrs, env)?)?;
+    obj.into_unknown(env)
+}
+
 // =============================================================================
 // JS to Monty conversion
 // =============================================================================
@@ -692,6 +718,19 @@ fn js_marked_object_to_monty(obj: &Object, monty_type: &str, env: Env) -> Result
                 .map_err(|error: Cow<'static, str>| Error::from_reason(error.into_owned()))?;
             let position = get_file_handle_position(obj)?;
             Ok(MontyObject::FileHandle(MontyFileHandle { path, mode, position }))
+        }
+        "Instance" => {
+            let class: String = obj.get_named_property("className")?;
+            let members_arr: Array = obj.get_named_property("members")?;
+            let mut members = Vec::with_capacity(members_arr.len() as usize);
+            for i in 0..members_arr.len() {
+                members.push(members_arr.get::<String>(i)?.unwrap_or_default());
+            }
+            let attrs_value: Unknown = obj.get_named_property("attrs")?;
+            let MontyObject::Dict(attrs) = js_to_monty(attrs_value, env)? else {
+                return Err(Error::from_reason("MontyInstance attrs must be a Map"));
+            };
+            Ok(MontyObject::Instance { class, members, attrs })
         }
         "Dataclass" => {
             let name: String = obj.get_named_property("name")?;

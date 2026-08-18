@@ -331,7 +331,7 @@ export class WorkerTransport {
   private toTurn(event: ChildEventFrame): NativeTurn {
     switch (event.kind) {
       case Ev.Complete:
-        return { kind: 'complete', value: decodeComplete(event.bytes) }
+        return { kind: 'complete', ...decodeComplete(event.bytes) }
       case Ev.Error:
         return { kind: 'error', exception: decodeError(event.bytes) }
       case Ev.TypingError:
@@ -406,13 +406,17 @@ function readChildEvent(frameBytes: Uint8Array): ChildEventFrame {
   return event
 }
 
-function decodeComplete(bytes: Uint8Array): unknown {
+function decodeComplete(bytes: Uint8Array): { value: unknown; returned: boolean } {
   const reader = new Reader(bytes)
+  let value: unknown = null
+  let returned = false
   while (!reader.done) {
     const f = reader.next()
-    if (f.field === 1) return decodeMontyObject(f.bytes) // Complete.value
+    if (f.field === 1)
+      value = decodeMontyObject(f.bytes) // Complete.value
+    else if (f.field === 2) returned = f.value !== 0n // Complete.returned
   }
-  return null
+  return { value, returned }
 }
 
 function decodeError(bytes: Uint8Array): NativeException {

@@ -44,8 +44,8 @@ use monty_pool::{
 };
 use monty_proto::python::{DcRegistry, exc_py_to_monty, monty_to_py, py_to_monty_value};
 use monty_types::{
-    AssertMessageAnnotations, ExtFunctionResult, MontyException, MontyObject, PrintStream, TypeCheckingConfig,
-    TypeCheckingFormat,
+    AssertMessageAnnotations, ExtFunctionResult, MontyException, MontyObject, ParseFacts, PrintStream,
+    TypeCheckingConfig, TypeCheckingFormat,
 };
 use pyo3::{
     Borrowed,
@@ -63,7 +63,9 @@ use tokio::{
 use crate::{
     async_dispatch::{dispatch_function_call, spawn_coroutine_task, wait_for_futures},
     build::{extract_repl_inputs, extract_source_code, extract_type_check_stubs},
-    exceptions::{MontyCrashedError, MontyDisconnectError, MontyError, MontyShutdown, MontyTypingError},
+    exceptions::{
+        MontyCrashedError, MontyDisconnectError, MontyError, MontyShutdown, MontySyntaxError, MontyTypingError,
+    },
     external::{CallResult, ExternalLookup, dispatch_method_call},
     get_not_handled,
     limits::extract_limits,
@@ -266,7 +268,7 @@ impl PyMontySession {
     ///
     /// Blocks the calling thread with the GIL released; async external
     /// functions are not supported here — use [`AsyncMonty`].
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
     #[expect(clippy::too_many_arguments)]
     fn feed_run(
         &self,
@@ -278,6 +280,7 @@ impl PyMontySession {
         mount: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
+        max_steps: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -290,6 +293,7 @@ impl PyMontySession {
             mount,
             os,
             skip_type_check,
+            max_steps,
         )?;
         drive_sync(py, args, external_lookup)
     }
@@ -307,7 +311,7 @@ impl PyMontySession {
     /// captured on the snapshot so `snapshot.resume_auto()` can answer
     /// subsequent suspensions from them (and from this feed's mounts), letting
     /// a caller iterate to completion without resolving each call by hand.
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
     #[expect(clippy::too_many_arguments)]
     fn feed_start(
         &self,
@@ -319,6 +323,7 @@ impl PyMontySession {
         mount: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
+        max_steps: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -331,6 +336,7 @@ impl PyMontySession {
             mount,
             os,
             skip_type_check,
+            max_steps,
         )?;
         let ext = external_lookup.map(|d| d.clone().unbind());
         feed_start_sync(py, args, ext, self.repl_config.script_name.clone())
@@ -416,6 +422,64 @@ impl PyMontySession {
             .detach(|| block_on_sync(dump_checkout(&self.checkout)))?
             .map_err(|e| pool_err_to_py(py, e))?;
         Ok(PyBytes::new(py, &state))
+    }
+
+    /// Evaluates one expression against the session's namespace and returns
+    /// its value, binding nothing.
+    ///
+    /// This is how words become a value: an annotation, a contract, a name the
+    /// caller wants the meaning of in the scope that defined it. Anything but a
+    /// single expression is refused with `MontySyntaxError` rather than
+    /// quietly leaving the session changed; what the expression *calls* can of
+    /// course still mutate what it reaches. Suspensions are answered from
+    /// `external_lookup` / `os` exactly as in `feed_run`.
+    #[pyo3(signature = (expr, *, external_lookup=None, print_callback=None, os=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &Bound<'_, PyString>,
+        external_lookup: Option<&Bound<'_, PyDict>>,
+        print_callback: Option<&Bound<'_, PyAny>>,
+        os: Option<Py<PyAny>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.used.store(true, Ordering::Relaxed);
+        let args = FeedArgs::extract(
+            py,
+            &self.checkout,
+            &self.dc_registry,
+            expr,
+            None,
+            print_callback,
+            None,
+            os,
+            false,
+            max_steps,
+        )?
+        .probing();
+        drive_sync(py, args, external_lookup)
+    }
+
+    /// Reads a snippet and returns what is statically true of it, running none
+    /// of it and changing nothing about the session.
+    ///
+    /// `script_name` names the source in the syntax error's traceback; the
+    /// session's own is used when it is empty. `stores` are the names to report
+    /// a module-level binding of.
+    #[pyo3(signature = (code, *, script_name="", stores=Vec::new()))]
+    fn parse(&self, py: Python<'_>, code: &str, script_name: &str, stores: Vec<String>) -> PyResult<PyParseFacts> {
+        self.used.store(true, Ordering::Relaxed);
+        let facts = py
+            .detach(|| {
+                block_on_sync(parse_checkout(
+                    &self.checkout,
+                    code.to_owned(),
+                    script_name.to_owned(),
+                    stores,
+                ))
+            })?
+            .map_err(|e| pool_err_to_py(py, e))?;
+        PyParseFacts::from_facts(py, facts)
     }
 
     /// Installs third-party Python packages into the session via the worker's
@@ -765,7 +829,7 @@ impl PyAsyncMontySession {
     /// print callbacks in this process. Session state persists across feeds.
     ///
     /// Worker I/O runs on the tokio runtime, off the asyncio event loop.
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
     #[expect(clippy::too_many_arguments)]
     fn feed_run<'py>(
         &self,
@@ -777,6 +841,7 @@ impl PyAsyncMontySession {
         mount: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
+        max_steps: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -789,6 +854,7 @@ impl PyAsyncMontySession {
             mount,
             os,
             skip_type_check,
+            max_steps,
         )?;
         let ext = external_lookup.map(|d| d.clone().unbind());
         let abandoned = Arc::clone(&self.drive_abandoned);
@@ -800,7 +866,7 @@ impl PyAsyncMontySession {
     /// is awaitable) or a `MontyComplete`. See that method for the
     /// snapshot-driven protocol and the `external_lookup` / `os` capture that
     /// backs `resume_auto()`.
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
     #[expect(clippy::too_many_arguments)]
     fn feed_start<'py>(
         &self,
@@ -812,6 +878,7 @@ impl PyAsyncMontySession {
         mount: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
+        max_steps: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -824,6 +891,7 @@ impl PyAsyncMontySession {
             mount,
             os,
             skip_type_check,
+            max_steps,
         )?;
         let ext = external_lookup.map(|d| d.clone().unbind());
         feed_start_async(py, args, ext, self.repl_config.script_name.clone())
@@ -912,6 +980,59 @@ impl PyAsyncMontySession {
                 .await
                 .map_err(|e| Python::attach(|py| pool_err_to_py(py, e)))?;
             Ok(Python::attach(|py| PyBytes::new(py, &state).unbind()))
+        })
+    }
+
+    /// Async counterpart of [`PyMontySession::probe`]: the returned coroutine
+    /// resolves to the expression's value. Coroutine externals are awaited as
+    /// in `feed_run`.
+    #[pyo3(signature = (expr, *, external_lookup=None, print_callback=None, os=None, max_steps=None))]
+    fn probe<'py>(
+        &self,
+        py: Python<'py>,
+        expr: &Bound<'_, PyString>,
+        external_lookup: Option<&Bound<'_, PyDict>>,
+        print_callback: Option<&Bound<'_, PyAny>>,
+        os: Option<Py<PyAny>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.used.store(true, Ordering::Relaxed);
+        let args = FeedArgs::extract(
+            py,
+            &self.checkout,
+            &self.dc_registry,
+            expr,
+            None,
+            print_callback,
+            None,
+            os,
+            false,
+            max_steps,
+        )?
+        .probing();
+        let ext = external_lookup.map(|d| d.clone().unbind());
+        let abandoned = Arc::clone(&self.drive_abandoned);
+        future_into_py(py, async move { drive_async(args, ext, abandoned).await })
+    }
+
+    /// Async counterpart of [`PyMontySession::parse`]: the returned coroutine
+    /// resolves to the snippet's `ParseFacts`, off the event loop.
+    #[pyo3(signature = (code, *, script_name="", stores=Vec::new()))]
+    fn parse<'py>(
+        &self,
+        py: Python<'py>,
+        code: &str,
+        script_name: &str,
+        stores: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.used.store(true, Ordering::Relaxed);
+        let checkout = Arc::clone(&self.checkout);
+        let (code, script_name) = (code.to_owned(), script_name.to_owned());
+        future_into_py(py, async move {
+            let facts = parse_checkout(&checkout, code, script_name, stores)
+                .await
+                .map_err(|e| Python::attach(|py| pool_err_to_py(py, e)))?;
+            Python::attach(|py| PyParseFacts::from_facts(py, facts))
         })
     }
 
@@ -1198,6 +1319,13 @@ pub(crate) struct FeedArgs {
     pub(crate) inputs: Vec<(String, MontyObject)>,
     pub(crate) mounts: Vec<MountSpec>,
     pub(crate) skip_type_check: bool,
+    /// Instructions this feed alone may execute; `None` leaves it bounded only
+    /// by the session's own `max_steps`.
+    pub(crate) max_steps: Option<u64>,
+    /// True when `code` is one expression to evaluate rather than a snippet to
+    /// feed. Only the opening turn differs; every suspension after it is
+    /// answered the same way.
+    pub(crate) probe: bool,
     pub(crate) os: Option<Py<PyAny>>,
     pub(crate) print_target: PrintTarget,
     pub(crate) checkout: SharedCheckout,
@@ -1216,6 +1344,7 @@ impl FeedArgs {
         mount: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
+        max_steps: Option<u64>,
     ) -> PyResult<Self> {
         check_os_callable(py, os.as_ref())?;
         Ok(Self {
@@ -1223,11 +1352,103 @@ impl FeedArgs {
             inputs: extract_repl_inputs(inputs, dc_registry)?,
             mounts: extract_mount_specs(mount)?,
             skip_type_check,
+            max_steps,
+            probe: false,
             os,
             print_target: PrintTarget::from_py(print_callback)?,
             checkout: Arc::clone(checkout),
             dc_registry: dc_registry.clone_ref(py),
         })
+    }
+
+    /// Marks these arguments as one expression to evaluate rather than a
+    /// snippet to feed.
+    pub(crate) fn probing(mut self) -> Self {
+        self.probe = true;
+        self
+    }
+}
+
+/// What reading a snippet says about it, with none of it run.
+///
+/// Answered by `MontySession.parse`, so a host can classify source (finished,
+/// unfinished, or wrong) and see what it binds without a second Python parser
+/// and without executing anything.
+#[pyclass(name = "ParseFacts", module = "pydantic_monty", frozen)]
+pub struct PyParseFacts {
+    complete: bool,
+    error: Option<Py<PyAny>>,
+    binds_global: bool,
+    stores: Vec<String>,
+}
+
+impl PyParseFacts {
+    /// Converts the worker's answer, turning a syntax error into the same
+    /// `MontySyntaxError` a feed of that snippet would raise.
+    fn from_facts(py: Python<'_>, facts: ParseFacts) -> PyResult<Self> {
+        Ok(Self {
+            complete: facts.complete,
+            error: facts
+                .error
+                .map(|exc| MontySyntaxError::new_object(py, exc))
+                .transpose()?,
+            binds_global: facts.binds_global,
+            stores: facts.stores,
+        })
+    }
+}
+
+#[pymethods]
+impl PyParseFacts {
+    /// False only when the snippet is unfinished rather than wrong, which is a
+    /// request for more input; `error` is then `None`.
+    #[getter]
+    fn complete(&self) -> bool {
+        self.complete
+    }
+
+    /// The `MontySyntaxError` a feed of this snippet would raise, or `None`
+    /// when it parses or is merely unfinished.
+    #[getter]
+    fn error(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.error.as_ref().map(|err| err.clone_ref(py))
+    }
+
+    /// Whether a `global` statement appears anywhere in the snippet.
+    #[getter]
+    fn binds_global(&self) -> bool {
+        self.binds_global
+    }
+
+    /// Which of the requested names the snippet binds at module level.
+    #[getter]
+    fn stores(&self) -> Vec<String> {
+        self.stores.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ParseFacts(complete={}, error={}, binds_global={}, stores={:?})",
+            if self.complete { "True" } else { "False" },
+            if self.error.is_some() { "..." } else { "None" },
+            if self.binds_global { "True" } else { "False" },
+            self.stores,
+        )
+    }
+}
+
+/// Reads a snippet on a live checkout without running any of it (shared by the
+/// sync and async `parse` methods; runs without the GIL).
+async fn parse_checkout(
+    checkout: &SharedCheckout,
+    code: String,
+    script_name: String,
+    stores: Vec<String>,
+) -> Result<ParseFacts, PoolError> {
+    let mut guard = checkout.lock().await;
+    match guard.as_mut() {
+        Some(checkout) => checkout.parse(&code, &script_name, stores).await,
+        None => Err(PoolError::Finished),
     }
 }
 
@@ -1243,6 +1464,8 @@ fn drive_sync(py: Python<'_>, args: FeedArgs, external_lookup: Option<&Bound<'_,
         inputs,
         mounts,
         skip_type_check,
+        max_steps,
+        probe,
         os,
         print_target,
         checkout,
@@ -1253,14 +1476,22 @@ fn drive_sync(py: Python<'_>, args: FeedArgs, external_lookup: Option<&Bound<'_,
         py,
         &checkout,
         &print_target,
-        turn_fn(move |c, p| Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, p).await })),
+        turn_fn(move |c, p| {
+            Box::pin(async move {
+                if probe {
+                    c.probe(&code, max_steps, p).await
+                } else {
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await
+                }
+            })
+        }),
     )?;
 
     loop {
         // `Complete` ends the loop; on any other event a failure to compute the
         // answer discards the checkout (see `sync_turn_answer`).
         let resume_with = match event {
-            TurnEvent::Complete(value) => return monty_to_py(py, &value, &dc_registry),
+            TurnEvent::Complete(outcome) => return monty_to_py(py, &outcome.value, &dc_registry),
             // This feed's mounts get first refusal on every OS call; only what
             // they don't cover reaches the `os=` callback.
             TurnEvent::OsCall {
@@ -1421,6 +1652,8 @@ async fn drive_async_inner(
         inputs,
         mounts,
         skip_type_check,
+        max_steps,
+        probe,
         os,
         print_target,
         checkout,
@@ -1436,7 +1669,13 @@ async fn drive_async_inner(
             // from here a cancelled drive must poison the session (see
             // `AbandonGuard`)
             started.store(true, Ordering::Release);
-            Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, p).await })
+            Box::pin(async move {
+                if probe {
+                    c.probe(&code, max_steps, p).await
+                } else {
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await
+                }
+            })
         }),
     )
     .await?;
@@ -1447,8 +1686,8 @@ async fn drive_async_inner(
         // `Complete` and `ResolveFutures` stay inline — the latter must await
         // the pending tasks.
         let answer: TurnAnswer = match event {
-            TurnEvent::Complete(value) => {
-                return Python::attach(|py| monty_to_py(py, &value, &dc_registry));
+            TurnEvent::Complete(outcome) => {
+                return Python::attach(|py| monty_to_py(py, &outcome.value, &dc_registry));
             }
             TurnEvent::ResolveFutures { .. } => {
                 let resolved = wait_for_futures(&mut join_set).await.and_then(|results| {

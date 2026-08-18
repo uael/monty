@@ -189,6 +189,7 @@ impl Recorder {
                     code.language = "python",
                     inputs = inputs,
                     skip_type_check = f.skip_type_check,
+                    max_steps = f.max_steps,
                     length_limit_exceeded = cut.then_some(true),
                     // declared empty here, filled in by the `Complete` event
                     // that closes this span
@@ -218,6 +219,43 @@ impl Recorder {
                     results = results,
                     length_limit_exceeded = cut.then_some(true),
                 );
+            }
+            Some(pb::parent_request::Kind::Probe(p)) => {
+                let (expr, cut) = truncate_str(&p.expr);
+                // a probe is a run like any other, and closes on the same
+                // `Complete`; only the span's name says which of the two it was
+                self.pending = None;
+                self.feed = None;
+                let span = start_span(logfire::span!(
+                    parent: self.context_span(),
+                    "probe expression",
+                    code = &expr,
+                    code.language = "python",
+                    max_steps = p.max_steps,
+                    length_limit_exceeded = cut.then_some(true),
+                    output = Empty,
+                    total_execution_micros = Empty,
+                    max_duration_micros = Empty,
+                ));
+                self.feed = Some(OpenSpan::new(span, cut));
+            }
+            Some(pb::parent_request::Kind::Parse(p)) => {
+                let (code, code_cut) = truncate_str(&p.code);
+                let (stores, stores_cut) = render_str_list(&p.stores);
+                let cut = code_cut | stores_cut;
+                self.turn = Some(start_span(logfire::span!(
+                    parent: self.context_span(),
+                    "parse code",
+                    code = &code,
+                    code.language = "python",
+                    stores = stores,
+                    length_limit_exceeded = cut.then_some(true),
+                    // filled in by the `ParseFacts` reply
+                    complete = Empty,
+                    binds_global = Empty,
+                    total_execution_micros = Empty,
+                    max_duration_micros = Empty,
+                )));
             }
             Some(pb::parent_request::Kind::Dump(_)) => {
                 self.dump_turn = true;
@@ -348,6 +386,27 @@ impl Recorder {
                 self.end_feed();
             }
             // the dump span carries its own result, and closes on it
+            Some(pb::child_event::Kind::ParseFacts(f)) => {
+                if let Some(parse) = &self.turn {
+                    parse.record("complete", f.complete);
+                    parse.record("binds_global", f.binds_global);
+                    parse.record("total_execution_micros", int_attr(micros));
+                    if let Some(max_duration) = max_duration {
+                        parse.record("max_duration_micros", int_attr(max_duration));
+                    }
+                }
+                if let Some(error) = &f.error {
+                    record_error(
+                        &pb::Error {
+                            exception: Some(error.clone()),
+                        },
+                        micros,
+                        max_duration,
+                        &self.context_span(),
+                    );
+                }
+                self.turn = None;
+            }
             Some(pb::child_event::Kind::DumpResult(d)) => {
                 if let Some(dump) = &self.turn {
                     dump.record("state_bytes", int_attr(d.state.len()));
@@ -1001,6 +1060,7 @@ mod tests {
             code: "double(2)".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })));
         recorder.event(&event(pb::child_event::Kind::FunctionCall(WireFunctionCall {
             function_name: "double".to_owned(),
@@ -1017,6 +1077,7 @@ mod tests {
         })));
         recorder.event(&event(pb::child_event::Kind::Complete(pb::Complete {
             value: Some(MontyObject::Int(4).into()),
+            returned: false,
         })));
         recorder.begin_turn(&request(pb::parent_request::Kind::Reset(pb::Reset {})));
 
@@ -1166,9 +1227,11 @@ mod tests {
             code: "1".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })));
         recorder.event(&event(pb::child_event::Kind::Complete(pb::Complete {
             value: Some(MontyObject::Int(1).into()),
+            returned: false,
         })));
         recorder.begin_turn(&request(pb::parent_request::Kind::Reset(pb::Reset {})));
 
@@ -1197,6 +1260,7 @@ mod tests {
         )));
         recorder.event(&event(pb::child_event::Kind::Complete(pb::Complete {
             value: Some(MontyObject::Int(1).into()),
+            returned: false,
         })));
 
         let spans = spans.get_finished_spans().unwrap();
@@ -1223,6 +1287,7 @@ mod tests {
         let mut recorder = Recorder::new(None);
         recorder.event(&event(pb::child_event::Kind::Complete(pb::Complete {
             value: Some(MontyObject::Int(7).into()),
+            returned: false,
         })));
 
         let logs = logs.get_emitted_logs().unwrap();

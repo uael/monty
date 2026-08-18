@@ -356,7 +356,11 @@ impl NativeSession {
             env,
             on_print,
             outcome_fn(move |checkout, on_print| {
-                Box::pin(async move { checkout.feed(&code, inputs, mounts, skip_type_check, on_print).await })
+                Box::pin(async move {
+                    checkout
+                        .feed(&code, inputs, mounts, skip_type_check, None, on_print)
+                        .await
+                })
             }),
         )
     }
@@ -766,9 +770,10 @@ impl From<StdResult<TurnEvent, PoolError>> for TurnOutcome {
 fn turn_to_js(env: &Env, outcome: TurnOutcome) -> Result<Object<'_>> {
     let mut obj = Object::new(env)?;
     match outcome {
-        TurnOutcome::Event(TurnEvent::Complete(value)) => {
+        TurnOutcome::Event(TurnEvent::Complete(outcome)) => {
             obj.set("kind", "complete")?;
-            obj.set("value", monty_to_js(&value, env)?)?;
+            obj.set("value", monty_to_js(&outcome.value, env)?)?;
+            obj.set("returned", outcome.returned)?;
         }
         TurnOutcome::Event(TurnEvent::FunctionCall {
             function_name,

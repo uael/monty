@@ -22,7 +22,7 @@ pub struct Unit {}
 pub struct MontyObject {
     #[prost(
         oneof = "monty_object::Kind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
     )]
     pub kind: ::core::option::Option<monty_object::Kind>,
 }
@@ -103,7 +103,28 @@ pub mod monty_object {
         InstanceType(::prost::alloc::string::String),
         #[prost(message, tag = "29")]
         NotImplemented(super::Unit),
+        #[prost(message, tag = "30")]
+        Instance(super::Instance),
     }
+}
+/// An instance of a class the sandbox itself defined.
+///
+/// Two sessions share no pointers, so an instance crossing between them is
+/// matched to a class by shape: the receiving session looks for a class of this
+/// name, defined in its own namespace, whose members are exactly `members`. A
+/// session with no such class rejects the instance as an input, since there
+/// would be nothing for it to be an instance of.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Instance {
+    /// The class name, as the defining source spelled it.
+    #[prost(string, tag = "1")]
+    pub class_name: ::prost::alloc::string::String,
+    /// The class's member names (methods and class variables), sorted.
+    #[prost(string, repeated, tag = "2")]
+    pub members: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Instance attributes, in `__dict__` order.
+    #[prost(message, optional, tag = "3")]
+    pub attrs: ::core::option::Option<Dict>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ObjectList {
@@ -460,7 +481,7 @@ pub struct ParentRequest {
     /// not depend on it, and it is absent whenever the parent is not tracing.
     #[prost(string, optional, tag = "20")]
     pub trace_parent: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof = "parent_request::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
+    #[prost(oneof = "parent_request::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
     pub kind: ::core::option::Option<parent_request::Kind>,
 }
 /// Nested message and enum types in `ParentRequest`.
@@ -487,6 +508,10 @@ pub mod parent_request {
         Reset(super::Reset),
         #[prost(message, tag = "10")]
         Shutdown(super::Shutdown),
+        #[prost(message, tag = "11")]
+        Parse(super::Parse),
+        #[prost(message, tag = "12")]
+        Probe(super::Probe),
     }
 }
 /// Configures the REPL session this child will serve until `Reset`, sent once
@@ -550,6 +575,40 @@ pub struct Feed {
     /// Skip type checking for this feed even when the session enables it.
     #[prost(bool, tag = "3")]
     pub skip_type_check: bool,
+    /// Instructions this feed alone may execute, at dispatch-checkpoint
+    /// granularity, counted from zero at the start of the feed. Independent of
+    /// the session's own `ResourceLimits.max_steps`, which keeps applying
+    /// underneath; whichever is tighter trips first. Deterministic, so the same
+    /// source under the same budget fails with the same message every time.
+    #[prost(uint64, optional, tag = "4")]
+    pub max_steps: ::core::option::Option<u64>,
+}
+/// Reads a snippet and answers what is statically true of it, running none of
+/// it. Turn ends with `ParseFacts`. Valid with or without a session, since
+/// nothing about the answer depends on one.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Parse {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    /// Filename the syntax error's traceback names; the session's script name
+    /// when empty.
+    #[prost(string, tag = "2")]
+    pub script_name: ::prost::alloc::string::String,
+    /// Names to report a module-level binding of, echoed back in
+    /// `ParseFacts.stores`.
+    #[prost(string, repeated, tag = "3")]
+    pub stores: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Evaluates one expression against the session's namespace and answers with
+/// its value. Binds nothing, so the session is left as it was. Turn ends with
+/// `Complete`, `Error`, or a suspension, exactly as a `Feed` does.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Probe {
+    #[prost(string, tag = "1")]
+    pub expr: ::prost::alloc::string::String,
+    /// Instructions the expression may execute, as in `Feed.max_steps`.
+    #[prost(uint64, optional, tag = "2")]
+    pub max_steps: ::core::option::Option<u64>,
 }
 /// Answers a `FunctionCall` or `OsCall` suspension. `call_id` must match the
 /// suspension event.
@@ -651,7 +710,7 @@ pub struct ChildEvent {
     /// on a successful `Load` reply; unset on all other events.
     #[prost(string, optional, tag = "22")]
     pub restored_script_name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof = "child_event::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
+    #[prost(oneof = "child_event::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13")]
     pub kind: ::core::option::Option<child_event::Kind>,
 }
 /// Nested message and enum types in `ChildEvent`.
@@ -682,6 +741,8 @@ pub mod child_event {
         FatalError(super::FatalError),
         #[prost(message, tag = "12")]
         Shutdown(super::ShutdownDump),
+        #[prost(message, tag = "13")]
+        ParseFacts(super::ParseFacts),
     }
 }
 /// Streamed sandbox print() output. Zero or more of these precede each
@@ -883,6 +944,35 @@ pub struct ResolveFutures {
 pub struct Complete {
     #[prost(message, optional, tag = "1")]
     pub value: ::core::option::Option<MontyObject>,
+    /// True when a module-level `return` ended the snippet, false when the body
+    /// ran out of statements (whether or not a trailing expression supplied the
+    /// value). CPython rejects such a return at compile time; Monty runs it and
+    /// reports it here, so a host can tell a chunk that closed itself from one
+    /// that merely finished.
+    #[prost(bool, tag = "2")]
+    pub returned: bool,
+}
+/// Turn end: what `Parse` read off the snippet. Nothing ran, and no session
+/// state changed.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ParseFacts {
+    /// False only when the snippet is unfinished rather than wrong: an open
+    /// bracket, an unterminated triple-quoted string, or a block header with no
+    /// body. That is a request for more input, so `error` is then absent. Same
+    /// line CPython's `codeop.compile_command` draws for an interactive prompt.
+    #[prost(bool, tag = "1")]
+    pub complete: bool,
+    /// The syntax error a `Feed` of this snippet would raise; absent when it
+    /// parses, and when it is merely unfinished.
+    #[prost(message, optional, tag = "2")]
+    pub error: ::core::option::Option<RaisedException>,
+    /// Whether a `global` statement appears anywhere in the snippet, in any scope.
+    #[prost(bool, tag = "3")]
+    pub binds_global: bool,
+    /// Which of the request's `stores` the snippet binds at module level, in the
+    /// order asked.
+    #[prost(string, repeated, tag = "4")]
+    pub stores: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Turn end: the snippet (or request) failed with a Python exception. The
 /// session survives — prior globals remain available to later feeds.

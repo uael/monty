@@ -79,7 +79,7 @@ fn no_print(_: PrintStream, _: &str) -> PrintFuture {
 #[track_caller]
 fn expect_complete(event: TurnEvent) -> MontyObject {
     match event {
-        TurnEvent::Complete(value) => value,
+        TurnEvent::Complete(outcome) => outcome.value,
         other => panic!("expected Complete, got {other:?}"),
     }
 }
@@ -90,7 +90,7 @@ fn expect_complete(event: TurnEvent) -> MontyObject {
 async fn drive_answering_calls(session: &mut Checkout, mut event: TurnEvent) -> MontyObject {
     loop {
         match event {
-            TurnEvent::Complete(value) => break value,
+            TurnEvent::Complete(outcome) => break outcome.value,
             TurnEvent::FunctionCall { .. } => {
                 event = session
                     .resume(ResumeValue::Return(MontyObject::None), &mut no_print)
@@ -113,7 +113,7 @@ fn pool_create_session_run(bench: &mut Bencher) {
         let pool = Pool::new(PoolConfig::subprocess(&binary)).await.unwrap();
         let mut session = pool.checkout(&ReplConfig::default()).await.unwrap();
         let event = session
-            .feed("1 + 1", vec![], vec![], false, &mut no_print)
+            .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
             .await
             .unwrap();
         black_box(expect_complete(event));
@@ -132,7 +132,7 @@ fn session_checkout_run(bench: &mut Bencher) {
     bench.to_async(&runtime).iter(|| async {
         let mut session = pool.checkout(&ReplConfig::default()).await.unwrap();
         let event = session
-            .feed("1 + 1", vec![], vec![], false, &mut no_print)
+            .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
             .await
             .unwrap();
         black_box(expect_complete(event));
@@ -162,7 +162,7 @@ fn ext_calls_1000(bench: &mut Bencher) {
     bench.to_async(&runtime).iter(|| async {
         let mut session = session.lock().await;
         let event = session
-            .feed(EXT_CALL_LOOP, vec![], vec![], false, &mut no_print)
+            .feed(EXT_CALL_LOOP, vec![], vec![], false, None, &mut no_print)
             .await
             .unwrap();
         black_box(drive_answering_calls(&mut session, event).await);
@@ -229,12 +229,12 @@ fn ext_call_rows(bench: &mut Bencher) {
     bench.to_async(&runtime).iter(|| async {
         let mut session = session.lock().await;
         let mut event = session
-            .feed(EXT_ROWS_LOOP, vec![], vec![], false, &mut no_print)
+            .feed(EXT_ROWS_LOOP, vec![], vec![], false, None, &mut no_print)
             .await
             .unwrap();
         let value = loop {
             match event {
-                TurnEvent::Complete(value) => break value,
+                TurnEvent::Complete(outcome) => break outcome.value,
                 TurnEvent::FunctionCall { .. } => {
                     event = session
                         .resume(ResumeValue::Return(rows.clone()), &mut no_print)

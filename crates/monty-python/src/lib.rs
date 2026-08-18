@@ -28,7 +28,7 @@ pub use exceptions::{
     MontySyntaxError, MontyTypingError, PyFrame,
 };
 pub use mount::PyMountDir;
-pub use pool::{PyAsyncMonty, PyAsyncMontySession, PyAsyncMontyWebsocket, PyMonty, PyMontySession};
+pub use pool::{PyAsyncMonty, PyAsyncMontySession, PyAsyncMontyWebsocket, PyMonty, PyMontySession, PyParseFacts};
 pub use print_target::{PyCollectStreams, PyCollectString};
 use pyo3::{prelude::*, sync::PyOnceLock, types::PyAny};
 pub use snapshot::{
@@ -81,6 +81,10 @@ mod _monty {
     // boundary; export it as part of the `pydantic_monty` surface.
     #[pymodule_export]
     use monty_proto::python::PyMontyFileHandle as MontyFileHandle;
+    // `MontyInstance` is likewise produced by the value-conversion layer,
+    // whenever an instance of a sandbox-defined class crosses the boundary.
+    #[pymodule_export]
+    use monty_proto::python::PyMontyInstance as MontyInstance;
     use pyo3::prelude::*;
 
     #[pymodule_export]
@@ -131,6 +135,8 @@ mod _monty {
     use super::PyMountDir as MountDir;
     #[pymodule_export]
     use super::PyNameLookupSnapshot as NameLookupSnapshot;
+    #[pymodule_export]
+    use super::PyParseFacts as ParseFacts;
     #[pymodule_export]
     use super::telemetry::_install_telemetry_adapter;
     use super::{get_not_handled, get_version};

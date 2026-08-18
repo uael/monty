@@ -32,6 +32,9 @@ export interface NativeException {
 export interface CompleteTurn {
   kind: 'complete'
   value: unknown
+  /** True when a module-level `return` ended the snippet, false when the body
+   *  ran out of statements. */
+  returned: boolean
 }
 
 /** The sandbox called an external function — answer with a `resume*` call. */

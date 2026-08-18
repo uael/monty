@@ -13,8 +13,8 @@ use std::{
 use monty_fs::{MountCallOutcome, MountMode, MountRoot, MountTable, OverlayState};
 use monty_proto::{FrameError, PROTOCOL_VERSION, exceeds_max_value_depth, pb, validate_requirement};
 use monty_types::{
-    AssertMessageAnnotations, ExcType, MONTY_VERSION, MontyException, MontyObject, OsFunctionCall, PrintStream,
-    ResourceLimits, TypeCheckingConfig,
+    AssertMessageAnnotations, ExcType, FeedOutcome, MONTY_VERSION, MontyException, MontyObject, OsFunctionCall,
+    ParseFacts, PrintStream, ResourceLimits, TypeCheckingConfig,
 };
 use tokio::{task::spawn_blocking, time::timeout};
 
@@ -173,9 +173,10 @@ pub enum TurnEvent {
     /// Every sandbox task is blocked on external futures — answer with
     /// [`Checkout::resume_futures`].
     ResolveFutures { pending_call_ids: Vec<u32> },
-    /// The fed snippet completed with this value; the session is ready for
-    /// the next [`Checkout::feed`].
-    Complete(MontyObject),
+    /// The fed snippet completed; the session is ready for the next
+    /// [`Checkout::feed`]. Carries the value and whether a module-level
+    /// `return` is what ended the snippet.
+    Complete(FeedOutcome),
 }
 
 /// The caller's answer to a [`TurnEvent::FunctionCall`] or
@@ -383,7 +384,7 @@ impl Checkout {
         {
             ControlEvent::Ok => None,
             ControlEvent::Turn(event) => Some(event),
-            other @ ControlEvent::Dump(_) => {
+            other @ (ControlEvent::Dump(_) | ControlEvent::Parse(_)) => {
                 return Err(self.protocol_violation(format!("unexpected reply to Load: {other:?}")));
             }
         };
@@ -406,6 +407,7 @@ impl Checkout {
         inputs: Vec<(String, MontyObject)>,
         mounts: Vec<MountSpec>,
         skip_type_check: bool,
+        max_steps: Option<u64>,
         on_print: OnPrint<'_>,
     ) -> Result<TurnEvent, PoolError> {
         self.ensure_ready()?;
@@ -426,8 +428,70 @@ impl Checkout {
                 })
                 .collect(),
             skip_type_check,
+            max_steps,
         }));
         self.expect_turn(&request, on_print).await
+    }
+
+    /// Evaluates one expression against the session's namespace and returns its
+    /// value, binding nothing. Suspends and resumes exactly as [`feed`](Self::feed)
+    /// does, so an expression naming something the host provides is answered the
+    /// same way; this feed's mounts are the ones the probe sees.
+    ///
+    /// # Errors
+    /// [`PoolError::Runtime`] leaves the session usable (a statement rather than
+    /// an expression is refused this way); all other errors mean the worker was
+    /// discarded.
+    pub async fn probe(
+        &mut self,
+        expr: &str,
+        max_steps: Option<u64>,
+        on_print: OnPrint<'_>,
+    ) -> Result<TurnEvent, PoolError> {
+        self.ensure_ready()?;
+        if self.pending.is_some() {
+            return Err(PoolError::Protocol(
+                "probe called while a suspension is awaiting an answer".into(),
+            ));
+        }
+        let request = request(pb::parent_request::Kind::Probe(pb::Probe {
+            expr: expr.to_owned(),
+            max_steps,
+        }));
+        self.expect_turn(&request, on_print).await
+    }
+
+    /// Reads a snippet and returns what is statically true of it, running none
+    /// of it. Needs no session state, so it is answerable at any point a turn
+    /// is not already in flight.
+    ///
+    /// `script_name` names the source in the syntax error's traceback; empty
+    /// takes the session's own. `stores` are the names to report a module-level
+    /// binding of.
+    ///
+    /// # Errors
+    /// [`PoolError::Protocol`] and worker failures only: reading source raises
+    /// nothing, and a syntax error arrives inside [`ParseFacts::error`].
+    pub async fn parse(&mut self, code: &str, script_name: &str, stores: Vec<String>) -> Result<ParseFacts, PoolError> {
+        self.ensure_ready()?;
+        if self.pending.is_some() {
+            return Err(PoolError::Protocol(
+                "parse called while a suspension is awaiting an answer".into(),
+            ));
+        }
+        let request = request(pb::parent_request::Kind::Parse(pb::Parse {
+            code: code.to_owned(),
+            script_name: script_name.to_owned(),
+            stores,
+        }));
+        let mut no_print = on_print_sync(|_, _| {});
+        match self
+            .request_turn(&request, self.pool.config.request_timeout, &mut no_print)
+            .await?
+        {
+            ControlEvent::Parse(facts) => Ok(facts),
+            other => Err(self.protocol_violation(format!("unexpected reply to Parse: {other:?}"))),
+        }
     }
 
     /// Answers a [`TurnEvent::FunctionCall`] or [`TurnEvent::OsCall`].
@@ -1073,8 +1137,25 @@ impl Checkout {
                         let value = complete
                             .value
                             .ok_or(monty_proto::ProtoConvertError::MissingField("Complete.value"))?;
-                        Ok(TurnEvent::Complete(value.into_object()?))
+                        Ok(TurnEvent::Complete(FeedOutcome {
+                            value: value.into_object()?,
+                            returned: complete.returned,
+                        }))
                     });
+                }
+                Some(pb::child_event::Kind::ParseFacts(facts)) => {
+                    let error = match facts.error.map(MontyException::try_from).transpose() {
+                        Ok(error) => error,
+                        Err(err) => {
+                            return Err(self.protocol_violation(format!("invalid exception payload: {err}")));
+                        }
+                    };
+                    return Ok(ControlEvent::Parse(ParseFacts {
+                        complete: facts.complete,
+                        error,
+                        binds_global: facts.binds_global,
+                        stores: facts.stores,
+                    }));
                 }
                 Some(pb::child_event::Kind::Error(error)) => {
                     // an error reply to `Dump` (e.g. an oversize dump) does not
@@ -1309,6 +1390,7 @@ enum ControlEvent {
     Turn(TurnEvent),
     Ok,
     Dump(Vec<u8>),
+    Parse(ParseFacts),
 }
 
 /// How long a child that announced a `FatalError` is given to exit on its own

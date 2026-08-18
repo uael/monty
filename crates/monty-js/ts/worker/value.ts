@@ -44,6 +44,7 @@ const Tag = {
   Repr: 26,
   Cycle: 27,
   NotImplemented: 29,
+  Instance: 30,
 } as const
 
 const I64_MIN = -(2n ** 63n)
@@ -134,6 +135,9 @@ function writeMarked(w: Writer, obj: Record<string, unknown>): void {
     case 'Dataclass':
       w.lengthDelimited(Tag.Dataclass, encodeDataclass(obj))
       break
+    case 'Instance':
+      w.lengthDelimited(Tag.Instance, encodeInstance(obj))
+      break
     case 'FileHandle':
       w.lengthDelimited(Tag.FileHandle, encodeFileHandle(obj))
       break
@@ -165,6 +169,24 @@ function encodeFileHandle(obj: Record<string, unknown>): Uint8Array {
 function encodeFunction(value: { name?: string }): Uint8Array {
   const w = new Writer()
   w.string(1, value.name ?? '') // Function.name
+  return w.finish()
+}
+
+function encodeInstance(obj: Record<string, unknown>): Uint8Array {
+  if (!Array.isArray(obj.members)) {
+    throw new TypeError(
+      `Object property 'members' type mismatch. Expect value to be Array, but received ${jsType(obj.members)}`,
+    )
+  }
+  if (!(obj.attrs instanceof Map)) {
+    throw new TypeError(
+      `Object property 'attrs' type mismatch. Expect value to be Map, but received ${jsType(obj.attrs)}`,
+    )
+  }
+  const w = new Writer()
+  w.string(1, String(obj.className)) // Instance.class_name
+  for (const member of obj.members) w.string(2, String(member)) // Instance.members
+  w.lengthDelimited(3, encodeDict([...obj.attrs])) // Instance.attrs
   return w.finish()
 }
 
@@ -322,6 +344,8 @@ export function decodeMontyObject(bytes: Uint8Array): unknown {
       return decodeFileHandle(f.bytes)
     case Tag.Dataclass:
       return decodeDataclass(f.bytes)
+    case Tag.Instance:
+      return decodeInstance(f.bytes)
     case Tag.Type:
       return { [TYPE_MARKER]: 'Type', value: decodeString(f.bytes) }
     case Tag.BuiltinFunction:
@@ -360,6 +384,22 @@ function decodeNamedTupleValues(bytes: Uint8Array): unknown[] {
     if (f.field === 3) values.push(decodeMontyObject(f.bytes)) // NamedTuple.values
   }
   return values
+}
+
+function decodeInstance(bytes: Uint8Array): MarkedValue {
+  const members: string[] = []
+  const attrs = new Map<unknown, unknown>()
+  let className = ''
+  const reader = new Reader(bytes)
+  while (!reader.done) {
+    const f = reader.next()
+    if (f.field === 1)
+      className = decodeString(f.bytes) // Instance.class_name
+    else if (f.field === 2)
+      members.push(decodeString(f.bytes)) // Instance.members
+    else if (f.field === 3) for (const [key, value] of decodeDict(f.bytes)) attrs.set(key, value) // Instance.attrs
+  }
+  return { [TYPE_MARKER]: 'Instance', className, members, attrs }
 }
 
 function decodeDataclass(bytes: Uint8Array): MarkedValue {

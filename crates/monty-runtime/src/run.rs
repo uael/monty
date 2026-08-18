@@ -389,9 +389,9 @@ fn execute_repl_snippet(repl: &mut Option<MontyRepl>, snippet: &str, mount_table
         // No mounts — use the simple feed_run path (takes &mut self).
         let mut r = r;
         match r.feed_run(snippet, vec![], PrintWriter::Stdout) {
-            Ok(output) => {
-                if output != MontyObject::None {
-                    println!("{output}");
+            Ok(outcome) => {
+                if outcome.value != MontyObject::None {
+                    println!("{}", outcome.value);
                 }
             }
             Err(err) => {
@@ -419,7 +419,7 @@ fn execute_repl_with_mounts(
 
     loop {
         match progress {
-            ReplProgress::Complete { repl, value } => return Ok((repl, value)),
+            ReplProgress::Complete { repl, outcome } => return Ok((repl, outcome.value)),
             ReplProgress::OsCall(call) => {
                 match call.resume_with(PrintWriter::Stdout, |fc| handle_os_call(fc, mount_table)) {
                     Ok(p) => progress = p,

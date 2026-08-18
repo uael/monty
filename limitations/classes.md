@@ -239,24 +239,30 @@ order and error wording, but with these divergences:
 
 ## Crossing the host boundary (`pydantic_monty` / `@pydantic/monty`)
 
-TODO: change dataclasses to `class` and use that.
-
-A user-defined **class object or instance has no faithful host representation**.
-When one is returned to a host caller as a run's result value, it is converted
-to its `repr()` **string**, not a proxy or a value that preserves attributes:
+An **instance** of a user-defined class crosses as a `MontyInstance`
+(`{ __monty_type__: 'Instance', ... }` in JS), carrying the class name, the
+class's member names, and the instance's attributes:
 
 ```python
-result = session.feed_run('class A:\n    x = 1\nA()')
-# result is the str '<A object at 0x..>', NOT an object with `.x`
+point = session.feed_run('class A:\n    def __init__(self):\n        self.x = 1\nA()')
+point.class_name  # 'A'
+point.attrs['x']  # 1
 ```
 
-`A` (the class) and `A()` (an instance) both surface as their repr text (e.g.
-`"<class 'A'>"` and `"<A object at 0x..>"`), so the host cannot read
-attributes, call methods, or reconstruct the object. Monty does round-trip
-other values structurally: numbers, str/bytes, list/tuple/dict/set,
-datetimes, and host-supplied dataclasses/namedtuples, which dispatch back to
-the host. To return class data to the host, convert it inside the sandbox
-first, e.g. return a `dict` of the fields.
+Passing it back into a session rebuilds it against *that session's* own class
+of the same name and members, so an instance moves from one session to another
+(typically one woken from the other's `dump()`) and stays usable there:
+attribute access, `isinstance`, and method calls all work against the receiving
+session's class object. A session that defines no class of that shape rejects
+the instance rather than inventing one to hold it. Only classes bound in the
+module namespace are matched; one defined inside a function is not part of the
+session's vocabulary. What crosses is state, not behaviour: the methods are the
+receiving session's, so two classes that share a name and member list but not
+their method bodies are treated as the same class.
+
+The **class object itself** has no host representation and surfaces as its repr
+text (`"<class 'A'>"`), since a class is bound to the heap it was defined on. A
+host that wants to construct instances asks the sandbox to.
 
 ## What does NOT exist for user code
 

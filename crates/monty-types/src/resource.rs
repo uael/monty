@@ -56,6 +56,8 @@ pub enum ResourceError {
     Recursion { limit: usize, depth: usize },
     /// Maximum executed instructions exceeded.
     Steps { limit: u64, executed: u64 },
+    /// One call's own step budget exceeded.
+    CallSteps { limit: u64, executed: u64 },
 }
 
 impl fmt::Display for ResourceError {
@@ -72,6 +74,9 @@ impl fmt::Display for ResourceError {
             }
             Self::Steps { limit, executed } => {
                 write!(f, "step limit exceeded: {executed} instructions > {limit}")
+            }
+            Self::CallSteps { limit, executed } => {
+                write!(f, "call step limit exceeded: {executed} instructions > {limit}")
             }
         }
     }
@@ -213,6 +218,29 @@ pub struct ResourceTracker {
     /// bytes between identical runs.
     #[serde(default)]
     executed_steps: Cell<u64>,
+    /// The step budget of the call currently running, and the step count it
+    /// started from.
+    ///
+    /// A session's `max_steps` bounds everything it will ever run; this bounds
+    /// one call, so a host that budgets each chunk of source separately does
+    /// not have to compute a running total. Held as a base rather than a
+    /// countdown so the overrun message names the same numbers every time the
+    /// same source runs under the same budget, whatever the session spent
+    /// before it. Serialized because a call can be dumped mid-suspension and
+    /// resumed under the budget it was given.
+    #[serde(default)]
+    call_steps: Cell<Option<CallSteps>>,
+}
+
+/// One call's step budget: what it may spend, and the session-wide count it
+/// began at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CallSteps {
+    /// Instructions this call may execute, at dispatch-checkpoint granularity.
+    pub limit: u64,
+    /// `executed_steps` when the call started; everything above it is the
+    /// call's own spend.
+    pub base: u64,
 }
 
 impl Default for ResourceTracker {
@@ -237,6 +265,7 @@ impl ResourceTracker {
             running_since: Cell::new(None),
             recursion_limit_override: Cell::new(None),
             executed_steps: Cell::new(0),
+            call_steps: Cell::new(None),
         }
     }
 
@@ -261,6 +290,34 @@ impl ResourceTracker {
         self.limits.max_steps
     }
 
+    /// Arms (or, with `None`, disarms) a budget for the call about to run,
+    /// measured from the steps executed so far.
+    ///
+    /// A host calls this before each execution it wants separately bounded; the
+    /// session's own `max_steps` keeps applying underneath, so the tighter of
+    /// the two is what trips.
+    pub fn begin_call_steps(&self, limit: Option<u64>) {
+        self.call_steps.set(limit.map(|limit| CallSteps {
+            limit,
+            base: self.executed_steps.get(),
+        }));
+    }
+
+    /// The budget armed for the running call, if any.
+    #[must_use]
+    pub fn call_steps(&self) -> Option<CallSteps> {
+        self.call_steps.get()
+    }
+
+    /// Instructions the running call has executed, at checkpoint granularity.
+    /// Zero when no call budget is armed, since nothing then marks a start.
+    #[must_use]
+    pub fn call_executed_steps(&self) -> u64 {
+        self.call_steps
+            .get()
+            .map_or(0, |call| self.executed_steps.get().saturating_sub(call.base))
+    }
+
     /// Called at the dispatch checkpoint to enforce `max_steps`. Executed steps
     /// are monotonic, so once the budget is exceeded every later call fails too.
     #[inline]
@@ -269,6 +326,15 @@ impl ResourceTracker {
             let executed = self.executed_steps.get();
             if executed > limit {
                 return Err(ResourceError::Steps { limit, executed });
+            }
+        }
+        if let Some(call) = self.call_steps.get() {
+            let executed = self.executed_steps.get().saturating_sub(call.base);
+            if executed > call.limit {
+                return Err(ResourceError::CallSteps {
+                    limit: call.limit,
+                    executed,
+                });
             }
         }
         Ok(())
@@ -306,10 +372,14 @@ impl ResourceTracker {
         self.limits.max_memory
     }
 
-    /// Returns whether the VM has a memory, time or step limit configured.
+    /// Returns whether the VM has a memory, time or step limit in force,
+    /// including a budget armed for the call about to run.
     #[must_use]
     pub fn has_memory_time_limit(&self) -> bool {
-        self.limits.max_memory.is_some() || self.limits.max_duration.is_some() || self.limits.max_steps.is_some()
+        self.limits.max_memory.is_some()
+            || self.limits.max_duration.is_some()
+            || self.limits.max_steps.is_some()
+            || self.call_steps.get().is_some()
     }
 
     /// Sets the maximum execution duration as a fresh budget from now,

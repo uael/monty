@@ -76,6 +76,7 @@ fn feed(child: &mut Child, code: &str) -> (Vec<pb::Print>, pb::child_event::Kind
         code: code.to_owned(),
         inputs: vec![],
         skip_type_check: false,
+        max_steps: None,
     }));
     let (bytes, outcome) = dispatch_frame(child, &request);
     assert_eq!(outcome, HandleOutcome::Continue);
@@ -137,6 +138,7 @@ fn inputs_are_injected() {
             value: Some(WireObject::new(MontyObject::Int(41))),
         }],
         skip_type_check: false,
+        max_steps: None,
     }));
     let (bytes, outcome) = dispatch_frame(&mut child, &request);
     assert_eq!(outcome, HandleOutcome::Continue);
@@ -234,4 +236,71 @@ fn load_rejects_dump_with_over_deep_suspension_args() {
     // the rejected load adopted nothing: the child is still fresh and usable
     let (_, event) = feed(&mut child, "1 + 1");
     assert_eq!(expect_complete(event), MontyObject::Int(2));
+}
+
+/// `Parse` needs no session: it reads source, and nothing about the answer
+/// depends on interpreter state. A worker that has only just started must serve
+/// it, so a host can classify input before deciding to configure anything.
+#[test]
+fn parse_is_answered_without_a_session() {
+    let mut child = Child::default();
+    let request = frame_request(pb::parent_request::Kind::Parse(pb::Parse {
+        code: "total = 1\nvalues = [2,".to_owned(),
+        script_name: "rung.py".to_owned(),
+        stores: vec!["total".to_owned(), "missing".to_owned()],
+    }));
+    let (bytes, outcome) = dispatch_frame(&mut child, &request);
+    assert_eq!(outcome, HandleOutcome::Continue);
+    let (_, event) = split_turn(&bytes);
+    let pb::child_event::Kind::ParseFacts(facts) = event else {
+        panic!("expected ParseFacts, got {event:?}");
+    };
+    // unfinished input asks for more rather than reporting an error
+    assert!(!facts.complete);
+    assert!(facts.error.is_none());
+    assert!(!facts.binds_global);
+    // an unparsable snippet is held to no bindings
+    assert!(facts.stores.is_empty());
+}
+
+/// A probe evaluates one expression against the session and answers with its
+/// value, leaving the session ready for the next feed.
+#[test]
+fn probe_evaluates_against_the_session() {
+    let mut child = Child::default();
+    create_repl(&mut child);
+    feed(&mut child, "scale = 6");
+
+    let request = frame_request(pb::parent_request::Kind::Probe(pb::Probe {
+        expr: "scale * 7".to_owned(),
+        max_steps: None,
+    }));
+    let (bytes, outcome) = dispatch_frame(&mut child, &request);
+    assert_eq!(outcome, HandleOutcome::Continue);
+    let (_, event) = split_turn(&bytes);
+    assert_eq!(expect_complete(event), MontyObject::Int(42));
+
+    // the probe bound nothing and the session kept feeding
+    let (_, event) = feed(&mut child, "scale");
+    assert_eq!(expect_complete(event), MontyObject::Int(6));
+}
+
+/// A written module-level `return` reaches the parent as its own outcome, so a
+/// host can tell it apart from a body that merely ran out of statements.
+#[test]
+fn a_written_return_is_reported_on_the_wire() {
+    let mut child = Child::default();
+    create_repl(&mut child);
+
+    let (_, event) = feed(&mut child, "value = 1\nreturn value + 41");
+    let pb::child_event::Kind::Complete(complete) = event else {
+        panic!("expected Complete, got {event:?}");
+    };
+    assert!(complete.returned);
+
+    let (_, event) = feed(&mut child, "value + 1");
+    let pb::child_event::Kind::Complete(complete) = event else {
+        panic!("expected Complete, got {event:?}");
+    };
+    assert!(!complete.returned);
 }

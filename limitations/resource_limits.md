@@ -200,6 +200,24 @@ same instruction on every run and every machine.
   identical runs.
 - There is no in-sandbox way to observe the budget or the steps remaining.
 
+### A budget for one call
+
+`feed_run` / `feed_start` / `probe` take a `max_steps` of their own, counted
+from zero at the start of that call rather than for the life of the session. A
+host that budgets each chunk of source separately (from a record it replays, say)
+uses this instead of tracking a running total; the session's own `max_steps`
+keeps applying underneath, and whichever is tighter trips first.
+
+- Exceeding it raises `RuntimeError: call step limit exceeded: <executed>
+  instructions > <limit>`, named apart from the session budget's message so a
+  host can tell which ceiling stopped the call. Uncatchable in the sandbox, as
+  the session budget is.
+- The executed count is the call's own, so feeding the same source under the
+  same budget always fails with the same message, whatever the session spent
+  before it.
+- A call budget travels with a suspended call: a feed dumped mid-suspension and
+  restored elsewhere resumes under the budget it was given.
+
 ## JSON
 
 - `json.loads` rejects input nested deeper than 200 levels with

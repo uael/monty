@@ -1,14 +1,16 @@
 use std::{borrow::Cow, fmt, mem};
 
-use monty_types::{MontyException, StackFrame};
+use ahash::AHashSet;
+use monty_types::{MontyException, ParseFacts, StackFrame};
 use num_bigint::BigInt;
 use num_traits::Num;
 use ruff_python_ast::{
     self as ast, BoolOp, CmpOp, ConversionFlag as RuffConversionFlag, ElifElseClause, Expr as AstExpr,
     InterpolatedStringElement, Keyword, Number, Operator as AstOperator, ParameterWithDefault, Stmt, UnaryOp,
     name::Name,
+    statement_visitor::{StatementVisitor, walk_stmt as walk_stmt_bodies},
     token::TokenKind,
-    visitor::{Visitor, walk_expr},
+    visitor::{Visitor, walk_except_handler, walk_expr, walk_stmt},
 };
 use ruff_python_parser::parse_module;
 use ruff_text_size::{Ranged, TextRange, TextSize};
@@ -22,6 +24,7 @@ use crate::{
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
     intern::{InternerBuilder, StaticStrings, StringId},
+    repl::{ReplContinuationMode, continuation_mode_of},
     source_map::{SourceMap, StackFrameExt},
     stringize::stringize_annotation,
     tstring::{ParsedTemplate, TemplateInterpolation},
@@ -2817,5 +2820,196 @@ fn generator_expression_body(clauses: &mut impl Iterator<Item = Comprehension>, 
         body,
         or_else: Vec::new(),
         is_async: false,
+    }
+}
+
+/// Reads `code` without running any of it, answering [`ParseFacts`].
+///
+/// `filename` names the source in a syntax error's traceback. `stores` are the
+/// names the caller wants a module-level binding reported for; an empty slice
+/// asks about none.
+#[must_use]
+pub fn parse_facts(code: &str, filename: &str, stores: &[String]) -> ParseFacts {
+    match parse_module(code) {
+        Err(error) => {
+            let complete = matches!(continuation_mode_of(code, &error), ReplContinuationMode::Complete);
+            // The interner exists only to place the error: `into_python_exc`
+            // takes the filename as text, so nothing else reads this id.
+            let mut interner = InternerBuilder::new(code);
+            let filename_id = interner.intern(filename);
+            ParseFacts {
+                complete,
+                error: complete.then(|| {
+                    ParseError::syntax(error.error.to_string(), code_range(filename_id, error.range()))
+                        .into_python_exc(filename, code)
+                }),
+                binds_global: false,
+                stores: Vec::new(),
+            }
+        }
+        Ok(parsed) => {
+            let module = parsed.into_syntax();
+            let body = &module.body;
+            let mut bindings = ModuleBindings::default();
+            bindings.visit_body(body);
+            ParseFacts {
+                complete: true,
+                error: None,
+                binds_global: has_global(body),
+                stores: stores
+                    .iter()
+                    .filter(|name| bindings.names.contains(name.as_str()))
+                    .cloned()
+                    .collect(),
+            }
+        }
+    }
+}
+
+/// Rejects source a probe must not evaluate: anything that is not one
+/// expression, and any expression that could bind a name.
+///
+/// A probe runs against a live session's namespace, so a statement or a `:=`
+/// would leave the session changed by the act of looking at it. The refusal is
+/// a `SyntaxError`, which is what CPython raises for a statement compiled in
+/// `eval` mode.
+pub(crate) fn check_probe_expression(code: &str, filename: &str) -> Result<(), MontyException> {
+    let mut interner = InternerBuilder::new(code);
+    let filename_id = interner.intern(filename);
+    let refuse = |msg: &'static str, range: TextRange| {
+        Err(ParseError::syntax(msg, code_range(filename_id, range)).into_python_exc(filename, code))
+    };
+    let module = match parse_module(code) {
+        Ok(parsed) => parsed.into_syntax(),
+        Err(error) => {
+            return Err(
+                ParseError::syntax(error.error.to_string(), code_range(filename_id, error.range()))
+                    .into_python_exc(filename, code),
+            );
+        }
+    };
+    let whole = TextRange::new(
+        TextSize::new(0),
+        TextSize::try_from(code.len()).unwrap_or(TextSize::new(0)),
+    );
+    let [Stmt::Expr(only)] = module.body.as_slice() else {
+        return refuse("a probe evaluates one expression, not a statement", whole);
+    };
+    let mut bindings = ModuleBindings::default();
+    bindings.visit_expr(&only.value);
+    if bindings.names.is_empty() {
+        Ok(())
+    } else {
+        refuse("a probe evaluates an expression that binds nothing", only.range())
+    }
+}
+
+/// Whether any scope in `body` declares a `global` binding.
+///
+/// [`StatementVisitor`] descends through every statement body, nested functions
+/// and classes included, which is what "anywhere" means here: a `global` inside
+/// a function is exactly the declaration that reaches out of its scope.
+fn has_global(body: &[Stmt]) -> bool {
+    #[derive(Default)]
+    struct GlobalFinder(bool);
+
+    impl<'a> StatementVisitor<'a> for GlobalFinder {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            self.0 |= matches!(stmt, Stmt::Global(_));
+            walk_stmt_bodies(self, stmt);
+        }
+    }
+
+    let mut finder = GlobalFinder::default();
+    finder.visit_body(body);
+    finder.0
+}
+
+/// Collects the names module-level code binds.
+///
+/// Every assignment form reaches the visitor as a `Store`-context `Name`, so
+/// one expression arm covers targets, `for` targets, `with ... as`, walrus and
+/// augmented assignment. The forms that bind through a bare identifier instead
+/// (`def`, `class`, `import`, `except ... as`) are taken statement-side.
+///
+/// Descent stops at the body of a `def`, `class` or `lambda`, which binds into
+/// its own scope; their decorators, defaults, annotations and bases are still
+/// module-scope expressions and are visited.
+#[derive(Default)]
+struct ModuleBindings<'a> {
+    names: AHashSet<&'a str>,
+}
+
+impl<'a> Visitor<'a> for ModuleBindings<'a> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::FunctionDef(function) => {
+                self.names.insert(function.name.as_str());
+                for decorator in &function.decorator_list {
+                    self.visit_expr(&decorator.expression);
+                }
+                for param in &*function.parameters {
+                    for expr in param.default().into_iter().chain(param.annotation()) {
+                        self.visit_expr(expr);
+                    }
+                }
+                if let Some(returns) = &function.returns {
+                    self.visit_expr(returns);
+                }
+            }
+            Stmt::ClassDef(class) => {
+                self.names.insert(class.name.as_str());
+                for decorator in &class.decorator_list {
+                    self.visit_expr(&decorator.expression);
+                }
+                if let Some(arguments) = &class.arguments {
+                    self.visit_arguments(arguments);
+                }
+            }
+            Stmt::Import(import) => {
+                for alias in &import.names {
+                    // `import a.b` binds `a`; `import a.b as c` binds `c`.
+                    self.names.insert(alias.asname.as_ref().map_or_else(
+                        || alias.name.as_str().split('.').next().unwrap_or_default(),
+                        |asname| asname.as_str(),
+                    ));
+                }
+            }
+            Stmt::ImportFrom(import) => {
+                for alias in &import.names {
+                    self.names.insert(alias.asname.as_ref().unwrap_or(&alias.name).as_str());
+                }
+            }
+            _ => walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_except_handler(&mut self, handler: &'a ast::ExceptHandler) {
+        let ast::ExceptHandler::ExceptHandler(caught) = handler;
+        if let Some(name) = &caught.name {
+            self.names.insert(name.as_str());
+        }
+        walk_except_handler(self, handler);
+    }
+
+    fn visit_expr(&mut self, expr: &'a AstExpr) {
+        match expr {
+            AstExpr::Name(name) if name.ctx.is_store() => {
+                self.names.insert(name.id.as_str());
+            }
+            AstExpr::Lambda(lambda) => {
+                if let Some(parameters) = &lambda.parameters {
+                    for param in &**parameters {
+                        for expr in param.default().into_iter().chain(param.annotation()) {
+                            self.visit_expr(expr);
+                        }
+                    }
+                }
+                // the body binds into the lambda's own scope
+                return;
+            }
+            _ => {}
+        }
+        walk_expr(self, expr);
     }
 }

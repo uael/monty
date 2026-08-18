@@ -163,6 +163,27 @@ pub enum MontyObject {
     ///
     /// This is output-only and cannot be used as an input to the interpreter.
     Cycle(usize, String),
+    /// An instance of a class the sandbox itself defined.
+    ///
+    /// Two sessions share no pointers, so an instance crossing between them is
+    /// matched to a class by shape: the receiving session looks for a class of
+    /// this name, defined in its own namespace, whose members are exactly
+    /// `members`. Sourcing that from the session rather than from a host-side
+    /// registry is what lets a class defined by sandboxed code be usable in
+    /// another session at all.
+    ///
+    /// Rejected as an input by a session with no such class, since there would
+    /// be nothing for the instance to be an instance *of*.
+    Instance {
+        /// The class name, as the defining source spelled it.
+        class: String,
+        /// The class's member names (methods and class variables), sorted:
+        /// the signature the receiving session matches its own classes
+        /// against.
+        members: Vec<String>,
+        /// Instance attributes (`__dict__`), in insertion order.
+        attrs: DictPairs,
+    },
 }
 
 impl fmt::Display for MontyObject {
@@ -223,6 +244,7 @@ impl MontyObject {
                 type_name, field_names, ..
             } => type_name.len() + names_len(field_names),
             Self::Dataclass { name, field_names, .. } => name.len() + names_len(field_names),
+            Self::Instance { class, members, .. } => class.len() + names_len(members),
             // A `Type::Instance` carries the resolved class name as an owned leaf
             // `String` (the other `MontyType`s are payload-free), so charge it here
             // like the `String`/`Function`/... names above.
@@ -454,6 +476,23 @@ impl MontyObject {
             Self::Function { name, .. } => write!(f, "<function '{name}' external>"),
             Self::Repr(s) => write!(f, "Repr({})", StringRepr(s)),
             Self::Cycle(_, placeholder) => f.write_str(placeholder),
+            // Monty's own repr for an instance quotes a heap address, which a
+            // host copy has no counterpart for; name the attributes instead.
+            Self::Instance { class, attrs, .. } => {
+                write!(f, "{class}(")?;
+                for (i, (key, value)) in attrs.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    match key {
+                        Self::String(name) => f.write_str(name)?,
+                        other => other.repr_fmt(f)?,
+                    }
+                    f.write_char('=')?;
+                    value.repr_fmt(f)?;
+                }
+                f.write_char(')')
+            }
         }
     }
 
@@ -491,6 +530,9 @@ impl MontyObject {
             Self::Path(_) => true,           // Path instances are always truthy
             Self::FileHandle { .. } => true, // File objects are always truthy
             Self::Dataclass { .. } => true,  // Dataclass instances are always truthy
+            // No `__bool__`/`__len__` crosses the boundary, so the host copy of
+            // an instance takes the default every Python object without them has
+            Self::Instance { .. } => true,
             Self::Type(_) | Self::BuiltinFunction(_) | Self::Function { .. } | Self::Repr(_) | Self::Cycle(_, _) => {
                 true
             }
@@ -525,6 +567,8 @@ impl MontyObject {
             Self::Path(_) => "PosixPath",
             Self::FileHandle(handle) => handle.mode.type_name(),
             Self::Dataclass { .. } => "dataclass",
+            // the real name is the class's own, which is not `'static`
+            Self::Instance { .. } => "instance",
             Self::Type(_) => "type",
             Self::BuiltinFunction(_) => "builtin_function_or_method",
             Self::Function { .. } => "function",
@@ -673,6 +717,18 @@ impl PartialEq for MontyObject {
                     docstring: b_doc,
                 },
             ) => a_name == b_name && a_doc == b_doc,
+            (
+                Self::Instance {
+                    class: a_class,
+                    members: a_members,
+                    attrs: a_attrs,
+                },
+                Self::Instance {
+                    class: b_class,
+                    members: b_members,
+                    attrs: b_attrs,
+                },
+            ) => a_class == b_class && a_members == b_members && a_attrs == b_attrs,
             (Self::Repr(a), Self::Repr(b)) => a == b,
             (Self::Cycle(a, _), Self::Cycle(b, _)) => a == b,
             (Self::Type(a), Self::Type(b)) => a == b,

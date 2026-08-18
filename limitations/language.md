@@ -89,6 +89,21 @@ nor module-qualified names (see the class-name note in ./collections.md), so
 it reports the generic form. Every other unpacking form matches CPython
 exactly.
 
+## `return` at module level
+
+CPython rejects a `return` outside a function at compile time
+(`SyntaxError: 'return' outside function`). Monty runs it: the module body
+returns, ending the snippet there with that value, and the host is told a
+`return` is what ended it rather than the body running out of statements
+(`MontyComplete.returned` in the Python bindings, `Complete.returned` on the
+wire). A trailing expression still supplies the snippet's value, but claims no
+`return`.
+
+This exists for hosts that feed a session in chunks and want a chunk to be able
+to close itself: without it, the only way to hand a value out of a module body
+is to rewrite the source's AST and smuggle the value through an exception.
+Nothing else about `return` changes; inside a function it is CPython's.
+
 ## Source nesting depth
 
 - AST nesting is capped at 200 levels (30 in debug builds); exceeding it raises `SyntaxError: Source is too deeply nested`.

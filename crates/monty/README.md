@@ -103,8 +103,8 @@ let bytes = dump("main.py", None, SessionRef::Idle(&repl)).unwrap();
 let Session::Idle(mut restored) = Dump::load(&bytes).unwrap().state else {
     panic!("expected an idle session")
 };
-let result = restored.feed_run("x + 1", vec![], PrintWriter::Stdout).unwrap();
-assert_eq!(result, MontyObject::Int(42));
+let outcome = restored.feed_run("x + 1", vec![], PrintWriter::Stdout).unwrap();
+assert_eq!(outcome.value, MontyObject::Int(42));
 ```
 
 `MontyRun` and `RunProgress` have no dump format of their own, but both implement `serde::Serialize`/`Deserialize`, so a host that wants to cache parsed code or a paused run can serialize them with whatever format it already uses.

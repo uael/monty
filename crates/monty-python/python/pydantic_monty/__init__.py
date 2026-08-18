@@ -25,6 +25,7 @@ from ._monty import (
     MontyDisconnectError,
     MontyError,
     MontyFileHandle,
+    MontyInstance,
     MontyRuntimeError,
     MontySession,
     MontyShutdown,
@@ -32,6 +33,7 @@ from ._monty import (
     MontyTypingError,
     MountDir,
     NameLookupSnapshot,
+    ParseFacts,
     __version__,
 )
 from .os_access import (
@@ -73,12 +75,14 @@ __all__ = (
     'MontyDisconnectError',
     'MontyError',
     'MontyFileHandle',
+    'MontyInstance',
     'MontySession',
     'MontyShutdown',
     'MontySyntaxError',
     'MontyRuntimeError',
     'MontyTypingError',
     'MountDir',
+    'ParseFacts',
     # feed_start snapshots
     'MontyComplete',
     'FunctionSnapshot',

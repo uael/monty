@@ -33,6 +33,7 @@ class RunMonty(Protocol):
         mount: MountDir | list[MountDir] | None = None,
         os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | AbstractOS | None = None,
         skip_type_check: bool = False,
+        max_steps: int | None = None,
         limits: ResourceLimits | None = None,
         dataclass_registry: list[type] | None = None,
     ) -> Any: ...
@@ -69,6 +70,7 @@ def monty_run(pool: Monty) -> RunMonty:
         mount: MountDir | list[MountDir] | None = None,
         os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | AbstractOS | None = None,
         skip_type_check: bool = False,
+        max_steps: int | None = None,
         limits: ResourceLimits | None = None,
         dataclass_registry: list[type] | None = None,
     ) -> Any:
@@ -81,6 +83,7 @@ def monty_run(pool: Monty) -> RunMonty:
                 mount=mount,
                 os=os,
                 skip_type_check=skip_type_check,
+                max_steps=max_steps,
             )
 
     return run

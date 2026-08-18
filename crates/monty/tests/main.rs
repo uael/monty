@@ -260,26 +260,30 @@ fn dynamic_type_with_non_string_key_raises_type_error() {
 }
 
 // === Result-conversion reentrancy tests ===
-// Converting a result to `MontyObject` can run a user `__repr__` on nested
-// instances; a `__repr__` that mutates the containing collection must not
-// panic the conversion (children are snapshotted before recursing).
+// A value with no structural host variant converts through its `repr()`, which
+// for anything holding a sandbox instance runs that instance's `__repr__`; a
+// `__repr__` that mutates the containing collection must not panic the
+// conversion (children are snapshotted before recursing). A template is the
+// carrier here because its repr renders what it interpolated.
+
+/// The `Evil` class whose `__repr__` clears the collection being converted,
+/// held inside a template so converting the collection reaches it.
+fn evil_in(collection: &str) -> String {
+    format!("class Evil:\n    def __repr__(self):\n        {collection}.clear()\n        return 'evil'\n\n")
+}
+
+/// The repr a template holding one `Evil` renders.
+const EVIL_TEMPLATE: &str = "Template(strings=('', ''), interpolations=(Interpolation(evil, 'Evil()', None, ''),))";
 
 #[test]
 fn output_list_mutated_by_nested_repr() {
-    let code = "\
-class Evil:
-    def __repr__(self):
-        lst.clear()
-        return 'evil'
-
-lst = [Evil(), 1, 2]
-lst";
-    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let code = format!("{}lst = [t\"{{Evil()}}\", 1, 2]\nlst", evil_in("lst"));
+    let ex = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
     let result = ex.run_no_limits(vec![]).unwrap();
     assert_eq!(
         result,
         MontyObject::List(vec![
-            MontyObject::Repr("evil".to_owned()),
+            MontyObject::Repr(EVIL_TEMPLATE.to_owned()),
             MontyObject::Int(1),
             MontyObject::Int(2),
         ])
@@ -288,15 +292,8 @@ lst";
 
 #[test]
 fn output_dict_mutated_by_nested_repr() {
-    let code = "\
-class Evil:
-    def __repr__(self):
-        d.clear()
-        return 'evil'
-
-d = {'k': Evil(), 'a': 1}
-d";
-    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let code = format!("{}d = {{'k': t\"{{Evil()}}\", 'a': 1}}\nd", evil_in("d"));
+    let ex = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
     let result = ex.run_no_limits(vec![]).unwrap();
     assert_eq!(
         result,
@@ -304,7 +301,7 @@ d";
             vec![
                 (
                     MontyObject::String("k".to_owned()),
-                    MontyObject::Repr("evil".to_owned())
+                    MontyObject::Repr(EVIL_TEMPLATE.to_owned())
                 ),
                 (MontyObject::String("a".to_owned()), MontyObject::Int(1)),
             ]
@@ -313,24 +310,34 @@ d";
     );
 }
 
+/// An instance converts by its shape, so no `__repr__` runs on the way out and
+/// a collection holding one cannot be mutated by converting it.
+#[test]
+fn output_instance_converts_without_calling_repr() {
+    let code = format!("{}lst = [Evil(), 1]\nlst", evil_in("lst"));
+    let ex = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
+    let MontyObject::List(items) = ex.run_no_limits(vec![]).unwrap() else {
+        panic!("a list converts as a list");
+    };
+    assert_eq!(items.len(), 2, "the list was cleared, so a `__repr__` ran");
+    let MontyObject::Instance { ref class, .. } = items[0] else {
+        panic!("an instance converts as an instance, got {:?}", items[0]);
+    };
+    assert_eq!(class, "Evil");
+}
+
 #[test]
 fn output_deque_mutated_by_nested_repr() {
-    let code = "\
-from collections import deque
-
-class Evil:
-    def __repr__(self):
-        d.clear()
-        return 'evil'
-
-d = deque([Evil(), 1, 2])
-d";
-    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let code = format!(
+        "from collections import deque\n\n{}d = deque([t\"{{Evil()}}\", 1, 2])\nd",
+        evil_in("d")
+    );
+    let ex = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
     let result = ex.run_no_limits(vec![]).unwrap();
     assert_eq!(
         result,
         MontyObject::List(vec![
-            MontyObject::Repr("evil".to_owned()),
+            MontyObject::Repr(EVIL_TEMPLATE.to_owned()),
             MontyObject::Int(1),
             MontyObject::Int(2),
         ])

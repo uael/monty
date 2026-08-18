@@ -14,6 +14,6 @@ mod convert;
 mod dataclass;
 mod exceptions;
 
-pub use convert::{PyMontyFileHandle, monty_to_py, py_to_monty, py_to_monty_value};
+pub use convert::{PyMontyFileHandle, PyMontyInstance, monty_to_py, py_to_monty, py_to_monty_value};
 pub use dataclass::{DcRegistry, PyUnknownDataclass};
 pub use exceptions::{exc_monty_to_py, exc_py_to_monty, exc_to_monty_object};

@@ -197,14 +197,19 @@ impl MontySyntaxError {
     /// Creates a new `MontySyntaxError` with the given message.
     #[must_use]
     pub fn new_err(py: Python<'_>, exc: MontyException) -> PyErr {
-        let base_error = MontyError::new(exc);
-        let init = PyClassInitializer::from(base_error).add_subclass(Self {
-            traceback: PyOnceLock::new(),
-        });
-        match Py::new(py, init) {
-            Ok(err) => PyErr::from_value(err.into_bound(py).into_any()),
+        match Self::new_object(py, exc) {
+            Ok(err) => PyErr::from_value(err.into_bound(py)),
             Err(e) => e,
         }
+    }
+
+    /// Builds the exception object rather than an error to raise, for a syntax
+    /// error a caller is *told about* instead of hit by (`ParseFacts.error`).
+    pub fn new_object(py: Python<'_>, exc: MontyException) -> PyResult<Py<PyAny>> {
+        let init = PyClassInitializer::from(MontyError::new(exc)).add_subclass(Self {
+            traceback: PyOnceLock::new(),
+        });
+        Py::new(py, init).map(Py::into_any)
     }
 }
 

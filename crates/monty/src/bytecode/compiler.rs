@@ -594,7 +594,7 @@ impl<'a> Compiler<'a> {
             compiler.code.register_local_name(slot.as_u16(), name_id);
         }
 
-        compiler.compile_block(nodes)?;
+        compiler.compile_module_block(nodes)?;
 
         // Module returns None if no explicit return
         compiler.code.emit(Opcode::LoadNone)?;
@@ -632,6 +632,28 @@ impl<'a> Compiler<'a> {
         compiler.code.emit(Opcode::ReturnValue)?;
 
         Ok((compiler.code.build(num_locals), compiler.functions))
+    }
+
+    /// Compiles a module body, ending it on the value of a trailing expression.
+    ///
+    /// A module hands back its last expression's value, the way an interactive
+    /// interpreter echoes it. The rule lives here rather than in the prepare
+    /// phase because only here does it stay separable from a written `return`:
+    /// rewritten earlier, the two arrive as the same node and the exit a host
+    /// reads could not name which happened.
+    fn compile_module_block(&mut self, nodes: &'a [PreparedNode]) -> Result<(), CompileError> {
+        let (value, statements) = match nodes.split_last() {
+            Some((Node::Expr(expr), rest)) if !expr.expr.is_none() => (Some(expr), rest),
+            _ => (None, nodes),
+        };
+        self.compile_block(statements)?;
+        if let Some(expr) = value
+            && !self.code.is_dead()
+        {
+            self.compile_expr(expr)?;
+            self.code.emit(Opcode::ReturnValue)?;
+        }
+        Ok(())
     }
 
     /// Compiles statements, retaining `finally` bodies for inline cleanup.
@@ -3837,7 +3859,13 @@ impl<'a> Compiler<'a> {
         }
 
         let popped = self.emit_unwind(self.fblocks.len(), true)?;
-        self.code.emit(Opcode::ReturnValue)?;
+        // A written module-level `return` gets its own opcode so the exit it
+        // produces is distinguishable from the one a trailing expression makes.
+        self.code.emit(if self.is_module_scope {
+            Opcode::ReturnModule
+        } else {
+            Opcode::ReturnValue
+        })?;
         self.restore_fblocks(popped);
         Ok(())
     }

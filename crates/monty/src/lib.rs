@@ -42,6 +42,7 @@ mod value;
 pub use crate::run::RefCountOutput;
 pub use crate::{
     dump_format::{DUMP_VERSION, Dump, DumpError, Session, SessionRef, dump},
+    parse::parse_facts,
     repl::{
         MontyRepl, ReplContinuationMode, ReplFunctionCall, ReplNameLookup, ReplOsCall, ReplProgress,
         ReplResolveFutures, ReplStartError, detect_repl_continuation_mode,

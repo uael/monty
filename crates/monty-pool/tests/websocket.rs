@@ -18,7 +18,7 @@ use monty_pool::{
     Checkout, MountSpec, MountSpecMode, Pool, PoolConfig, PoolError, PrintFuture, ReplConfig, ResumeValue, TurnEvent,
 };
 use monty_proto::{MAX_FRAME_LEN, WireFunctionCall, decode_frame, encode_to_capped_vec, pb};
-use monty_types::{MontyObject, PrintStream, ResourceLimits};
+use monty_types::{FeedOutcome, MontyObject, PrintStream, ResourceLimits};
 use tokio::task::spawn_blocking;
 #[cfg(not(windows))]
 use tokio::time::timeout;
@@ -34,6 +34,7 @@ fn serve_mock_child(listener: &TcpListener) {
         let kind = match request.kind.expect("request kind") {
             pb::parent_request::Kind::Feed(_) => pb::child_event::Kind::Complete(pb::Complete {
                 value: Some(MontyObject::Int(42).into()),
+                returned: false,
             }),
             // Configure / Reset / Shutdown / anything else: acknowledge.
             _ => pb::child_event::Kind::Ok(pb::Ok {}),
@@ -86,11 +87,17 @@ async fn drives_a_session_over_websocket() {
     assert_eq!(checkout.pid(), None);
 
     let event = checkout
-        .feed("1 + 1", vec![], vec![], false, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
         .await
         .expect("feed");
     assert!(
-        matches!(event, TurnEvent::Complete(MontyObject::Int(42))),
+        matches!(
+            event,
+            TurnEvent::Complete(FeedOutcome {
+                value: MontyObject::Int(42),
+                ..
+            })
+        ),
         "got {event:?}"
     );
 
@@ -176,6 +183,7 @@ async fn mounted_reads_are_serviced_from_the_parent_filesystem() {
             &mut socket,
             &event_kind(pb::child_event::Kind::Complete(pb::Complete {
                 value: Some(MontyObject::String("done".to_owned()).into()),
+                returned: false,
             })),
         );
     });
@@ -188,6 +196,7 @@ async fn mounted_reads_are_serviced_from_the_parent_filesystem() {
             vec![],
             vec![MountSpec::new("/mnt", dir.path(), MountSpecMode::ReadOnly).unwrap()],
             false,
+            None,
             &mut no_print,
         )
         .await
@@ -199,7 +208,7 @@ async fn mounted_reads_are_serviced_from_the_parent_filesystem() {
         .expect("mount servicing")
         .expect("the mount covers /mnt/data.txt");
     assert!(
-        matches!(&event, TurnEvent::Complete(MontyObject::String(s)) if s == "done"),
+        matches!(&event, TurnEvent::Complete(FeedOutcome { value: MontyObject::String(s), .. }) if s == "done"),
         "got {event:?}"
     );
     checkout.finish().await.expect("finish");
@@ -248,6 +257,7 @@ async fn malformed_os_call_is_a_protocol_error() {
             vec![],
             vec![MountSpec::new("/mnt", dir.path(), MountSpecMode::ReadOnly).unwrap()],
             false,
+            None,
             &mut no_print,
         )
         .await
@@ -288,7 +298,7 @@ async fn duration_backstop_kills_an_unresponsive_worker() {
         .await
         .expect("checkout");
     let err = checkout
-        .feed("while True:\n    pass", vec![], vec![], false, &mut no_print)
+        .feed("while True:\n    pass", vec![], vec![], false, None, &mut no_print)
         .await
         .unwrap_err();
     let PoolError::Timeout { timeout } = err else {
@@ -331,6 +341,7 @@ async fn duration_backstop_arms_on_the_raw_path() {
             code: "while True:\n    pass".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })),
         ..pb::ParentRequest::default()
     };
@@ -392,6 +403,7 @@ async fn a_raw_load_adopts_the_dumps_duration_budget() {
             code: "while True:\n    pass".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })),
         ..pb::ParentRequest::default()
     };
@@ -424,6 +436,7 @@ async fn lifecycle_requests_are_refused_on_the_raw_path() {
             &mut socket,
             &event_kind(pb::child_event::Kind::Complete(pb::Complete {
                 value: Some(MontyObject::Int(2).into()),
+                returned: false,
             })),
         );
     });
@@ -451,6 +464,7 @@ async fn lifecycle_requests_are_refused_on_the_raw_path() {
             code: "1 + 1".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })),
         ..pb::ParentRequest::default()
     };
@@ -505,6 +519,7 @@ async fn an_oversize_raw_load_keeps_the_duration_budget() {
             code: "while True:\n    pass".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })),
         ..pb::ParentRequest::default()
     };
@@ -547,6 +562,7 @@ async fn a_shutdown_dump_on_the_raw_path_discards_the_worker() {
             code: "1 + 1".to_owned(),
             inputs: vec![],
             skip_type_check: false,
+            max_steps: None,
         })),
         ..pb::ParentRequest::default()
     };
@@ -600,6 +616,7 @@ async fn a_mounted_feed_turn_is_still_bounded_by_the_request_timeout() {
             vec![],
             vec![MountSpec::new("/mnt", dir.path(), MountSpecMode::ReadOnly).unwrap()],
             false,
+            None,
             &mut no_print,
         )
         .await
@@ -651,7 +668,7 @@ async fn restored_session_rearms_the_duration_backstop() {
     assert!(event.is_none());
     assert_eq!(script_name.as_deref(), Some("restored.py"));
     let err = checkout
-        .feed("while True:\n    pass", vec![], vec![], false, &mut no_print)
+        .feed("while True:\n    pass", vec![], vec![], false, None, &mut no_print)
         .await
         .unwrap_err();
     let PoolError::Timeout { timeout } = err else {
@@ -771,6 +788,7 @@ async fn shutdown_hands_back_a_restorable_dump() {
             &mut socket,
             pb::child_event::Kind::Complete(pb::Complete {
                 value: Some(MontyObject::Int(42).into()),
+                returned: false,
             }),
         );
         while try_read_request(&mut socket).is_some() {}
@@ -779,7 +797,7 @@ async fn shutdown_hands_back_a_restorable_dump() {
     let pool = websocket_pool(port).await;
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let err = checkout
-        .feed("1 + 1", vec![], vec![], false, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
         .await
         .expect_err("a draining server must not run the feed");
     let PoolError::Shutdown { dump: Some(dump) } = err else {
@@ -793,11 +811,17 @@ async fn shutdown_hands_back_a_restorable_dump() {
     let (event, _name) = checkout.restore(dump, vec![], &mut no_print).await.expect("restore");
     assert!(event.is_none(), "an idle dump has no suspension to re-announce");
     let event = checkout
-        .feed("1 + 1", vec![], vec![], false, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
         .await
         .expect("feed on the restored session");
     assert!(
-        matches!(event, TurnEvent::Complete(MontyObject::Int(42))),
+        matches!(
+            event,
+            TurnEvent::Complete(FeedOutcome {
+                value: MontyObject::Int(42),
+                ..
+            })
+        ),
         "got {event:?}"
     );
     checkout.finish().await.expect("finish");
@@ -830,7 +854,7 @@ async fn shutdown_during_a_suspension_carries_the_suspended_dump() {
     let pool = websocket_pool(port).await;
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let event = checkout
-        .feed("ext()", vec![], vec![], false, &mut no_print)
+        .feed("ext()", vec![], vec![], false, None, &mut no_print)
         .await
         .expect("feed");
     assert!(
@@ -940,6 +964,7 @@ async fn finishing_a_checkout_sends_a_close_frame() {
             &mut socket,
             pb::child_event::Kind::Complete(pb::Complete {
                 value: Some(MontyObject::Int(42).into()),
+                returned: false,
             }),
         );
         expect_close(&mut socket);
@@ -947,7 +972,7 @@ async fn finishing_a_checkout_sends_a_close_frame() {
 
     let (_pool, mut checkout) = websocket_checkout(port).await;
     checkout
-        .feed("1 + 1", vec![], vec![], false, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
         .await
         .expect("feed");
     checkout.finish().await.expect("finish");
@@ -990,7 +1015,7 @@ async fn a_timed_out_turn_sends_a_close_frame() {
     let pool = Pool::new(config).await.expect("pool");
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let err = checkout
-        .feed("while True:\n    pass", vec![], vec![], false, &mut no_print)
+        .feed("while True:\n    pass", vec![], vec![], false, None, &mut no_print)
         .await
         .expect_err("the turn must time out");
     assert!(matches!(err, PoolError::Timeout { .. }), "got {err:?}");
@@ -1032,7 +1057,7 @@ async fn cancelling_finish_does_not_leak_capacity() {
 
     let wedge = "#".repeat(32 * 1024 * 1024);
     let mut on_print = no_print;
-    let feed = checkout.feed(&wedge, vec![], vec![], false, &mut on_print);
+    let feed = checkout.feed(&wedge, vec![], vec![], false, None, &mut on_print);
     assert!(
         timeout(Duration::from_secs(1), feed).await.is_err(),
         "the unread feed must block, wedging the socket"
@@ -1069,6 +1094,7 @@ async fn a_dropped_connection_is_a_disconnect() {
             &mut socket,
             pb::child_event::Kind::Complete(pb::Complete {
                 value: Some(MontyObject::Int(42).into()),
+                returned: false,
             }),
         );
         // the server drops the session while the client sits idle, then exits
@@ -1077,18 +1103,24 @@ async fn a_dropped_connection_is_a_disconnect() {
 
     let (_pool, mut checkout) = websocket_checkout(port).await;
     let event = checkout
-        .feed("1 + 1", vec![], vec![], false, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
         .await
         .expect("feed");
     assert!(
-        matches!(event, TurnEvent::Complete(MontyObject::Int(42))),
+        matches!(
+            event,
+            TurnEvent::Complete(FeedOutcome {
+                value: MontyObject::Int(42),
+                ..
+            })
+        ),
         "got {event:?}"
     );
     // joining first guarantees the server side is fully torn down before the
     // next feed — the failure mode this test pins
     join_server(server).await;
     let err = checkout
-        .feed("x", vec![], vec![], false, &mut no_print)
+        .feed("x", vec![], vec![], false, None, &mut no_print)
         .await
         .expect_err("a closed connection must fail the turn");
     assert!(matches!(err, PoolError::Disconnected { .. }), "got {err:?}");

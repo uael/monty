@@ -89,18 +89,9 @@ pub(crate) fn prepare_with_existing_names(
     mut globals: NameMap,
 ) -> Result<PrepareResult, ParseError> {
     let ParseResult { nodes, interner } = parse_result;
-    let mut prepared_nodes = Prepare::new_module(&mut globals, &interner).prepare_nodes(nodes)?;
-
-    // In the root frame, the last expression is implicitly returned if it
-    // is not `None`. This matches Python REPL behavior where the last
-    // expression value is displayed / returned.
-    if let Some(Node::Expr(expr_loc)) = prepared_nodes.last()
-        && !expr_loc.expr.is_none()
-    {
-        let new_expr_loc = expr_loc.clone();
-        prepared_nodes.pop();
-        prepared_nodes.push(Node::Return(Some(new_expr_loc)));
-    }
+    // A module's trailing expression becomes its value in the compiler, which
+    // is the only place that can still tell it apart from a written `return`.
+    let prepared_nodes = Prepare::new_module(&mut globals, &interner).prepare_nodes(nodes)?;
 
     Ok(PrepareResult {
         globals,

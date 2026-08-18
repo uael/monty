@@ -18,11 +18,11 @@
 
 use std::{borrow::Cow, mem};
 
-use monty::{Dump, MontyRepl, ReplProgress, ReplStartError, Session, SessionRef, dump};
+use monty::{Dump, MontyRepl, ReplProgress, ReplStartError, Session, SessionRef, dump, parse_facts};
 use monty_type_checking::{SourceFile, TypeChecker};
 use monty_types::{
-    AssertMessageAnnotations, CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, OsFunctionCall,
-    PrintWriter, PrintWriterCallback, ResourceTracker, TypeCheckState, TypeCheckingConfig,
+    AssertMessageAnnotations, CompileOptions, ExcType, ExtFunctionResult, FeedOutcome, MontyException, MontyObject,
+    OsFunctionCall, PrintWriter, PrintWriterCallback, ResourceTracker, TypeCheckState, TypeCheckingConfig,
 };
 
 use super::{
@@ -234,6 +234,8 @@ impl Child {
                 self.handle_configure(configure)
             }
             pb::parent_request::Kind::Feed(feed) => self.handle_repl_feed(feed, sink),
+            pb::parent_request::Kind::Parse(parse) => self.handle_parse(&parse),
+            pb::parent_request::Kind::Probe(probe) => self.handle_probe(&probe, sink),
             // The Monty sandbox has no host interpreter to install packages for;
             // dependency installation is only supported by the CPython worker.
             // Answer with a session-preserving error rather than a hard failure.
@@ -455,6 +457,9 @@ impl Child {
         let SessionState::Ready(repl) = mem::replace(&mut self.state, SessionState::Configured(None)) else {
             unreachable!("checked Ready above");
         };
+        // Armed per feed (and disarmed by a `None`), so a budget never outlives
+        // the request that asked for it.
+        repl.tracker().begin_call_steps(feed.max_steps);
         // snippets fed with skip_type_check never become type-check context:
         // the caller explicitly excluded them from checking, so later snippets
         // must not be checked against their (unchecked) bindings either
@@ -465,6 +470,43 @@ impl Child {
         }
         let mut print = ProtoPrint::new(sink);
         let result = repl.feed_start(&feed.code, inputs, PrintWriter::Callback(&mut print));
+        let event = self.drive(result, &mut print);
+        print.drain();
+        event
+    }
+
+    /// Reads a snippet and answers what is statically true of it, running none
+    /// of it. Needs no session: nothing about the answer depends on one, so a
+    /// parent can classify source on a worker it has not fed yet.
+    fn handle_parse(&self, parse: &pb::Parse) -> pb::ChildEvent {
+        let script_name = if parse.script_name.is_empty() {
+            self.script_name.as_str()
+        } else {
+            parse.script_name.as_str()
+        };
+        let facts = parse_facts(&parse.code, script_name, &parse.stores);
+        event(pb::child_event::Kind::ParseFacts(pb::ParseFacts {
+            complete: facts.complete,
+            error: facts.error.as_ref().map(Into::into),
+            binds_global: facts.binds_global,
+            stores: facts.stores,
+        }))
+    }
+
+    /// Evaluates one expression against the ready session and drives it to the
+    /// turn-ending event, exactly as a feed is driven. Nothing is bound, so the
+    /// snippet never joins the type-check context.
+    fn handle_probe(&mut self, probe: &pb::Probe, sink: &mut dyn EventSink) -> pb::ChildEvent {
+        if let Err(event) = self.ensure_repl() {
+            return *event;
+        }
+        let SessionState::Ready(repl) = mem::replace(&mut self.state, SessionState::Configured(None)) else {
+            // ensure_repl left it un-Ready only when mid-suspension
+            return protocol_violation("Probe without a session ready for input");
+        };
+        repl.tracker().begin_call_steps(probe.max_steps);
+        let mut print = ProtoPrint::new(sink);
+        let result = repl.probe_start(&probe.expr, PrintWriter::Callback(&mut print));
         let event = self.drive(result, &mut print);
         print.drain();
         event
@@ -632,12 +674,12 @@ impl Child {
             Session::Suspended(progress) => match *progress {
                 // a dump is never taken at Complete, but a forged one could
                 // contain it; surface the value rather than fail
-                ReplProgress::Complete { repl, value } => {
-                    if exceeds_max_value_depth(&value) {
+                ReplProgress::Complete { repl, outcome } => {
+                    if exceeds_max_value_depth(&outcome.value) {
                         protocol_violation("dump value exceeds the maximum wire depth")
                     } else {
                         self.state = SessionState::Ready(Box::new(repl));
-                        complete_event(value)
+                        complete_event(outcome)
                     }
                 }
                 progress => {
@@ -677,7 +719,7 @@ impl Child {
     ) -> pb::ChildEvent {
         loop {
             match result {
-                Ok(ReplProgress::Complete { repl, value }) => {
+                Ok(ReplProgress::Complete { repl, outcome }) => {
                     self.state = SessionState::Ready(Box::new(repl));
                     if let Some(state) = &mut self.type_check
                         && let Some(snippet) = state.pending_snippet.take()
@@ -688,10 +730,10 @@ impl Child {
                     // a value too deep for the wire must fail cleanly here —
                     // shipping it would be an undecodable frame, which the
                     // parent has to treat as a worker crash
-                    if exceeds_max_value_depth(&value) {
+                    if exceeds_max_value_depth(&outcome.value) {
                         return error_event(ExcType::RuntimeError, "Max output depth exceeded");
                     }
-                    return complete_event(value);
+                    return complete_event(outcome);
                 }
                 Ok(ReplProgress::OsCall(call)) => {
                     if os_call_args_too_deep(&call) {
@@ -878,9 +920,10 @@ fn suspension_event_os_call(call: &monty::ReplOsCall) -> pb::ChildEvent {
     }))
 }
 
-fn complete_event(value: MontyObject) -> pb::ChildEvent {
+fn complete_event(outcome: FeedOutcome) -> pb::ChildEvent {
     event(pb::child_event::Kind::Complete(pb::Complete {
-        value: Some(value.into()),
+        value: Some(outcome.value.into()),
+        returned: outcome.returned,
     }))
 }
 

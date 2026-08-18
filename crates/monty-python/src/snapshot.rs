@@ -139,6 +139,9 @@ pub(crate) fn feed_start_sync(
         inputs,
         mounts,
         skip_type_check,
+        max_steps,
+        // a probe is driven to a value, never to a snapshot
+        probe: _,
         os,
         print_target,
         checkout,
@@ -148,7 +151,9 @@ pub(crate) fn feed_start_sync(
     drive_sync(
         py,
         ctx,
-        turn_fn(move |c, p| Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, p).await })),
+        turn_fn(move |c, p| {
+            Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await })
+        }),
     )
 }
 
@@ -166,6 +171,9 @@ pub(crate) fn feed_start_async(
         inputs,
         mounts,
         skip_type_check,
+        max_steps,
+        // a probe is driven to a value, never to a snapshot
+        probe: _,
         os,
         print_target,
         checkout,
@@ -175,7 +183,9 @@ pub(crate) fn feed_start_async(
     future_into_py(py, async move {
         drive_async(
             ctx,
-            turn_fn(move |c, p| Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, p).await })),
+            turn_fn(move |c, p| {
+                Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await })
+            }),
         )
         .await
     })
@@ -230,10 +240,11 @@ pub(crate) fn build_snapshot(
     is_async: bool,
 ) -> PyResult<Py<PyAny>> {
     match event {
-        TurnEvent::Complete(value) => Py::new(
+        TurnEvent::Complete(outcome) => Py::new(
             py,
             MontyComplete {
-                value,
+                value: outcome.value,
+                returned: outcome.returned,
                 dc_registry: ctx.dc_registry,
             },
         )
@@ -1051,6 +1062,7 @@ impl PyAsyncFutureSnapshot {
 #[pyclass(name = "MontyComplete", module = "pydantic_monty", frozen)]
 pub struct MontyComplete {
     value: MontyObject,
+    returned: bool,
     dc_registry: DcRegistry,
 }
 
@@ -1061,8 +1073,19 @@ impl MontyComplete {
         monty_to_py(py, &self.value, &self.dc_registry)
     }
 
+    /// Whether a module-level `return` ended the snippet, as opposed to the
+    /// body running out of statements.
+    #[getter]
+    fn returned(&self) -> bool {
+        self.returned
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let output = self.output(py)?;
-        Ok(format!("MontyComplete(output={})", output.bind(py).repr()?))
+        Ok(format!(
+            "MontyComplete(output={}, returned={})",
+            output.bind(py).repr()?,
+            if self.returned { "True" } else { "False" }
+        ))
     }
 }

@@ -291,6 +291,7 @@ const MARKED_TYPE_NAMES: Readonly<Record<string, string>> = {
   Type: 'repr',
   BuiltinFunction: 'repr',
   Dataclass: 'dataclass',
+  Instance: 'instance',
 }
 
 /** Python type name the JS value converts to (mirrors the Rust `js_to_monty`). */

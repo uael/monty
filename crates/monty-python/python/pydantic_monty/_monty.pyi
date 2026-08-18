@@ -31,12 +31,14 @@ __all__ = [
     'MontyDisconnectError',
     'MontyError',
     'MontyFileHandle',
+    'MontyInstance',
     'MontySession',
     'MontyShutdown',
     'MontySyntaxError',
     'MontyRuntimeError',
     'MontyTypingError',
     'MountDir',
+    'ParseFacts',
     'MontyComplete',
     'FunctionSnapshot',
     'NameLookupSnapshot',
@@ -296,6 +298,48 @@ class Frame:
         """dict of attributes."""
 
 @final
+class MontyInstance:
+    """An instance of a class the sandbox itself defined.
+
+    The class lives on the session's heap and means nothing outside it, so the
+    host is handed the shape instead: the class name, the class's member names,
+    and the instance's attributes. Passing this object back into a session
+    rebuilds the instance against that session's own class of the same shape,
+    which is how an instance moves from one session to another.
+
+    A data holder, deliberately: what crosses is the instance's shape, not a
+    live object, so its attributes are read through `attrs`. A session with no
+    class of that shape rejects the instance as an input.
+    """
+
+    def __new__(cls, class_name: str, members: list[str], attrs: dict[str, Any]) -> MontyInstance:
+        """Construct a `MontyInstance`, for a host building one rather than
+        round-tripping one it received.
+
+        Arguments:
+            class_name: The class name, as the defining sandbox source spelled it.
+            members: The class's member names (methods and class variables),
+                sorted. These must name exactly the members of the class the
+                receiving session defines, which is why a host normally passes
+                back the object it was given instead of assembling one.
+            attrs: The instance attributes (`__dict__`).
+        """
+
+    @property
+    def class_name(self) -> str:
+        """The class name, as the defining sandbox source spelled it."""
+
+    @property
+    def members(self) -> list[str]:
+        """The class's member names (methods and class variables), sorted."""
+
+    @property
+    def attrs(self) -> dict[str, Any]:
+        """The instance attributes (`__dict__`), in insertion order."""
+
+    def __repr__(self) -> str: ...
+
+@final
 class MontyFileHandle:
     """Host-side handle to a file opened inside a Monty sandbox.
 
@@ -530,6 +574,7 @@ class MontySession:
         mount: MountDir | list[MountDir] | None = None,
         os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | AbstractOS | None = None,
         skip_type_check: bool = False,
+        max_steps: int | None = None,
     ) -> Any:
         """
         Execute one snippet in the worker and return its result.
@@ -563,6 +608,12 @@ class MontySession:
                 or an `AbstractOS` instance.
             skip_type_check: Skip type checking for this feed even when the
                 session was checked out with `type_check=True`.
+            max_steps: Bytecode instructions this feed alone may execute, at
+                the interpreter's dispatch checkpoint. Counted from zero for
+                this feed, on top of any `ResourceLimits.max_steps` the session
+                was checked out with; whichever is tighter trips first.
+                Exceeding it raises `MontyRuntimeError` with the same message
+                every time, since the count is deterministic.
 
         Raises:
             MontyRuntimeError: The code raised an exception (session survives).
@@ -581,6 +632,7 @@ class MontySession:
         mount: MountDir | list[MountDir] | None = None,
         os: OsHandler | None = None,
         skip_type_check: bool = False,
+        max_steps: int | None = None,
     ) -> SyncSnapshot:
         """
         Start a snippet and return a snapshot at each external call, OS call,
@@ -627,6 +679,63 @@ class MontySession:
                 OS calls as snapshots.
             skip_type_check: Skip type checking for this feed even when the
                 session was checked out with `type_check=True`.
+            max_steps: Bytecode instructions this feed alone may execute, at
+                the interpreter's dispatch checkpoint. Counted from zero for
+                this feed, on top of any `ResourceLimits.max_steps` the session
+                was checked out with; whichever is tighter trips first.
+                Exceeding it raises `MontyRuntimeError` with the same message
+                every time, since the count is deterministic.
+        """
+
+    def probe(
+        self,
+        expr: str,
+        *,
+        external_lookup: dict[str, Any] | None = None,
+        print_callback: PrintCallback | None = None,
+        os: OsHandler | None = None,
+        max_steps: int | None = None,
+    ) -> Any:
+        """
+        Evaluate one expression against the session's namespace and return its
+        value, binding nothing.
+
+        This is how words become a value: an annotation, a contract, a name you
+        want the meaning of in the scope that defined it. The session is left
+        as it was, so a probe is safe to repeat; what the expression *calls*
+        can of course still mutate what it reaches.
+
+        Anything but a single expression raises `MontySyntaxError`: a
+        statement, several statements, or an expression that could bind through
+        `:=`. Suspensions are answered from `external_lookup` / `os` exactly as
+        in `feed_run`.
+
+        Arguments:
+            expr: The expression to evaluate.
+            external_lookup: Host values resolving names the expression leaves
+                undefined, as in `feed_run`.
+            print_callback: Receives the sandbox's `print()` output.
+            os: Fallback handler for OS calls.
+            max_steps: Instructions the expression may execute, as in
+                `feed_run`.
+        """
+
+    def parse(self, code: str, *, script_name: str = '', stores: list[str] = ...) -> ParseFacts:
+        """
+        Read a snippet and return what is statically true of it, running none of
+        it.
+
+        Nothing about the answer depends on session state, and nothing about
+        the session changes: this is the parser, not the interpreter. Use it to
+        classify input before deciding to run it, finished or merely
+        unfinished, and what it binds.
+
+        Arguments:
+            code: The snippet to read.
+            script_name: Filename the syntax error's traceback names; the
+                session's own when empty.
+            stores: Names to report a module-level binding of, echoed back in
+                `ParseFacts.stores`.
         """
 
     def load_session(self, state: bytes) -> None:
@@ -866,6 +975,7 @@ class AsyncMontySession:
         mount: MountDir | list[MountDir] | None = None,
         os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | AbstractOS | None = None,
         skip_type_check: bool = False,
+        max_steps: int | None = None,
     ) -> Any:
         """
         Execute one snippet in the worker and return its result.
@@ -899,6 +1009,12 @@ class AsyncMontySession:
                 or an `AbstractOS` instance.
             skip_type_check: Skip type checking for this feed even when the
                 session was checked out with `type_check=True`.
+            max_steps: Bytecode instructions this feed alone may execute, at
+                the interpreter's dispatch checkpoint. Counted from zero for
+                this feed, on top of any `ResourceLimits.max_steps` the session
+                was checked out with; whichever is tighter trips first.
+                Exceeding it raises `MontyRuntimeError` with the same message
+                every time, since the count is deterministic.
         """
 
     async def feed_start(
@@ -911,6 +1027,7 @@ class AsyncMontySession:
         mount: MountDir | list[MountDir] | None = None,
         os: OsHandler | None = None,
         skip_type_check: bool = False,
+        max_steps: int | None = None,
     ) -> AsyncSnapshot:
         """
         Async counterpart of `MontySession.feed_start`: resolves to a snapshot
@@ -947,6 +1064,33 @@ class AsyncMontySession:
                 OS calls as snapshots.
             skip_type_check: Skip type checking for this feed even when the
                 session was checked out with `type_check=True`.
+            max_steps: Bytecode instructions this feed alone may execute, at
+                the interpreter's dispatch checkpoint. Counted from zero for
+                this feed, on top of any `ResourceLimits.max_steps` the session
+                was checked out with; whichever is tighter trips first.
+                Exceeding it raises `MontyRuntimeError` with the same message
+                every time, since the count is deterministic.
+        """
+
+    async def probe(
+        self,
+        expr: str,
+        *,
+        external_lookup: dict[str, Any] | None = None,
+        print_callback: PrintCallback | None = None,
+        os: OsHandler | None = None,
+        max_steps: int | None = None,
+    ) -> Any:
+        """
+        Async counterpart of `MontySession.probe`: evaluate one expression
+        against the session's namespace and resolve to its value, binding
+        nothing. Coroutine externals are awaited as in `feed_run`.
+        """
+
+    async def parse(self, code: str, *, script_name: str = '', stores: list[str] = ...) -> ParseFacts:
+        """
+        Async counterpart of `MontySession.parse`: read a snippet and resolve to
+        what is statically true of it, running none of it.
         """
 
     async def load_session(self, state: bytes) -> None:
@@ -1000,12 +1144,58 @@ class AsyncMontySession:
         """
 
 @final
+class ParseFacts:
+    """What reading a snippet said about it, with none of it run.
+
+    Returned by `MontySession.parse`. Nothing here required executing the
+    snippet or a session to execute it in.
+    """
+
+    @property
+    def complete(self) -> bool:
+        """`False` only when the snippet is unfinished rather than wrong.
+
+        An open bracket, an unterminated triple-quoted string, or a block header
+        with no body: that is a request for more input, so `error` is then
+        `None`. This is the line CPython's `codeop.compile_command` draws for an
+        interactive prompt.
+        """
+
+    @property
+    def error(self) -> MontySyntaxError | None:
+        """The `MontySyntaxError` a feed of this snippet would raise.
+
+        `None` when the snippet parses, and also when it is merely unfinished.
+        """
+
+    @property
+    def binds_global(self) -> bool:
+        """Whether a `global` statement appears anywhere in the snippet, in any scope."""
+
+    @property
+    def stores(self) -> list[str]:
+        """Which of the requested names the snippet binds at module level, in the order asked."""
+
+    def __repr__(self) -> str: ...
+
+@final
 class MontyComplete:
     """The result of a completed `feed_start` execution."""
 
     @property
     def output(self) -> Any:
         """The final value, converted to a Python object on each access."""
+
+    @property
+    def returned(self) -> bool:
+        """Whether a module-level `return` ended the snippet.
+
+        `False` when the body simply ran out of statements, whether or not a
+        trailing expression supplied `output`. CPython rejects a module-level
+        `return` at compile time; Monty runs it, so a host feeding a session in
+        chunks can tell a chunk that closed itself from one that merely
+        finished.
+        """
 
     def __repr__(self) -> str: ...
 

@@ -149,6 +149,10 @@ impl Serialize for JsonEncoded<'_> {
             MontyObject::Dict(pairs) => {
                 serialize_pairs(pairs.into_iter().map(|(k, v)| (k, v)), pairs.len(), self.limit, s)
             }
+            // an instance has no declared-field list, so every attribute shows
+            MontyObject::Instance { attrs, .. } => {
+                serialize_pairs(attrs.into_iter().map(|(k, v)| (k, v)), attrs.len(), self.limit, s)
+            }
             // like logfire dataclasses: an object of the declared fields only
             MontyObject::Dataclass { field_names, attrs, .. } => {
                 // Index the smaller attacker-controlled side. Normal

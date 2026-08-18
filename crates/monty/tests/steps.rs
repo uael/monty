@@ -1,6 +1,6 @@
 //! The step budget: deterministic where the duration limit cannot be.
 
-use monty::MontyRun;
+use monty::{MontyRepl, MontyRun};
 use monty_types::{CompileOptions, MontyObject, PrintWriter, ResourceLimits, ResourceTracker};
 
 fn run_with(code: &str, limits: ResourceLimits) -> Result<MontyObject, String> {
@@ -55,4 +55,58 @@ fn the_budget_is_not_catchable() {
     )
     .unwrap_err();
     assert!(err.contains("step limit exceeded"), "got: {err}");
+}
+
+/// A budget for one call, taken from the record that asked for it: the session
+/// keeps its own ceiling, and the per-call bound is measured from the steps
+/// already spent so the same source under the same budget always trips at the
+/// same count.
+#[test]
+fn a_per_call_budget_bounds_one_feed_at_a_time() {
+    let spin = "n = 0\nwhile n < 200_000:\n    n += 1\n";
+    let mut repl = MontyRepl::new("repl.py", ResourceTracker::default(), CompileOptions::default());
+
+    repl.tracker().begin_call_steps(Some(5_000));
+    let first = repl
+        .feed_run(spin, vec![], PrintWriter::Disabled)
+        .unwrap_err()
+        .to_string();
+    assert!(first.contains("call step limit exceeded"), "got: {first}");
+
+    // A second feed of the same source under the same budget must fail with
+    // the same message: the count is call-relative, so what the first spent
+    // does not leak into it.
+    repl.tracker().begin_call_steps(Some(5_000));
+    let second = repl
+        .feed_run(spin, vec![], PrintWriter::Disabled)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(first, second);
+
+    // Disarmed, the session runs on: the overrun ended a feed, not the session.
+    repl.tracker().begin_call_steps(None);
+    repl.feed_run(spin, vec![], PrintWriter::Disabled).unwrap();
+    let after = repl.feed_run("n\n", vec![], PrintWriter::Disabled).unwrap();
+    assert_eq!(after.value, MontyObject::Int(200_000));
+}
+
+/// The session's own ceiling keeps applying underneath a per-call budget, so a
+/// generous per-call bound cannot buy more than the session has left.
+#[test]
+fn the_session_ceiling_still_bounds_a_generously_budgeted_call() {
+    let mut repl = MontyRepl::new(
+        "repl.py",
+        ResourceTracker::new(ResourceLimits::default().max_steps(50_000)),
+        CompileOptions::default(),
+    );
+    repl.tracker().begin_call_steps(Some(u64::MAX));
+    let err = repl
+        .feed_run("n = 0\nwhile True:\n    n += 1\n", vec![], PrintWriter::Disabled)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("step limit exceeded"), "got: {err}");
+    assert!(
+        !err.contains("call step"),
+        "the session ceiling must report itself: {err}"
+    );
 }

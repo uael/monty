@@ -8,7 +8,7 @@
 
 use std::mem;
 
-use monty_types::{ExcType, MontyException, MontyObject, OsFunctionCall, PrintWriter, ResourceTracker};
+use monty_types::{ExcType, FeedOutcome, MontyException, MontyObject, OsFunctionCall, PrintWriter, ResourceTracker};
 
 use crate::{
     asyncio::CallId,
@@ -605,8 +605,9 @@ impl ExtFunctionResultExt for ExtFunctionResult {}
 /// and `StringId`s. It exists to separate the conversion phase (needs `&mut VM`)
 /// from the snapshot/progress construction phase (needs owned `Heap`).
 pub(crate) enum ConvertedExit {
-    /// Execution completed with a final result.
-    Complete(MontyObject),
+    /// Execution completed, leaving [`FeedOutcome`]: the value and whether a
+    /// written `return` is what ended it.
+    Complete(FeedOutcome),
     /// External function call or dataclass method call.
     FunctionCall {
         function_name: String,
@@ -652,7 +653,10 @@ pub(crate) fn convert_frame_exit(result: RunResult<FrameExit>, vm: &mut VM<'_>) 
     // Arming for *this* exit happens below, after the slot is clear.
     release_pending_effect(vm.pending_os_effect.take(), vm.heap);
     match result {
-        Ok(FrameExit::Return(value)) => ConvertedExit::Complete(MontyObject::new(value, vm)),
+        Ok(FrameExit::Return(value)) => ConvertedExit::Complete(FeedOutcome {
+            value: MontyObject::new(value, vm),
+            returned: vm.module_returned(),
+        }),
         Ok(FrameExit::ExternalCall {
             function_name,
             args,
@@ -749,7 +753,7 @@ pub(crate) fn build_run_progress(
     }
 
     match converted {
-        ConvertedExit::Complete(obj) => Ok(RunProgress::Complete(obj)),
+        ConvertedExit::Complete(outcome) => Ok(RunProgress::Complete(outcome.value)),
         ConvertedExit::FunctionCall {
             function_name,
             args,
