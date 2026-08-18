@@ -27,10 +27,9 @@ const MAGIC: &[u8; 6] = b"MONTY\0";
 /// interpreter's own types *and* everything reachable from [`Dump`] — notably
 /// `TypeCheckingConfig` in `monty-types`.
 ///
-/// 7: `HeapData::Namespace` (a namespace held as a value by sandboxed code),
-/// and two heap fields beside it: the namespaces-enabled mode and the
-/// condemned-scope queue a mid-suspension dump may carry.
-pub const DUMP_VERSION: u16 = 7;
+/// 8: the step budget a coroutine can carry, which is a field on the coroutine
+/// and one on every call frame, running or parked.
+pub const DUMP_VERSION: u16 = 8;
 
 /// Number of bytes before the postcard payload.
 const HEADER_LEN: usize = MAGIC.len() + size_of::<u16>();
@@ -195,12 +194,12 @@ mod tests {
     fn serialized_components_match_dump_version() {
         assert_eq!(
             opcode_fingerprint(),
-            0x6b4d_d229_12ea_5a9b,
+            0x637d_4da7_c6ec_d5c5,
             "opcodes changed for dump version {DUMP_VERSION}"
         );
         assert_eq!(
             static_strings_fingerprint(),
-            0x31a7_a1cc_8ae6_dc80,
+            0xc676_01c4_ce3e_eeb0,
             "static strings changed for dump version {DUMP_VERSION}"
         );
         assert_eq!(

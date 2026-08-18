@@ -14,12 +14,12 @@ use crate::{
     bytecode::{Code, Compiler, FrameExit, VM},
     exception_private::{ExcTypeExt, RunResult},
     heap::{DropWithContext, Heap, HeapReader},
-    intern::{InternerBuilder, Interns},
+    intern::{FunctionId, InternerBuilder, Interns},
     namespace::NamespaceId,
     namespaces::Scopes,
     object_bridge::MontyObjectExt,
     parse::{CodeRange, parse, parse_with_interner},
-    prepare::{prepare, prepare_with_existing_names},
+    prepare::{PrepareResult, prepare, prepare_with_existing_names},
     program::Program,
     run_progress::{RunProgress, build_run_progress, check_snapshot_from_converted, convert_frame_exit},
     types::str::StringRepr,
@@ -288,33 +288,7 @@ impl Executor {
         input_names: &[String],
         options: CompileOptions,
     ) -> Result<Self, MontyException> {
-        check_identifier(input_names)?;
-
-        // Grown on a copy so a parse or compile failure leaves the session's
-        // own tables untouched; committed below once nothing else can fail.
-        let mut existing_globals = program.globals.clone();
-        let mut seeded_interner = InternerBuilder::from_interns(&program.interns, &code);
-        // Pre-register input names so they get stable slots before
-        // preparation, and capture each input's slot index so injection
-        // doesn't have to perform an O(N-interns) name→StringId scan at
-        // call time (one slot per input value, in order).
-        //
-        // Surfaced via the standard parse/prepare error path; if the
-        // embedder hands over more than `u16::MAX + 1` names the bytecode
-        // encoding can't represent them all.
-        let mut input_slots = Vec::with_capacity(input_names.len());
-        for name in input_names {
-            let name_id = seeded_interner.intern(name);
-            let slot = existing_globals
-                .ensure_slot(name_id, CodeRange::default())
-                .map_err(|e| e.into_python_exc(script_name, &code))?;
-            input_slots.push(slot);
-        }
-
-        let parse_result = parse_with_interner(&code, script_name, seeded_interner)
-            .map_err(|e| e.into_python_exc(script_name, &code))?;
-        let prepared = prepare_with_existing_names(parse_result, existing_globals)
-            .map_err(|e| e.into_python_exc(script_name, &code))?;
+        let (prepared, input_slots) = prepare_repl_snippet(&code, script_name, program, input_names)?;
 
         let existing_functions = program.interns.functions_clone();
         let mut interns = Interns::new(prepared.interner, Vec::new());
@@ -546,6 +520,84 @@ impl Executor {
             })
         })
     }
+}
+
+/// Parses and prepares one snippet against the session's names, without
+/// committing anything.
+///
+/// Three things make this incremental rather than a fresh compile: parsing is
+/// seeded from the program's interns so old `StringId` values stay stable,
+/// `input_names` are pre-registered so they receive slots before preparation
+/// (and their slot indices come back, so injection is an index rather than an
+/// O(N-interns) name scan), and the program's globals are reused with new names
+/// appended.
+///
+/// Everything is grown on a copy, so a parse or prepare failure leaves the
+/// session's tables exactly as they were; the caller commits what it compiled.
+fn prepare_repl_snippet(
+    code: &str,
+    script_name: &str,
+    program: &Program,
+    input_names: &[String],
+) -> Result<(PrepareResult, Vec<NamespaceId>), MontyException> {
+    check_identifier(input_names)?;
+
+    let mut existing_globals = program.globals.clone();
+    let mut seeded_interner = InternerBuilder::from_interns(&program.interns, code);
+    // Surfaced via the standard parse/prepare error path; if the embedder hands
+    // over more than `u16::MAX + 1` names the bytecode encoding can't represent
+    // them all.
+    let mut input_slots = Vec::with_capacity(input_names.len());
+    for name in input_names {
+        let name_id = seeded_interner.intern(name);
+        let slot = existing_globals
+            .ensure_slot(name_id, CodeRange::default())
+            .map_err(|e| e.into_python_exc(script_name, code))?;
+        input_slots.push(slot);
+    }
+
+    let parse_result =
+        parse_with_interner(code, script_name, seeded_interner).map_err(|e| e.into_python_exc(script_name, code))?;
+    let prepared =
+        prepare_with_existing_names(parse_result, existing_globals).map_err(|e| e.into_python_exc(script_name, code))?;
+    Ok((prepared, input_slots))
+}
+
+/// Compiles one snippet into `program` as an async function body, and hands
+/// back the id a coroutine over it runs, plus the slots its inputs took.
+///
+/// The sibling of [`Executor::new_repl_snippet`], which compiles the same
+/// prepared block as module code for the session to run now. This one compiles
+/// it for the session's own event loop to run later, so there is no
+/// [`Executor`]: what a coroutine needs is the function table, which lives on
+/// the program, and the program is what this extends. The extension is
+/// committed here for the same reason a feed's is, and a failure leaves
+/// `program` exactly as it was.
+pub(crate) fn compile_repl_task(
+    code: &str,
+    script_name: &str,
+    program: &mut Program,
+    input_names: &[String],
+    options: CompileOptions,
+) -> Result<(FunctionId, Vec<NamespaceId>), MontyException> {
+    let (prepared, input_slots) = prepare_repl_snippet(code, script_name, program, input_names)?;
+
+    let existing_functions = program.interns.functions_clone();
+    let mut interns = Interns::new(prepared.interner, Vec::new());
+    let (functions, func_id) = Compiler::compile_module_as_task(
+        &prepared.nodes,
+        &interns,
+        &prepared.globals,
+        existing_functions,
+        options,
+    )
+    .map_err(|e| e.into_python_exc(script_name, code))?;
+    interns.set_functions(functions);
+
+    program.globals = prepared.globals;
+    program.interns = interns;
+
+    Ok((func_id, input_slots))
 }
 
 /// The namespaces a one-shot run starts from: one, with an `Undefined` per

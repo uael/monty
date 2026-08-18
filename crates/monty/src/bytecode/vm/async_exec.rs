@@ -16,7 +16,7 @@ use crate::{
     args::ArgValues,
     asyncio::{
         CallId, Combinator, CombinatorKind, Coroutine, CoroutineState, Future, FutureKind, FutureState, ReturnWhen,
-        TaskId, TaskRun, Waiter,
+        StepBudget, TaskId, TaskRun, Waiter,
     },
     bytecode::vm::{
         generator::{ResumeMode, stop_async_iteration},
@@ -203,6 +203,7 @@ impl<'h> VM<'h> {
         }
         let func_id = coro.get(self.heap).func_id;
         let scope = coro.get(self.heap).scope;
+        let budget = coro.get_mut(self.heap).budget.take();
         let namespace_values: Vec<Value> = coro
             .get(self.heap)
             .namespace
@@ -211,7 +212,7 @@ impl<'h> VM<'h> {
             .collect();
         coro.get_mut(self.heap).state = CoroutineState::Running;
         drop(coro);
-        self.start_coroutine_frame(func_id, scope, namespace_values)?;
+        self.start_coroutine_frame(func_id, scope, budget, namespace_values)?;
         Ok(AwaitResult::FramePushed)
     }
 
@@ -721,6 +722,7 @@ impl<'h> VM<'h> {
                 scope: f.scope,
                 exception_stack_base: f.exception_stack_base,
                 call_offset: f.call_offset,
+                budget: f.budget,
                 is_initializer: f.is_initializer,
             })
             .collect();
@@ -765,6 +767,7 @@ impl<'h> VM<'h> {
                     function_id: sf.function_id,
                     call_offset: sf.call_offset,
                     should_return: false,
+                    budget: sf.budget,
                     is_initializer: sf.is_initializer,
                 }
             })
@@ -849,6 +852,16 @@ impl<'h> VM<'h> {
         }
     }
 
+    /// Gives `frame` the budget the coroutine it runs carries, and remembers
+    /// that this VM has one to charge.
+    fn arm_budget(&mut self, mut frame: CallFrame<'h>, budget: Option<Box<StepBudget>>) -> CallFrame<'h> {
+        if budget.is_some() {
+            frame.budget = budget;
+            self.budgeted = true;
+        }
+        frame
+    }
+
     /// Starts a spawned task's coroutine as the root frame of its own stack.
     fn init_task_from_coroutine(&mut self, coroutine_id: HeapId) -> Result<(), RunError> {
         let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
@@ -856,6 +869,7 @@ impl<'h> VM<'h> {
         };
         let func_id = coro.get(self.heap).func_id;
         let scope = coro.get(self.heap).scope;
+        let budget = coro.get_mut(self.heap).budget.take();
         let namespace_values: Vec<Value> = coro
             .get(self.heap)
             .namespace
@@ -870,7 +884,7 @@ impl<'h> VM<'h> {
         let stack_base = self.stack.len();
         self.stack.extend(namespace_values);
         let exc_stack_base = self.exception_stack.len();
-        self.push_frame(CallFrame::new_function(
+        let frame = CallFrame::new_function(
             &func.code,
             stack_base,
             locals_count,
@@ -879,7 +893,9 @@ impl<'h> VM<'h> {
             // No call site: the coroutine is this task's root frame.
             None,
             scope,
-        ))?;
+        );
+        let frame = self.arm_budget(frame, budget);
+        self.push_frame(frame)?;
         Ok(())
     }
 
@@ -888,6 +904,7 @@ impl<'h> VM<'h> {
         &mut self,
         func_id: FunctionId,
         scope: ScopeId,
+        budget: Option<Box<StepBudget>>,
         namespace_values: Vec<Value>,
     ) -> Result<(), RunError> {
         let call_offset = self.current_offset();
@@ -896,7 +913,7 @@ impl<'h> VM<'h> {
         let stack_base = self.stack.len();
         self.stack.extend(namespace_values);
         let exc_stack_base = self.exception_stack.len();
-        self.push_frame(CallFrame::new_function(
+        let frame = CallFrame::new_function(
             &func.code,
             stack_base,
             locals_count,
@@ -904,7 +921,9 @@ impl<'h> VM<'h> {
             func_id,
             call_offset,
             scope,
-        ))?;
+        );
+        let frame = self.arm_budget(frame, budget);
+        self.push_frame(frame)?;
         Ok(())
     }
 

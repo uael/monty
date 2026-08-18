@@ -58,6 +58,8 @@ pub enum ResourceError {
     Steps { limit: u64, executed: u64 },
     /// One call's own step budget exceeded.
     CallSteps { limit: u64, executed: u64 },
+    /// One coroutine's own step budget exceeded.
+    TaskSteps { limit: u64, executed: u64 },
 }
 
 impl fmt::Display for ResourceError {
@@ -77,6 +79,9 @@ impl fmt::Display for ResourceError {
             }
             Self::CallSteps { limit, executed } => {
                 write!(f, "call step limit exceeded: {executed} instructions > {limit}")
+            }
+            Self::TaskSteps { limit, executed } => {
+                write!(f, "task step limit exceeded: {executed} instructions > {limit}")
             }
         }
     }

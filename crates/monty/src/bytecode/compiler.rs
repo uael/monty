@@ -19,7 +19,7 @@ use super::{
     op::{FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, MatchShape, Opcode, YIELD_DELEGATING, assert_flags},
 };
 use crate::{
-    args::{ArgExprs, CallArg, CallKwarg, Kwarg},
+    args::{ArgExprs, CallArg, CallKwarg, Kwarg, Signature},
     builtins::{Builtins, BuiltinsFunctions},
     exception_private::ExcType,
     expressions::{
@@ -29,7 +29,7 @@ use crate::{
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
-    intern::{Interns, StaticStrings, StringId},
+    intern::{FunctionId, Interns, StaticStrings, StringId},
     modules::StandardLib,
     name_map::NameMap,
     namespace::NamespaceId,
@@ -313,6 +313,16 @@ pub struct Compiler<'a> {
     /// Whether to compile pytest-style assert failure annotations.
     /// Propagated to nested function and class-body compilers.
     assert_message_annotations: bool,
+
+    /// Whether a module block hands back `(value, returned)` rather than the
+    /// value alone.
+    ///
+    /// A block ending in a written `return` is a different outcome from one
+    /// running out of statements, and the two are told apart by the exit the
+    /// block takes ([`Opcode::ReturnModule`]). A block compiled as a coroutine
+    /// has no exit anyone reads: its value reaches whoever awaits it and
+    /// nothing else. So it says which happened in the value.
+    pairs_returns: bool,
 }
 
 /// Jump targets needed to compile `break` and `continue`.
@@ -552,6 +562,7 @@ impl<'a> Compiler<'a> {
             frame_locals,
             comp_slots: Vec::new(),
             assert_message_annotations,
+            pairs_returns: false,
         }
     }
 
@@ -610,6 +621,73 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    /// Compiles module-level code as the body of an async function, so a host
+    /// can hand the block to the session's own event loop as a coroutine.
+    ///
+    /// Everything about the block is module-level: a name it binds is a name of
+    /// the namespace it runs in, `await` is the loop's, and a trailing
+    /// expression is its value. Only two things differ from
+    /// [`compile_module_with_functions`](Self::compile_module_with_functions),
+    /// and both follow from having no frame exit for a host to read. The block
+    /// is a [`Function`], because that is what a coroutine drives; and it hands
+    /// back `(value, returned)`, because the value is all anyone awaiting it
+    /// receives.
+    ///
+    /// The function is appended to `existing_functions` and its id is the
+    /// index it landed at. It takes no arguments and owns no locals: the frame
+    /// it runs in holds operands only, exactly as a module frame does.
+    pub fn compile_module_as_task(
+        nodes: &[PreparedNode],
+        interns: &Interns,
+        globals: &NameMap,
+        existing_functions: Vec<Function>,
+        options: CompileOptions,
+    ) -> Result<(Vec<Function>, FunctionId), CompileError> {
+        // The block reads and writes global slots, so the same `u16` bound the
+        // module compile enforces applies here.
+        check_namespace_size_u16(globals.len(), "module")?;
+        let mut compiler = Compiler::new(
+            interns,
+            existing_functions,
+            true,
+            0,
+            options.assert_message_annotations.enabled(),
+        );
+        compiler.pairs_returns = true;
+
+        for (slot, name_id) in globals.iter() {
+            compiler.code.register_local_name(slot.as_u16(), name_id);
+        }
+
+        compiler.compile_module_block(nodes)?;
+
+        // Running out of statements is the un-returned outcome, with `None` for
+        // a block that had no trailing expression either.
+        compiler.code.emit(Opcode::LoadNone)?;
+        compiler.code.emit(Opcode::LoadFalse)?;
+        compiler.code.emit_u16(Opcode::BuildTuple, 2)?;
+        compiler.code.emit(Opcode::ReturnValue)?;
+
+        let mut functions = compiler.functions;
+        let func_id = FunctionId::from_index(check_function_count_u16(functions.len(), CodeRange::default())?);
+        // Named as the module body it is, so a traceback frame reads
+        // `in <module>` and the snippet's own filename says which block it was.
+        functions.push(Function::new(
+            Identifier::new(StaticStrings::Module.into(), CodeRange::default()),
+            Signature::default(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            true,
+            false,
+            compiler.code.build(0),
+        ));
+        Ok((functions, func_id))
+    }
+
     /// Compiles a function body to bytecode, returning the Code and any nested functions.
     ///
     /// Used internally when compiling function definitions. The function body is
@@ -655,6 +733,10 @@ impl<'a> Compiler<'a> {
             && !self.code.is_dead()
         {
             self.compile_expr(expr)?;
+            if self.pairs_returns {
+                self.code.emit(Opcode::LoadFalse)?;
+                self.code.emit_u16(Opcode::BuildTuple, 2)?;
+            }
             self.code.emit(Opcode::ReturnValue)?;
         }
         Ok(())
@@ -4262,6 +4344,12 @@ impl<'a> Compiler<'a> {
         if self.code.is_dead() {
             return Ok(());
         }
+        // Paired where the block's value is all anyone sees, so the pair is
+        // built where the value is, under whatever this return still unwinds.
+        if self.pairs_returns {
+            self.code.emit(Opcode::LoadTrue)?;
+            self.code.emit_u16(Opcode::BuildTuple, 2)?;
+        }
 
         // A pushed or suspended call reports an escaping exception at its
         // resume offset. Keep that offset inside any region the return exits.
@@ -4274,7 +4362,9 @@ impl<'a> Compiler<'a> {
         let popped = self.emit_unwind(self.fblocks.len(), true)?;
         // A written module-level `return` gets its own opcode so the exit it
         // produces is distinguishable from the one a trailing expression makes.
-        self.code.emit(if self.is_module_scope {
+        // A block that pairs its returns has said it in the value already, and
+        // must not say it again on an exit belonging to whoever is driving it.
+        self.code.emit(if self.is_module_scope && !self.pairs_returns {
             Opcode::ReturnModule
         } else {
             Opcode::ReturnValue

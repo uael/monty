@@ -21,7 +21,7 @@ use std::{collections::VecDeque, mem};
 use ahash::AHashMap;
 
 use crate::{
-    asyncio::{CallId, TaskId},
+    asyncio::{CallId, StepBudget, TaskId},
     bytecode::vm::generator::GenActivation,
     exception_private::RunError,
     heap::{ContainsHeap, DropWithContext, Heap, HeapId, HeapReader},
@@ -189,6 +189,10 @@ pub(crate) struct SerializedTaskFrame {
     /// Caller's bytecode offset at the call site (for tracebacks). See
     /// `CallFrame.call_offset`.
     pub call_offset: Option<u32>,
+    /// What the coroutine rooted at this frame may still spend, so a parked
+    /// task resumes under what is left of its budget. See `CallFrame.budget`.
+    #[serde(default)]
+    pub budget: Option<Box<StepBudget>>,
     /// Whether this frame is a class `__init__` (see `CallFrame.is_initializer`).
     #[serde(default)]
     pub is_initializer: bool,
@@ -451,6 +455,16 @@ impl Scheduler {
     #[inline]
     pub fn has_task(&self, task_id: TaskId) -> bool {
         self.tasks.contains_key(&task_id)
+    }
+
+    /// Whether any parked task holds a frame carrying a step budget.
+    ///
+    /// Asked once per restore, so a VM woken from a snapshot knows to charge
+    /// budgets its own frames do not carry but a task it will switch to does.
+    pub fn holds_a_budgeted_frame(&self) -> bool {
+        self.tasks
+            .values()
+            .any(|task| task.frames.iter().any(|frame| frame.budget.is_some()))
     }
 
     /// The current reading of the scheduler's clock, in nanoseconds.

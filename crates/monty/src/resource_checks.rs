@@ -120,9 +120,15 @@ impl From<ResourceError> for RunError {
             ResourceError::Memory { .. } => (ExcType::MemoryError, false),
             ResourceError::Time { .. } => (ExcType::TimeoutError, false),
             ResourceError::Recursion { .. } => (ExcType::RecursionError, true),
-            // Uncatchable like Time: a step budget is physics, not a condition
-            // the sandboxed code may catch and outrun.
+            // Uncatchable like Time: a session's step budget is physics, not a
+            // condition the sandboxed code may catch and outrun.
             ResourceError::Steps { .. } | ResourceError::CallSteps { .. } => (ExcType::RuntimeError, false),
+            // Catchable, because a coroutine's own budget bounds one piece of
+            // work a host put into the session and the point of it is that
+            // whoever started that work sees it end. A second overrun in the
+            // same coroutine is raised uncatchably at the raise site, since
+            // source that caught the first is no longer bounded by anything.
+            ResourceError::TaskSteps { .. } => (ExcType::RuntimeError, true),
         };
         let exc = SimpleException::new_msg(exc_type, err).into();
         if catchable {

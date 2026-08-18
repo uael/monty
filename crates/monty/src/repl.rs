@@ -13,19 +13,20 @@ use ruff_python_parser::{InterpolatedStringErrorType, LexicalErrorType, ParseErr
 
 use crate::{
     args::{ArgValues, KwargsValues},
-    asyncio::CallId,
+    asyncio::{CallId, Coroutine},
     bytecode::{VM, VMSnapshot},
     defer_drop,
     exception_private::{ExcTypeExt, RunError},
     heap::{DropWithContext, Heap, HeapData, HeapReader},
-    namespace::ScopeId,
+    intern::FunctionId,
+    namespace::{NamespaceId, ScopeId},
     namespaces::Scopes,
     object_bridge::MontyObjectExt,
     parse::check_probe_expression,
     program::Program,
-    run::{CompileOptions, Executor},
-    types::PyTrait,
+    run::{CompileOptions, Executor, compile_repl_task},
     run_progress::{ConvertedExit, ExtFunctionResult, ExtFunctionResultExt, NameLookupResult, convert_frame_exit},
+    types::PyTrait,
     value::Value,
 };
 
@@ -235,7 +236,7 @@ impl MontyRepl {
                 );
 
                 // Inject inputs with VM alive
-                if let Err(error) = inject_inputs_into_vm(executor, input_values, &mut vm) {
+                if let Err(error) = inject_inputs_into_vm(&executor.input_slots, input_values, &mut vm) {
                     this.scopes = vm.take_scopes();
                     return Err(error);
                 }
@@ -331,7 +332,7 @@ impl MontyRepl {
                     executor.assert_repr_max_bytes,
                 );
 
-                if let Err(e) = inject_inputs_into_vm(executor, input_values, &mut vm) {
+                if let Err(e) = inject_inputs_into_vm(&executor.input_slots, input_values, &mut vm) {
                     self.scopes = vm.take_scopes();
                     return Err(e);
                 }
@@ -498,6 +499,7 @@ impl MontyRepl {
                 program: &mut self.program,
                 heap: &mut self.heap,
                 scopes: &mut self.scopes,
+                sources: &mut self.sources,
             },
             target,
             code,
@@ -505,7 +507,82 @@ impl MontyRepl {
             print,
             &self.script_name,
             self.options,
-            &self.sources,
+        )
+    }
+
+    /// Compiles source against a named namespace as a coroutine, and hands back
+    /// a reference to it, unstarted. `None` means the selected namespace.
+    ///
+    /// This is the third thing a host can do with source, beside running it now
+    /// ([`run_scoped_in`](Self::run_scoped_in)) and reading with it
+    /// ([`probe_scoped_in`](Self::probe_scoped_in)): give it to the session's
+    /// own event loop. Nothing of it runs here. The coroutine is an ordinary
+    /// awaitable, so sandboxed code starts it by awaiting it or by making a task
+    /// of it, and from then on it is one more task in the one loop, interleaving
+    /// with everything else there. A host that needs to add work to a session
+    /// already running an event loop has no other way in: a feed cannot start
+    /// while a feed is suspended, and a run that suspended would have nowhere to
+    /// go.
+    ///
+    /// What it runs is module-level code, not a function body. Names it binds
+    /// are the namespace's afterwards, as a feed's are, and `await` at the top
+    /// of it is the loop's. `inputs` land in that namespace too, exactly as a
+    /// feed's inputs do rather than being scoped to this source alone: what the
+    /// task will read must still be there when it runs, and there is no
+    /// afterwards for this call to restore.
+    ///
+    /// Awaiting the coroutine produces `(value, returned)`, which is
+    /// [`FeedOutcome`] as a tuple: `value` is a written `return`'s value, or a
+    /// trailing expression's, or `None`; `returned` says which of the first two
+    /// it was. The pair is the value because a task's value is all anyone
+    /// awaiting it receives, and a host reading the exit of the snippet that
+    /// happens to be driving the loop would be reading someone else's.
+    ///
+    /// An exception the source raises is raised at whoever awaits the coroutine,
+    /// unchanged.
+    ///
+    /// `max_steps` bounds what this source may execute without bounding the
+    /// session: the overrun is raised inside the coroutine, where the code that
+    /// started it can catch it, and everything else in the loop carries on. It
+    /// is counted at the same dispatch-checkpoint granularity as the session's
+    /// own [`max_steps`](monty_types::ResourceLimits::max_steps), so a budget is
+    /// spent in whole intervals and a small one trips at the first checkpoint.
+    /// Source that catches its own overrun and carries on is bounded by nothing,
+    /// so a second overrun in the same coroutine cannot be caught and ends the
+    /// run. `None` leaves the coroutine bounded only by whatever bounds the
+    /// session.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, source that
+    /// does not compile, or an input that cannot cross. Source that raises does
+    /// so where it is awaited, not here.
+    ///
+    /// # Panics
+    /// If the namespace that was selected on entry has gone by the time this
+    /// returns. Nothing here runs, so this is an invariant rather than a case a
+    /// caller can reach.
+    pub fn feed_task_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        feed_task_in(
+            SessionParts {
+                program: &mut self.program,
+                heap: &mut self.heap,
+                scopes: &mut self.scopes,
+                sources: &mut self.sources,
+            },
+            &mut self.next_input_id,
+            target,
+            code,
+            inputs,
+            max_steps,
+            print,
+            self.options,
         )
     }
 
@@ -533,6 +610,7 @@ impl MontyRepl {
                 program: &mut self.program,
                 heap: &mut self.heap,
                 scopes: &mut self.scopes,
+                sources: &mut self.sources,
             },
             target,
             expr,
@@ -540,7 +618,6 @@ impl MontyRepl {
             print,
             &self.script_name,
             self.options,
-            &self.sources,
         )
     }
 
@@ -790,12 +867,22 @@ impl MontyRepl {
     }
 
     fn next_input_script_name(&mut self, kind: SnippetKind) -> String {
-        let input_id = self.next_input_id;
-        self.next_input_id += 1;
-        match kind {
-            SnippetKind::Feed => format!("<python-input-{input_id}>"),
-            SnippetKind::Probe => format!("<probe-{input_id}>"),
-        }
+        next_script_name(&mut self.next_input_id, kind)
+    }
+}
+
+/// The generated filename for the next snippet of `kind`, advancing the
+/// session's counter.
+///
+/// Free of the session because a snippet compiled while one is suspended has
+/// the counter and nothing else of it to hand.
+fn next_script_name(next_input_id: &mut u64, kind: SnippetKind) -> String {
+    let input_id = *next_input_id;
+    *next_input_id += 1;
+    match kind {
+        SnippetKind::Feed => format!("<python-input-{input_id}>"),
+        SnippetKind::Probe => format!("<probe-{input_id}>"),
+        SnippetKind::Task => format!("<python-task-{input_id}>"),
     }
 }
 
@@ -809,7 +896,7 @@ impl Drop for MontyRepl {
 // ReplProgress and per-variant structs
 // ---------------------------------------------------------------------------
 
-/// Which of the two things a snippet is, for the sake of the filename its
+/// Which of the three things a snippet is, for the sake of the filename its
 /// frames carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SnippetKind {
@@ -817,6 +904,8 @@ enum SnippetKind {
     Feed,
     /// One expression evaluated against the session's namespace.
     Probe,
+    /// A chunk of source compiled for the session's own event loop to run.
+    Task,
 }
 
 /// Result of a single suspendable REPL snippet execution.
@@ -1003,6 +1092,29 @@ impl ReplProgress {
         }
     }
 
+    /// Compiles source for the session's own loop, whatever the progress state,
+    /// and leaves that state as it was; `None` is the namespace the session is
+    /// running in. See [`MontyRepl::feed_task_in`].
+    ///
+    /// # Errors
+    /// As [`MontyRepl::feed_task_in`]. The progress is untouched either way.
+    pub fn feed_task_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        match self {
+            Self::FunctionCall(call) => call.feed_task_in(target, code, inputs, max_steps, print),
+            Self::OsCall(call) => call.feed_task_in(target, code, inputs, max_steps, print),
+            Self::ResolveFutures(state) => state.feed_task_in(target, code, inputs, max_steps, print),
+            Self::NameLookup(lookup) => lookup.feed_task_in(target, code, inputs, max_steps, print),
+            Self::Complete { repl, .. } => repl.feed_task_in(target, code, inputs, max_steps, print),
+        }
+    }
+
     /// Releases one of the host's references to an exported value, whatever
     /// the progress state; see [`MontyRepl::release`].
     pub fn release(&mut self, token: u64) -> bool {
@@ -1110,6 +1222,26 @@ impl ReplFunctionCall {
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
         self.snapshot.run_scoped(target, code, bindings, print)
+    }
+
+    /// Compiles source for the session's own loop while this snippet stays
+    /// suspended; see [`MontyRepl::feed_task_in`].
+    ///
+    /// This is the moment such a call is worth most: the loop is inside the
+    /// suspended snippet, so a task added here is picked up as soon as the
+    /// answer to this call lets the loop run again.
+    ///
+    /// # Errors
+    /// As [`MontyRepl::feed_task_in`]. The suspension is untouched either way.
+    pub fn feed_task_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.feed_task(target, code, inputs, max_steps, print)
     }
 
     /// Which namespace a handle the host holds names; see
@@ -1226,6 +1358,26 @@ impl ReplOsCall {
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
         self.snapshot.run_scoped(target, code, bindings, print)
+    }
+
+    /// Compiles source for the session's own loop while this snippet stays
+    /// suspended; see [`MontyRepl::feed_task_in`].
+    ///
+    /// This is the moment such a call is worth most: the loop is inside the
+    /// suspended snippet, so a task added here is picked up as soon as the
+    /// answer to this call lets the loop run again.
+    ///
+    /// # Errors
+    /// As [`MontyRepl::feed_task_in`]. The suspension is untouched either way.
+    pub fn feed_task_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.feed_task(target, code, inputs, max_steps, print)
     }
 
     /// Which namespace a handle the host holds names; see
@@ -1351,6 +1503,26 @@ impl ReplNameLookup {
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
         self.snapshot.run_scoped(target, code, bindings, print)
+    }
+
+    /// Compiles source for the session's own loop while this snippet stays
+    /// suspended; see [`MontyRepl::feed_task_in`].
+    ///
+    /// This is the moment such a call is worth most: the loop is inside the
+    /// suspended snippet, so a task added here is picked up as soon as the
+    /// answer to this call lets the loop run again.
+    ///
+    /// # Errors
+    /// As [`MontyRepl::feed_task_in`]. The suspension is untouched either way.
+    pub fn feed_task_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.feed_task(target, code, inputs, max_steps, print)
     }
 
     /// Which namespace a handle the host holds names; see
@@ -1542,6 +1714,7 @@ impl ReplResolveFutures {
                 program: &mut self.repl.program,
                 heap: &mut self.repl.heap,
                 scopes: &mut self.vm_state.scopes,
+                sources: &mut self.repl.sources,
             },
             target,
             code,
@@ -1549,7 +1722,40 @@ impl ReplResolveFutures {
             print,
             &self.repl.script_name,
             self.repl.options,
-            &self.repl.sources,
+        )
+    }
+
+    /// Compiles source for the session's own loop while every task in it waits
+    /// on the host; see [`MontyRepl::feed_task_in`].
+    ///
+    /// The arm a host driving a loop spends its time in, and so the one a task
+    /// is most often added from: nothing can run until this host answers, and a
+    /// task added here is ready the moment it does.
+    ///
+    /// # Errors
+    /// As [`MontyRepl::feed_task_in`]. The suspension is untouched either way.
+    pub fn feed_task_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        feed_task_in(
+            SessionParts {
+                program: &mut self.repl.program,
+                heap: &mut self.repl.heap,
+                scopes: &mut self.vm_state.scopes,
+                sources: &mut self.repl.sources,
+            },
+            &mut self.repl.next_input_id,
+            target,
+            code,
+            inputs,
+            max_steps,
+            print,
+            self.repl.options,
         )
     }
 
@@ -1565,6 +1771,7 @@ impl ReplResolveFutures {
                 program: &mut self.repl.program,
                 heap: &mut self.repl.heap,
                 scopes: &mut self.vm_state.scopes,
+                sources: &mut self.repl.sources,
             },
             target,
             expr,
@@ -1572,7 +1779,6 @@ impl ReplResolveFutures {
             print,
             &self.repl.script_name,
             self.repl.options,
-            &self.repl.sources,
         )
     }
 
@@ -1804,6 +2010,7 @@ impl ReplSnapshot {
                 program: &mut self.repl.program,
                 heap: &mut self.repl.heap,
                 scopes: &mut self.vm_state.scopes,
+                sources: &mut self.repl.sources,
             },
             target,
             code,
@@ -1811,7 +2018,33 @@ impl ReplSnapshot {
             print,
             &self.repl.script_name,
             self.repl.options,
-            &self.repl.sources,
+        )
+    }
+
+    /// Compiles source for the suspended session's own loop; see
+    /// [`MontyRepl::feed_task_in`].
+    fn feed_task(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        feed_task_in(
+            SessionParts {
+                program: &mut self.repl.program,
+                heap: &mut self.repl.heap,
+                scopes: &mut self.vm_state.scopes,
+                sources: &mut self.repl.sources,
+            },
+            &mut self.repl.next_input_id,
+            target,
+            code,
+            inputs,
+            max_steps,
+            print,
+            self.repl.options,
         )
     }
 
@@ -1827,6 +2060,7 @@ impl ReplSnapshot {
                 program: &mut self.repl.program,
                 heap: &mut self.repl.heap,
                 scopes: &mut self.vm_state.scopes,
+                sources: &mut self.repl.sources,
             },
             target,
             expr,
@@ -1834,7 +2068,6 @@ impl ReplSnapshot {
             print,
             &self.repl.script_name,
             self.repl.options,
-            &self.repl.sources,
         )
     }
 
@@ -1901,16 +2134,15 @@ impl ReplSnapshot {
 /// Injects input values into the VM's global namespace slots.
 ///
 /// Converts each `MontyObject` to a `Value` while the VM is alive, then
-/// stores it at the namespace slot that `Executor::new_repl_snippet`
-/// pre-resolved for the corresponding input name. Each store is O(1) — the
-/// per-input name → slot lookup happens once at snippet construction, not
-/// here on the call path.
+/// stores it at the namespace slot the compile pre-resolved for the
+/// corresponding input name. Each store is O(1) — the per-input name → slot
+/// lookup happens once at snippet construction, not here on the call path.
 fn inject_inputs_into_vm(
-    executor: &Executor,
+    input_slots: &[NamespaceId],
     input_values: Vec<MontyObject>,
     vm: &mut VM<'_>,
 ) -> Result<(), MontyException> {
-    for (&slot, obj) in executor.input_slots.iter().zip(input_values) {
+    for (&slot, obj) in input_slots.iter().zip(input_values) {
         let value = obj
             .to_value(vm)
             .map_err(|e| MontyException::runtime_error(format!("invalid input type: {e}")))?;
@@ -1920,17 +2152,21 @@ fn inject_inputs_into_vm(
     Ok(())
 }
 
-/// The mutable session state one expression needs to run against, borrowed
-/// from wherever it currently lives.
+/// The mutable session state one snippet needs to run against, borrowed from
+/// wherever it currently lives.
 ///
-/// While a snippet is suspended the session is split: the heap and the program
-/// stay on the [`MontyRepl`], and the globals are inside the [`VMSnapshot`].
-/// Idle, all three are on the repl. Naming the three pieces is what lets one
-/// implementation serve both.
+/// While a snippet is suspended the session is split: everything but the
+/// globals stays on the [`MontyRepl`], and the globals are inside the
+/// [`VMSnapshot`]. Idle, all of it is on the repl. Naming the pieces is what
+/// lets one implementation serve both.
 struct SessionParts<'a> {
     program: &'a mut Program,
     heap: &'a mut Heap,
     scopes: &'a mut Scopes,
+    /// Source text by script name, which is what a traceback resolves its
+    /// frames against; a snippet whose frames outlive this call leaves its own
+    /// text behind here.
+    sources: &'a mut AHashMap<String, String>,
 }
 
 /// Evaluates one expression against `parts`, with `bindings` visible to it and
@@ -1947,10 +2183,6 @@ struct SessionParts<'a> {
 /// can answer raises `NameError` rather than suspending, because this is
 /// itself reachable from inside a suspension and a second one would have
 /// nowhere to go. Anything the expression needs is a binding.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the session's pieces plus what one probe is: splitting them would only name the same call twice"
-)]
 fn probe_scoped_in(
     parts: SessionParts<'_>,
     target: Option<ScopeId>,
@@ -1959,10 +2191,9 @@ fn probe_scoped_in(
     print: PrintWriter<'_>,
     script_name: &str,
     options: CompileOptions,
-    sources: &AHashMap<String, String>,
 ) -> Result<MontyObject, MontyException> {
     check_probe_expression(expr, script_name)?;
-    run_scoped_in(parts, target, expr, bindings, print, script_name, options, sources)
+    run_scoped_in(parts, target, expr, bindings, print, script_name, options)
 }
 
 /// Runs `code` against `parts`, with `bindings` visible to it and to nothing
@@ -1979,10 +2210,6 @@ fn probe_scoped_in(
 /// caller because a suspended session cannot survive being left elsewhere: its
 /// frames resolve globals against the installed vector, and only the caller
 /// that is idle could put it right afterwards.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the session's pieces plus what one run is: splitting them would only name the same call twice"
-)]
 fn run_scoped_in(
     parts: SessionParts<'_>,
     target: Option<ScopeId>,
@@ -1991,9 +2218,13 @@ fn run_scoped_in(
     print: PrintWriter<'_>,
     script_name: &str,
     options: CompileOptions,
-    sources: &AHashMap<String, String>,
 ) -> Result<MontyObject, MontyException> {
-    let SessionParts { program, heap, scopes } = parts;
+    let SessionParts {
+        program,
+        heap,
+        scopes,
+        sources,
+    } = parts;
     let selected = scopes.current;
     // Move the named namespace into place before anything compiles, so a
     // handle naming nothing fails before the program has been extended.
@@ -2028,7 +2259,7 @@ fn run_scoped_in(
 
             // `run_to_completion` opens and closes the execution window itself,
             // so the time budget advances here as it does for a feed.
-            let result = inject_inputs_into_vm(executor, binding_values, vm).and_then(|()| {
+            let result = inject_inputs_into_vm(&executor.input_slots, binding_values, vm).and_then(|()| {
                 executor.run_to_completion(&program.interns, vm).map_err(|e| {
                     e.into_python_exception(&program.interns, |fname| sources.get(fname).map(String::as_str))
                 })
@@ -2056,6 +2287,108 @@ fn run_scoped_in(
     // the slots it claimed are the session's now so a second probe reuses them
     // instead of adding more. Both were committed by `new_repl_snippet`.
     result
+}
+
+/// Compiles `code` against a named namespace and hands back a reference to the
+/// coroutine that runs it, having run nothing.
+///
+/// See [`MontyRepl::feed_task_in`] for what the coroutine is and what awaiting
+/// it produces. The whole of this call is a compile and one allocation: nothing
+/// of `code` executes here, so a session suspended mid-call stays exactly where
+/// it was and the namespace it names is not entered.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session's pieces plus what one task is: splitting them would only name the same call twice"
+)]
+fn feed_task_in(
+    parts: SessionParts<'_>,
+    next_input_id: &mut u64,
+    target: Option<ScopeId>,
+    code: &str,
+    inputs: Vec<(String, MontyObject)>,
+    max_steps: Option<u64>,
+    print: PrintWriter<'_>,
+    options: CompileOptions,
+) -> Result<MontyObject, MontyException> {
+    let SessionParts {
+        program,
+        heap,
+        scopes,
+        sources,
+    } = parts;
+    let selected = scopes.current;
+    // Named before anything compiles, so a handle naming nothing fails before
+    // the program has been extended.
+    if let Some(target) = target {
+        *scopes = mem::take(scopes)
+            .reinstall(target)
+            .ok_or_else(|| MontyException::runtime_error("no such namespace"))?;
+    }
+    let scope = scopes.current;
+
+    let script_name = next_script_name(next_input_id, SnippetKind::Task);
+    // Kept before anything can fail, as a feed's is: this snippet's frames run
+    // long after this call returns, and a traceback from one of them resolves
+    // its source by this name.
+    sources.insert(script_name.clone(), code.to_owned());
+
+    let (input_names, input_values): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
+    let result =
+        compile_repl_task(code, &script_name, program, &input_names, options).and_then(|(func_id, input_slots)| {
+            scopes.ensure_slots(program.globals.len());
+            HeapReader::with(heap, &mut (&*program, print), |reader, (program, print)| {
+                let vm = &mut VM::new(
+                    mem::take(scopes),
+                    reader,
+                    &program.interns,
+                    &program.globals,
+                    print.reborrow(),
+                    options.assert_message_annotations.max_bytes(),
+                );
+                let minted = inject_inputs_into_vm(&input_slots, input_values, vm)
+                    .map(|()| mint_task(vm, func_id, scope, max_steps));
+                *scopes = vm.take_scopes();
+                minted
+            })
+        });
+
+    // Nothing ran, so nothing could have moved the session; the target was
+    // installed only to be the one this task will run in.
+    if scopes.current != selected {
+        *scopes = mem::take(scopes)
+            .reinstall(selected)
+            .expect("the namespace this session was running in cannot go while it runs");
+    }
+    result
+}
+
+/// Allocates the coroutine for a compiled task and hands back the reference
+/// that names it.
+///
+/// The reference is what pins it: nothing in the session refers to the
+/// coroutine yet, and the host is about to hand it to code that will. It
+/// crosses as a reference whether or not the session crosses other
+/// unrepresentable values that way, because a coroutine's `repr` is not
+/// something anyone could await.
+fn mint_task(vm: &mut VM<'_>, func_id: FunctionId, scope: ScopeId, max_steps: Option<u64>) -> MontyObject {
+    let id = vm.heap.allocate(HeapData::Coroutine(
+        Coroutine::new(func_id, scope, Vec::new()).with_budget(max_steps),
+    ));
+    // The allocation's own count is given up on the way out, so the export is
+    // the only owner and releasing the reference releases the coroutine.
+    let value = Value::Ref(id);
+    defer_drop!(value, vm);
+    let repr = match value.py_repr(vm) {
+        Ok(rendered) => {
+            defer_drop!(rendered, vm);
+            rendered.to_str(vm).map(str::to_owned).unwrap_or_default()
+        }
+        Err(_) => format!("<{} object, error on repr()>", value.py_type_name(vm)),
+    };
+    MontyObject::SessionRef {
+        id: vm.heap.export(id),
+        repr,
+    }
 }
 
 /// Assembles a `ReplProgress` from already-converted data.

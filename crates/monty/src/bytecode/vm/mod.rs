@@ -22,13 +22,13 @@ pub(crate) use async_exec::Outcome;
 pub(crate) use call::CallResult;
 use generator::{GenActivation, GeneratorYield, ResumeMode, SendIterStep};
 pub(crate) use generator::{GeneratorInput, GeneratorStep, stop_iteration_with};
-use monty_types::{InvalidInputError, MontyObject, OsFunctionCall, PrintWriter};
+use monty_types::{InvalidInputError, MontyObject, OsFunctionCall, PrintWriter, ResourceError};
 pub(crate) use recursion::{ContainsVM, RecursionToken};
 use scheduler::Scheduler;
 
 use crate::{
     args::ArgValues,
-    asyncio::{CallId, TaskId},
+    asyncio::{CallId, StepBudget, TaskId},
     builtins::Builtins,
     bytecode::{
         MatchShape,
@@ -395,6 +395,16 @@ pub struct CallFrame<'code> {
     /// and return to the caller. Supports `evaluate_function`.
     should_return: bool,
 
+    /// What the coroutine rooted at this frame may still spend, when a host
+    /// gave it a budget of its own; `None` on every other frame.
+    ///
+    /// On the frame rather than on the task because a coroutine can be awaited
+    /// where it stands as well as made a task of, and the budget is the
+    /// coroutine's either way. A frame the budgeted body calls into carries
+    /// `None` and is charged to the frame below it, which is the innermost one
+    /// carrying a budget.
+    budget: Option<Box<StepBudget>>,
+
     /// Whether this frame is a class `__init__` running for `Foo(...)`.
     ///
     /// When `true`, the `ReturnValue` handler discards the frame's return value
@@ -421,6 +431,7 @@ impl<'code> CallFrame<'code> {
             function_id: None,
             call_offset: None,
             should_return: false,
+            budget: None,
             is_initializer: false,
         }
     }
@@ -452,6 +463,7 @@ impl<'code> CallFrame<'code> {
             function_id: Some(function_id),
             call_offset,
             should_return: false,
+            budget: None,
             is_initializer: false,
         }
     }
@@ -591,6 +603,12 @@ pub struct SerializedFrame {
     /// `CallFrame.call_offset`.
     call_offset: Option<u32>,
 
+    /// What the coroutine rooted at this frame may still spend (see
+    /// `CallFrame.budget`). Round-trips because a budgeted body can be
+    /// suspended mid-call and must resume under what is left of it.
+    #[serde(default)]
+    budget: Option<Box<StepBudget>>,
+
     /// Whether this frame is a class `__init__` (see `CallFrame.is_initializer`).
     ///
     /// Unlike `should_return`, an initializer frame can legitimately be live
@@ -616,6 +634,7 @@ impl CallFrame<'_> {
             scope: self.scope,
             exception_stack_base: self.exception_stack_base,
             call_offset: self.call_offset,
+            budget: self.budget.clone(),
             is_initializer: self.is_initializer,
         }
     }
@@ -863,6 +882,15 @@ pub struct VM<'h> {
     /// Supplied by the executor on construction, so it is not snapshotted.
     pub(crate) assert_repr_max_bytes: u32,
 
+    /// Whether any frame this VM holds, running or parked in a task, carries a
+    /// step budget of its own.
+    ///
+    /// Hoisted out of the dispatch checkpoint so a session that budgets nothing
+    /// pays one predictable branch rather than a walk of its frames every
+    /// interval. Not snapshotted: a restore recomputes it from the frames it is
+    /// given, which is where the answer actually lives.
+    budgeted: bool,
+
     /// Whether a written module-level `return` ended this run, as opposed to
     /// the body running out of statements.
     ///
@@ -914,6 +942,7 @@ impl<'h> VM<'h> {
             run_reentry_depth: recursion::MAX_RUN_REENTRY_DEPTH,
             re_pattern_cache: RePatternCache::default(),
             assert_repr_max_bytes,
+            budgeted: false,
             module_returned: false,
         }
     }
@@ -959,10 +988,16 @@ impl<'h> VM<'h> {
                     function_id: sf.function_id,
                     call_offset: sf.call_offset,
                     should_return: false,
+                    budget: sf.budget,
                     is_initializer: sf.is_initializer,
                 }
             })
             .collect();
+
+        // Whether anything is budgeted is a fact about the frames, so it is
+        // recomputed from them rather than carried: the ones this VM is about
+        // to run, and the ones its parked tasks will resume.
+        let budgeted = frames.iter().any(|frame| frame.budget.is_some()) || snapshot.scheduler.holds_a_budgeted_frame();
 
         // Restore recursion depth to match the number of active function frames.
         // recursion_depth is not serialized; cleanup paths decrement it for each
@@ -1006,6 +1041,7 @@ impl<'h> VM<'h> {
             run_reentry_depth: recursion::MAX_RUN_REENTRY_DEPTH,
             re_pattern_cache: RePatternCache::default(),
             assert_repr_max_bytes,
+            budgeted,
             module_returned: false,
         }
     }
@@ -1244,6 +1280,46 @@ impl<'h> VM<'h> {
         Ok(())
     }
 
+    /// Charges `steps` to the innermost frame carrying a budget of its own.
+    ///
+    /// Only the innermost, because a budgeted body is not executing while a
+    /// budgeted body it started is, and only a host can start one: nothing in
+    /// the sandbox can spend one budget under cover of another.
+    ///
+    /// The overrun is raised at the instruction that was about to run, so a
+    /// handler is found by the same rule as for any other raise. The first one
+    /// is an ordinary exception, which is the whole point of a budget belonging
+    /// to one piece of work: whoever awaited it sees it end. Source that caught
+    /// that and carried on is bounded by nothing, so the next one is
+    /// uncatchable and ends the run.
+    #[cold]
+    #[inline(never)]
+    fn charge_step_budget(&mut self, steps: u64, ip: usize) -> Result<(), RunError> {
+        let Some(frame) = self.frames.iter_mut().rev().find(|frame| frame.budget.is_some()) else {
+            return Ok(());
+        };
+        let budget = frame.budget.as_mut().expect("found by carrying a budget");
+        budget.spent = budget.spent.saturating_add(steps);
+        if budget.spent <= budget.limit {
+            return Ok(());
+        }
+        let first = !budget.raised;
+        budget.raised = true;
+        let overrun = ResourceError::TaskSteps {
+            limit: budget.limit,
+            executed: budget.spent,
+        };
+        self.instruction_ip = ip;
+        self.current_frame_mut().ip = ip;
+        if first {
+            Err(overrun.into())
+        } else {
+            Err(RunError::UncatchableExc(
+                SimpleException::new_msg(ExcType::RuntimeError, overrun).into(),
+            ))
+        }
+    }
+
     /// Main execution loop.
     ///
     /// Fetches opcodes from the current frame's bytecode and executes them.
@@ -1294,8 +1370,16 @@ impl<'h> VM<'h> {
                 countdown = CHECK_INTERVAL;
                 // One whole interval has executed; charged here so the step
                 // count stays deterministic (never a clock read).
-                self.heap.tracker.add_steps(u64::from(CHECK_INTERVAL) + 1);
+                let interval = u64::from(CHECK_INTERVAL) + 1;
+                self.heap.tracker.add_steps(interval);
                 self.dispatch_checkpoint(check_limits, cached_frame.ip)?;
+                // A coroutine's own budget is charged the same interval, and
+                // raises where the session's own limits do not: inside it.
+                if self.budgeted
+                    && let Err(e) = self.charge_step_budget(interval, cached_frame.ip)
+                {
+                    catch_sync!(self, cached_frame, e);
+                }
             }
 
             // Track instruction IP for exception table lookup
@@ -2978,3 +3062,4 @@ impl Drop for VM<'_> {
         self.json_string_cache.drop_all(self.heap);
     }
 }
+

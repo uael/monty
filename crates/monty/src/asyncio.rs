@@ -83,6 +83,44 @@ pub(crate) enum CoroutineState {
     Completed,
 }
 
+/// What one coroutine may spend, and whether it has already overrun.
+///
+/// A session's own `max_steps` bounds everything it will ever run and is
+/// physics: nothing inside may catch it. This bounds one piece of work the host
+/// put into a session, and the point of it is that the code which started that
+/// work sees the overrun, so the first one is an ordinary exception raised in
+/// the coroutine's frames. A second is not: source that catches the first and
+/// carries on is no longer bounded by anything, so once `spent` is set the
+/// overrun is raised uncatchably and the run ends.
+///
+/// `spent` is counted at the dispatch checkpoint's granularity, the same one
+/// the session's own `max_steps` is counted at, so a budget is spent in whole
+/// intervals.
+///
+/// Carried behind a box wherever it is optional, so a frame that has no budget,
+/// which is nearly every frame, pays one pointer for the possibility rather than
+/// three words.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StepBudget {
+    /// Instructions this coroutine's own body may execute.
+    pub limit: u64,
+    /// Instructions it has executed.
+    pub spent: u64,
+    /// Whether the overrun has already been raised once, catchably.
+    pub raised: bool,
+}
+
+impl StepBudget {
+    /// A budget of `limit` instructions, nothing spent.
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            spent: 0,
+            raised: false,
+        }
+    }
+}
+
 /// A coroutine object representing an async function call result.
 ///
 /// Created when an `async def` function is called. Argument binding happens at call time;
@@ -114,6 +152,11 @@ pub(crate) struct Coroutine {
     pub namespace: Vec<Value>,
     /// Current execution state.
     pub state: CoroutineState,
+    /// What this coroutine's own body may spend, when a host gave it a budget
+    /// of its own. Carried here because the coroutine is what the host holds
+    /// before anything runs; the frame it starts takes it from here.
+    #[serde(default)]
+    pub budget: Option<Box<StepBudget>>,
 }
 
 impl Coroutine {
@@ -128,7 +171,14 @@ impl Coroutine {
             scope,
             namespace,
             state: CoroutineState::New,
+            budget: None,
         }
+    }
+
+    /// The same coroutine, bounded to `limit` instructions of its own.
+    pub fn with_budget(mut self, limit: Option<u64>) -> Self {
+        self.budget = limit.map(|limit| Box::new(StepBudget::new(limit)));
+        self
     }
 }
 
