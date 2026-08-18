@@ -44,9 +44,10 @@ async fn main() -> Result<(), PoolError> {
     let mut on_print = on_print_sync(|_stream, text| print!("{text}"));
 
     // session state persists between feeds on the same checkout
-    // (`None` leaves the feed bounded only by the session's own `max_steps`)
-    session.feed("x = 21", vec![], vec![], false, None, &mut on_print).await?;
-    let event = session.feed("x * 2", vec![], vec![], false, None, &mut on_print).await?;
+    // (`None` leaves the feed bounded only by the session's own `max_steps`,
+    // and `""` takes the session's generated `<python-input-N>` filename)
+    session.feed("x = 21", vec![], vec![], false, None, "", &mut on_print).await?;
+    let event = session.feed("x * 2", vec![], vec![], false, None, "", &mut on_print).await?;
     match event {
         TurnEvent::Complete(outcome) => println!("result: {:?}", outcome.value), // Int(42)
         // other events are suspensions (external function calls, OS calls,

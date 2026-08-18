@@ -28,6 +28,7 @@ use crate::{
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
         class_getattr, contextvars,
         generic_alias::{is_type_form, subscript_type_form, union_from_members, union_of},
+        host_ref::host_ref_getattr,
         instance::{instance_dataclass_eq, instance_getattr, instance_repr_fmt, instance_str, instance_user_eq},
         instance_bool, instance_delattr, instance_delitem, instance_setattr, instance_setitem,
         long_int::{
@@ -1609,6 +1610,12 @@ impl Value {
             // apply the descriptor protocol, both of which need the heap id.
             Self::Ref(heap_id) if matches!(vm.heap.get(*heap_id), HeapData::Class(_)) => {
                 return class_getattr(*heap_id, attr, vm);
+            }
+            // Every attribute of a host object is read on the host, so the
+            // read is a suspension carrying the reference; like the two arms
+            // above, it needs the heap id the trait method is not handed.
+            Self::Ref(heap_id) if matches!(vm.heap.get(*heap_id), HeapData::HostRef(_)) => {
+                return host_ref_getattr(*heap_id, attr, vm);
             }
             Self::Ref(heap_id) => {
                 if let Some(call_result) = vm.heap.read(*heap_id).py_getattr(attr, vm)? {

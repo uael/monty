@@ -73,6 +73,7 @@ fn create_repl(child: &mut Child) {
 
 fn feed(child: &mut Child, code: &str) -> (Vec<pb::Print>, pb::child_event::Kind) {
     let request = frame_request(pb::parent_request::Kind::Feed(pb::Feed {
+        script_name: String::new(),
         code: code.to_owned(),
         inputs: vec![],
         skip_type_check: false,
@@ -132,6 +133,7 @@ fn inputs_are_injected() {
     create_repl(&mut child);
 
     let request = frame_request(pb::parent_request::Kind::Feed(pb::Feed {
+        script_name: String::new(),
         code: "n + 1".to_owned(),
         inputs: vec![pb::NamedValue {
             name: "n".to_owned(),
@@ -272,6 +274,7 @@ fn probe_evaluates_against_the_session() {
     feed(&mut child, "scale = 6");
 
     let request = frame_request(pb::parent_request::Kind::Probe(pb::Probe {
+        bindings: vec![],
         expr: "scale * 7".to_owned(),
         max_steps: None,
     }));

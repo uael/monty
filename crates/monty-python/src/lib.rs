@@ -85,6 +85,12 @@ mod _monty {
     // whenever an instance of a sandbox-defined class crosses the boundary.
     #[pymodule_export]
     use monty_proto::python::PyMontyInstance as MontyInstance;
+    // A host object the sandbox holds by reference, and the mirror image: a
+    // session value the host holds by reference.
+    #[pymodule_export]
+    use monty_proto::python::PyMontyRef as MontyRef;
+    #[pymodule_export]
+    use monty_proto::python::PyMontySessionRef as MontySessionRef;
     use pyo3::prelude::*;
 
     #[pymodule_export]

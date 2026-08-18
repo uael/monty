@@ -58,6 +58,12 @@ pub(crate) struct Recorder {
     /// Whether the current turn is a `Dump`: an `Error` reply to one leaves
     /// the feed suspended and resumable, so it closes only the dump span.
     dump_turn: bool,
+    /// Open span of a probe taken while a suspension is awaiting an answer.
+    ///
+    /// Like `dump_turn`, its reply closes only this span: the feed underneath
+    /// is still suspended and still resumable. It is the innermost span while
+    /// it is open, since a print the probe emits belongs to the probe.
+    inline_probe: Option<OpenSpan>,
     /// One-shot host context consumed when `Configure` starts the root span.
     adapter_context: Option<TelemetryContext>,
     /// Isolated dispatcher installed only while this recorder emits telemetry.
@@ -74,6 +80,7 @@ impl Recorder {
             feed: None,
             session: None,
             dump_turn: false,
+            inline_probe: None,
             adapter_context: None,
             logfire: None,
         }
@@ -110,6 +117,7 @@ impl Recorder {
             self.turn = None;
         }
         self.dump_turn = false;
+        self.inline_probe = None;
         match &request.kind {
             // a stale session (impossible via the checkout state machine, but
             // cheap to be safe against) is closed by the overwrite
@@ -222,10 +230,16 @@ impl Recorder {
             }
             Some(pb::parent_request::Kind::Probe(p)) => {
                 let (expr, cut) = truncate_str(&p.expr);
-                // a probe is a run like any other, and closes on the same
-                // `Complete`; only the span's name says which of the two it was
-                self.pending = None;
-                self.feed = None;
+                // Taken while a call is awaiting its answer, the probe is a
+                // read of the frame that is asking, and nests inside it: the
+                // suspension stays open, and the probe's own reply closes only
+                // the probe. Otherwise it is a run like any other, closing on
+                // the same `Complete`; only the span's name says which.
+                let inline = self.pending.is_some();
+                if !inline {
+                    self.pending = None;
+                    self.feed = None;
+                }
                 let span = start_span(logfire::span!(
                     parent: self.context_span(),
                     "probe expression",
@@ -237,7 +251,23 @@ impl Recorder {
                     total_execution_micros = Empty,
                     max_duration_micros = Empty,
                 ));
-                self.feed = Some(OpenSpan::new(span, cut));
+                if inline {
+                    self.inline_probe = Some(OpenSpan::new(span, cut));
+                } else {
+                    self.feed = Some(OpenSpan::new(span, cut));
+                }
+            }
+            // Ends nothing and starts nothing: releasing a reference leaves
+            // the session, and any suspension, exactly as it was.
+            Some(pb::parent_request::Kind::ReleaseRefs(r)) => {
+                self.turn = Some(start_span(logfire::span!(
+                    parent: self.context_span(),
+                    "release references",
+                    // i64: `tracing` has no typed usize value. Saturating
+                    // rather than wrapping, so an implausible count reads as
+                    // huge instead of negative.
+                    count = i64::try_from(r.tokens.len()).unwrap_or(i64::MAX),
+                )));
             }
             Some(pb::parent_request::Kind::Parse(p)) => {
                 let (code, code_cut) = truncate_str(&p.code);
@@ -360,14 +390,27 @@ impl Recorder {
             }
             Some(pb::child_event::Kind::Complete(c)) => {
                 let (value, cut) = optional_attr(c.value.as_ref());
+                // A probe taken inside a suspension answers to its own span,
+                // and leaves the suspension it read open.
+                if let Some(mut probe) = self.inline_probe.take() {
+                    if let Some(value) = value {
+                        probe.record("output", &value, cut);
+                    }
+                    probe.span.record("total_execution_micros", int_attr(micros));
+                    if let Some(max_duration) = max_duration {
+                        probe.span.record("max_duration_micros", int_attr(max_duration));
+                    }
+                    return;
+                }
                 self.record_complete(value, cut, micros, max_duration);
                 self.end_feed();
             }
             Some(pb::child_event::Kind::Error(e)) => {
                 record_error(e, micros, max_duration, &self.context_span());
-                // an error reply to `Dump` leaves the feed suspended and
-                // resumable, so it closes only the dump span
-                if self.dump_turn {
+                // an error reply to `Dump`, or to a probe taken inside a
+                // suspension, leaves the feed suspended and resumable, so it
+                // closes only that request's own span
+                if self.dump_turn || self.inline_probe.take().is_some() {
                     self.turn = None;
                 } else {
                     self.end_feed();
@@ -480,6 +523,9 @@ impl Recorder {
     fn context_span(&self) -> Span {
         self.turn
             .as_ref()
+            // Innermost while it is open: a probe read inside a suspension
+            // nests under the suspension it read.
+            .or(self.inline_probe.as_ref().map(OpenSpan::span))
             .or(self.pending.as_ref().map(OpenSpan::span))
             .or(self.feed.as_ref().map(OpenSpan::span))
             .or(self.session.as_ref())
@@ -1057,6 +1103,7 @@ mod tests {
             ..Default::default()
         })));
         recorder.begin_turn(&request(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "double(2)".to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -1224,6 +1271,7 @@ mod tests {
             restored_script_name: Some("restored.py".to_owned()),
         });
         recorder.begin_turn(&request(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "1".to_owned(),
             inputs: vec![],
             skip_type_check: false,

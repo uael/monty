@@ -21,6 +21,7 @@ pub mod ext_function;
 pub mod file;
 pub mod generator;
 pub mod generic_alias;
+pub mod host_ref;
 pub mod instance;
 pub mod iter;
 pub mod itertools;
@@ -60,6 +61,7 @@ pub(crate) use deque::Deque;
 pub(crate) use dict::{Dict, DictItemIterator, DictKeyIterator, DictValueIterator};
 pub(crate) use dict_view::{DictItemsView, DictKeysView, DictValuesView};
 pub(crate) use ext_function::ExtFunction;
+pub(crate) use host_ref::HostRef;
 pub(crate) use file::OpenFile;
 pub(crate) use generic_alias::{GenericAlias, UnionType};
 pub(crate) use instance::{

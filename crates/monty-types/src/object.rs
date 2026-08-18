@@ -184,6 +184,49 @@ pub enum MontyObject {
         /// Instance attributes (`__dict__`), in insertion order.
         attrs: DictPairs,
     },
+    /// A host object the sandbox holds by reference rather than by value.
+    ///
+    /// The boundary otherwise carries copies, so an object with no value
+    /// representation (a live connection, a stateful service, anything whose
+    /// identity is the point) cannot cross at all. A reference crosses instead:
+    /// the sandbox gets an opaque, unforgeable proxy, and every attribute read,
+    /// attribute write, call, method call and subscript on it suspends back to
+    /// the host, which resolves `id` in its own table and performs the operation
+    /// on the real object.
+    ///
+    /// `id` is meaningful only to the host that minted it. `type_name` is the
+    /// host type's name, captured at crossing time so `repr()` and error
+    /// messages inside the sandbox can say what the proxy stands for without a
+    /// round trip.
+    HostRef {
+        /// The host's own identifier for the object. Opaque to the sandbox.
+        id: u64,
+        /// `type(obj).__name__` on the host, for `repr()` and error messages.
+        type_name: String,
+    },
+    /// A session value the host holds by reference rather than by value.
+    ///
+    /// The mirror image of [`HostRef`](Self::HostRef), and the answer for a
+    /// value whose *structure* is what the host wants: a type object, a class,
+    /// a template, a generator. Those cross as their `repr` today, which the
+    /// host can print but not interrogate. A reference crosses instead, and the
+    /// host interrogates it by handing it back into a probe (`__origin__`,
+    /// `__args__`, `__value__`, whatever the value answers) with the session's
+    /// own semantics doing the work.
+    ///
+    /// `id` is meaningful only to the session that minted it. It survives that
+    /// session's dump and load, since it names a place in the heap the dump
+    /// carries. `repr` is the value's `repr()` at export time, so a host that
+    /// only wants to print it needs no round trip.
+    ///
+    /// An exported value is pinned in the session until the host releases it,
+    /// which is what makes the reference safe to hold across turns.
+    SessionRef {
+        /// The session's own identifier for the value. Opaque to the host.
+        id: u64,
+        /// `repr()` of the value at export time.
+        repr: String,
+    },
 }
 
 impl fmt::Display for MontyObject {
@@ -245,6 +288,8 @@ impl MontyObject {
             } => type_name.len() + names_len(field_names),
             Self::Dataclass { name, field_names, .. } => name.len() + names_len(field_names),
             Self::Instance { class, members, .. } => class.len() + names_len(members),
+            Self::HostRef { type_name, .. } => type_name.len(),
+            Self::SessionRef { repr, .. } => repr.len(),
             // A `Type::Instance` carries the resolved class name as an owned leaf
             // `String` (the other `MontyType`s are payload-free), so charge it here
             // like the `String`/`Function`/... names above.
@@ -493,6 +538,10 @@ impl MontyObject {
                 }
                 f.write_char(')')
             }
+            // The host's own id is deliberately absent: it is frequently a real
+            // memory address, and this repr is read inside the sandbox.
+            Self::HostRef { type_name, .. } => write!(f, "<{type_name} host object>"),
+            Self::SessionRef { repr, .. } => f.write_str(repr),
         }
     }
 
@@ -533,6 +582,10 @@ impl MontyObject {
             // No `__bool__`/`__len__` crosses the boundary, so the host copy of
             // an instance takes the default every Python object without them has
             Self::Instance { .. } => true,
+            // Asking the real object would take a host round trip, and this
+            // answers about the boundary copy; both references take the default
+            // every Python object without `__bool__`/`__len__` has.
+            Self::HostRef { .. } | Self::SessionRef { .. } => true,
             Self::Type(_) | Self::BuiltinFunction(_) | Self::Function { .. } | Self::Repr(_) | Self::Cycle(_, _) => {
                 true
             }
@@ -574,6 +627,11 @@ impl MontyObject {
             Self::Function { .. } => "function",
             Self::Repr(_) => "repr",
             Self::Cycle(_, _) => "cycle",
+            // Both carry the real name as an owned `String` (the host type's,
+            // the session value's), which cannot be returned from a `'static`
+            // signature; read the field for it.
+            Self::HostRef { .. } => "hostref",
+            Self::SessionRef { .. } => "sessionref",
         }
     }
 }
@@ -616,6 +674,10 @@ impl Hash for MontyObject {
                 position.hash(state);
             }
             Self::Type(t) => t.name().hash(state),
+            // A reference hashes by identity, as every Python object that
+            // defines no `__hash__` of its own does. The label rides along
+            // uninspected: two references with the same id are the same object.
+            Self::HostRef { id, .. } | Self::SessionRef { id, .. } => id.hash(state),
             Self::Cycle(_, _) => panic!("cycle values are not hashable"),
             _ => panic!("{} python values are not hashable", self.type_name()),
         }
@@ -695,6 +757,10 @@ impl PartialEq for MontyObject {
                     && a_frozen == b_frozen
             }
             (Self::Path(a), Self::Path(b)) => a == b,
+            // Identity, as `is` would answer: the label is a snapshot of how
+            // the object looked when it crossed, not part of what it is.
+            (Self::HostRef { id: a, .. }, Self::HostRef { id: b, .. })
+            | (Self::SessionRef { id: a, .. }, Self::SessionRef { id: b, .. }) => a == b,
             (
                 Self::FileHandle(MontyFileHandle {
                     path: a_path,
@@ -934,6 +1000,12 @@ pub enum MontyType {
     /// pure-Python class.
     #[strum(serialize = "partialmethod")]
     PartialMethod,
+    /// The type of every [`MontyObject::HostRef`]: one type for all of them,
+    /// since the sandbox cannot name a host class and a per-object type would
+    /// make `type(a) is type(b)` answer False for two references to objects of
+    /// the same class. What a reference stands for is on the reference.
+    #[strum(serialize = "hostref")]
+    HostRef,
 }
 
 impl fmt::Display for MontyType {

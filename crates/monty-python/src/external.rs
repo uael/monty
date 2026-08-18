@@ -12,7 +12,7 @@ use monty_types::{ExtFunctionResult, MontyObject};
 use pyo3::{
     exceptions::{PyAttributeError, PyRuntimeError},
     prelude::*,
-    types::{PyDict, PyTuple},
+    types::{PyDict, PyString, PyTuple},
 };
 
 use crate::exceptions::MontyConversionError;
@@ -35,6 +35,82 @@ pub fn dispatch_method_call(
     }
 }
 
+/// Performs one operation of a host reference on the object it names.
+///
+/// A method call arrives here under its own name and is dispatched as one. The
+/// operations that are not method calls (reading an attribute, calling the
+/// object, entering and leaving it as a context manager, awaiting it) arrive
+/// under the reserved dunder names, which is safe to key on because the
+/// sandbox cannot spell a dunder at a reference: the interpreter refuses those
+/// before they reach the boundary, so a name in this set was produced by the
+/// VM performing that operation and by nothing else.
+///
+/// Returns `Ok(None)` when `args` is not a call on a reference, leaving the
+/// dataclass path to handle it.
+fn dispatch_host_ref<'py>(
+    py: Python<'py>,
+    function_name: &str,
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+    dc_registry: &DcRegistry,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some(MontyObject::HostRef { .. }) = args.first() else {
+        return Ok(None);
+    };
+    let mut rest = args.iter().skip(1);
+    let target = monty_to_py(py, &args[0], dc_registry)?;
+    let target = target.bind(py);
+
+    let performed = match function_name {
+        "__getattr__" => {
+            let name = rest
+                .next()
+                .ok_or_else(|| PyRuntimeError::new_err("an attribute read carries the name it reads"))?;
+            target.getattr(monty_to_py(py, name, dc_registry)?.bind(py).cast::<PyString>()?)?
+        }
+        "__call__" => call_with(target, rest, kwargs, py, dc_registry)?,
+        "__enter__" => target.call_method0("__enter__")?,
+        // The type and traceback CPython also passes are not reproducible:
+        // monty has no traceback objects, and the type is the exception's own.
+        "__exit__" => {
+            let exc = rest
+                .next()
+                .ok_or_else(|| PyRuntimeError::new_err("leaving a context manager carries its exception"))?;
+            let exc = monty_to_py(py, exc, dc_registry)?;
+            let exc = exc.bind(py);
+            let exc_type = if exc.is_none() {
+                py.None().into_bound(py)
+            } else {
+                exc.get_type().into_any()
+            };
+            target.call_method1("__exit__", (exc_type, exc, py.None()))?
+        }
+        "__await__" => target.call_method0("__await__")?,
+        method => call_with(&target.getattr(method)?, rest, kwargs, py, dc_registry)?,
+    };
+    Ok(Some(performed))
+}
+
+/// Calls `callable` with the remaining Monty args and kwargs converted.
+fn call_with<'py, 'a>(
+    callable: &Bound<'py, PyAny>,
+    args: impl Iterator<Item = &'a MontyObject>,
+    kwargs: &[(MontyObject, MontyObject)],
+    py: Python<'py>,
+    dc_registry: &DcRegistry,
+) -> PyResult<Bound<'py, PyAny>> {
+    let converted: PyResult<Vec<Py<PyAny>>> = args.map(|arg| monty_to_py(py, arg, dc_registry)).collect();
+    let py_args = PyTuple::new(py, converted?)?;
+    if kwargs.is_empty() {
+        return callable.call1(&py_args);
+    }
+    let py_kwargs = PyDict::new(py);
+    for (key, value) in kwargs {
+        py_kwargs.set_item(monty_to_py(py, key, dc_registry)?, monty_to_py(py, value, dc_registry)?)?;
+    }
+    callable.call(&py_args, Some(&py_kwargs))
+}
+
 /// `PyResult`-returning core of [`dispatch_method_call`].
 fn dispatch_method_call_inner(
     py: Python<'_>,
@@ -43,6 +119,9 @@ fn dispatch_method_call_inner(
     kwargs: &[(MontyObject, MontyObject)],
     dc_registry: &DcRegistry,
 ) -> PyResult<MontyObject> {
+    if let Some(performed) = dispatch_host_ref(py, function_name, args, kwargs, dc_registry)? {
+        return py_to_monty(&performed, dc_registry, 0);
+    }
     validate_host_method_name(function_name)?;
     // First arg is the dataclass self.
     let mut args_iter = args.iter();
@@ -277,6 +356,9 @@ fn dispatch_method_call_inner_raw<'py>(
     kwargs: &[(MontyObject, MontyObject)],
     dc_registry: &DcRegistry,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(performed) = dispatch_host_ref(py, function_name, args, kwargs, dc_registry)? {
+        return Ok(performed);
+    }
     validate_host_method_name(function_name)?;
     let mut args_iter = args.iter();
     let self_obj = args_iter

@@ -32,6 +32,8 @@ __all__ = [
     'MontyError',
     'MontyFileHandle',
     'MontyInstance',
+    'MontyRef',
+    'MontySessionRef',
     'MontySession',
     'MontyShutdown',
     'MontySyntaxError',
@@ -298,6 +300,74 @@ class Frame:
         """dict of attributes."""
 
 @final
+class MontyRef:
+    """A host object passed into a session by reference rather than by value.
+
+    Everything else at the boundary is a copy, so an object whose identity or
+    whose live state is the point cannot cross at all. Wrap it in one of these
+    and it can: sandboxed code gets an opaque proxy, and every attribute read,
+    call, method call and `with` step on the proxy comes back as an external
+    call that is performed on the real object. Nothing has to be declared, and
+    no proxy class has to be written inside the guest.
+
+    The wrapper owns the registration. While it is alive the sandbox can use
+    the reference; once it is collected (or `release()` is called) the
+    reference is dead and an operation on it raises, which is how a host
+    bounds what it has exposed.
+
+    Sandboxed code cannot name a dunder on the proxy, so it cannot reach
+    `__class__` and walk out through the type graph; only operations the
+    interpreter itself performs reach the object under those names.
+    """
+
+    def __new__(cls, obj: Any) -> MontyRef:
+        """Register `obj` and produce the reference that names it."""
+
+    @property
+    def value(self) -> Any | None:
+        """The object this reference names, or `None` once released."""
+
+    @property
+    def type_name(self) -> str:
+        """The referenced object's type name, as the sandbox sees it."""
+
+    def release(self) -> None:
+        """Drop the registration now rather than waiting to be collected."""
+
+    def __repr__(self) -> str: ...
+
+@final
+class MontySessionRef:
+    """A value living inside a session that the host holds a reference to.
+
+    The mirror image of `MontyRef`: what a value with no copy representation
+    becomes on the way out once the session is configured for it. A type
+    object, a class, a template, a generator reach the host as text otherwise,
+    which can be printed and nothing else.
+
+    Not something to inspect from here, and not meant to be. Hand it back to
+    the session as an ordinary input value and ask the session; its own
+    semantics are the only ones that can say what a type is made of.
+
+    The token is the session's. Only that session, or one woken from its dump,
+    can resolve it, and the value stays alive until the session releases it.
+    """
+
+    def __new__(cls, id: int, repr: str = ...) -> MontySessionRef:
+        """Rebuild a reference from its token, for a host that stored the
+        token rather than the object it was handed."""
+
+    @property
+    def id(self) -> int:
+        """The session's token for the value."""
+
+    @property
+    def value_repr(self) -> str:
+        """`repr()` of the value as the session rendered it when it crossed."""
+
+    def __repr__(self) -> str: ...
+
+@final
 class MontyInstance:
     """An instance of a class the sandbox itself defined.
 
@@ -519,6 +589,7 @@ class Monty:
         type_check_color: bool = False,
         assert_message_annotations: bool | int = ...,
         dataclass_registry: list[type] | None = None,
+        cross_by_reference: bool = False,
     ) -> MontySession:
         """
         Prepare a REPL session served by a dedicated worker.
@@ -575,6 +646,7 @@ class MontySession:
         os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | AbstractOS | None = None,
         skip_type_check: bool = False,
         max_steps: int | None = None,
+        script_name: str = '',
     ) -> Any:
         """
         Execute one snippet in the worker and return its result.
@@ -633,6 +705,7 @@ class MontySession:
         os: OsHandler | None = None,
         skip_type_check: bool = False,
         max_steps: int | None = None,
+        script_name: str = '',
     ) -> SyncSnapshot:
         """
         Start a snippet and return a snapshot at each external call, OS call,
@@ -691,6 +764,7 @@ class MontySession:
         self,
         expr: str,
         *,
+        bindings: dict[str, Any] | None = None,
         external_lookup: dict[str, Any] | None = None,
         print_callback: PrintCallback | None = None,
         os: OsHandler | None = None,
@@ -785,6 +859,17 @@ class MontySession:
         with `resume({call_id: ...})`.
         """
 
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A value crosses out as a `MontySessionRef` only when the session was
+        checked out with `cross_by_reference=True`, and stays pinned until
+        released: nothing inside the sandbox can drop it, because the reference
+        lives outside. A token this session never minted, or one already
+        released, is ignored.
+        """
+
     def dump(self) -> bytes:
         """
         Serialize the worker's session state (idle or suspended) to opaque
@@ -860,6 +945,7 @@ class AsyncMonty:
         type_check_color: bool = False,
         assert_message_annotations: bool | int = ...,
         dataclass_registry: list[type] | None = None,
+        cross_by_reference: bool = False,
     ) -> AsyncMontySession:
         """
         Prepare a REPL session served by a dedicated worker.
@@ -942,6 +1028,7 @@ class AsyncMontyWebsocket:
         type_check_color: bool = False,
         assert_message_annotations: bool | int = ...,
         dataclass_registry: list[type] | None = None,
+        cross_by_reference: bool = False,
     ) -> AsyncMontySession:
         """
         Prepare a REPL session served by a dedicated remote connection.
@@ -976,6 +1063,7 @@ class AsyncMontySession:
         os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | AbstractOS | None = None,
         skip_type_check: bool = False,
         max_steps: int | None = None,
+        script_name: str = '',
     ) -> Any:
         """
         Execute one snippet in the worker and return its result.
@@ -1028,6 +1116,7 @@ class AsyncMontySession:
         os: OsHandler | None = None,
         skip_type_check: bool = False,
         max_steps: int | None = None,
+        script_name: str = '',
     ) -> AsyncSnapshot:
         """
         Async counterpart of `MontySession.feed_start`: resolves to a snapshot
@@ -1076,6 +1165,7 @@ class AsyncMontySession:
         self,
         expr: str,
         *,
+        bindings: dict[str, Any] | None = None,
         external_lookup: dict[str, Any] | None = None,
         print_callback: PrintCallback | None = None,
         os: OsHandler | None = None,
@@ -1115,6 +1205,10 @@ class AsyncMontySession:
         restored-snapshot caveats as the sync method (a restored `FutureSnapshot`
         cannot be driven with `resume_auto()` — its pending coroutines are gone).
         """
+
+    async def release_refs(self, *tokens: int) -> None:
+        """Async counterpart of `MontySession.release_refs`: release your
+        references to values this session exported."""
 
     async def dump(self) -> bytes:
         """
@@ -1246,6 +1340,29 @@ class FunctionSnapshot:
         `NameError` (as in `feed_run`). A coroutine external raises
         `RuntimeError` — use `AsyncMonty` for async externals."""
 
+    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+        """Evaluate one expression against the suspended session and return its
+        value, leaving this suspension resumable.
+
+        You are answering a call the sandbox made, and some answers can only be
+        decided by looking at the frame that is asking. Nothing runs while a
+        suspension waits, so the frame is readable: the expression sees the
+        globals exactly as the suspended snippet left them.
+
+        `bindings` are visible to this expression and to nothing after it, so
+        supplying a name here does not become a name the session has. The
+        expression runs to completion, since the suspension is already the one
+        turn in flight: a name `bindings` does not supply raises `NameError`
+        rather than reaching back out to you.
+        """
+
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A token this session never minted, or one already released, is ignored.
+        """
+
     def dump(self) -> bytes:
         """Serialize the suspended worker; restore via `MontySession.load_snapshot`."""
 
@@ -1268,6 +1385,29 @@ class NameLookupSnapshot:
         `external_lookup=`, then return the next snapshot (or `MontyComplete`). A
         name absent from the lookup makes the sandbox raise `NameError`."""
 
+    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+        """Evaluate one expression against the suspended session and return its
+        value, leaving this suspension resumable.
+
+        You are answering a call the sandbox made, and some answers can only be
+        decided by looking at the frame that is asking. Nothing runs while a
+        suspension waits, so the frame is readable: the expression sees the
+        globals exactly as the suspended snippet left them.
+
+        `bindings` are visible to this expression and to nothing after it, so
+        supplying a name here does not become a name the session has. The
+        expression runs to completion, since the suspension is already the one
+        turn in flight: a name `bindings` does not supply raises `NameError`
+        rather than reaching back out to you.
+        """
+
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A token this session never minted, or one already released, is ignored.
+        """
+
     def dump(self) -> bytes:
         """Serialize the suspended worker; restore via `MontySession.load_snapshot`."""
 
@@ -1289,6 +1429,29 @@ class FutureSnapshot:
         """Always raises `RuntimeError`: a sync session cannot drive coroutine
         externals. Resolve the pending futures manually with `resume({...})`, or
         use `AsyncMonty`. Does not consume the snapshot."""
+
+    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+        """Evaluate one expression against the suspended session and return its
+        value, leaving this suspension resumable.
+
+        You are answering a call the sandbox made, and some answers can only be
+        decided by looking at the frame that is asking. Nothing runs while a
+        suspension waits, so the frame is readable: the expression sees the
+        globals exactly as the suspended snippet left them.
+
+        `bindings` are visible to this expression and to nothing after it, so
+        supplying a name here does not become a name the session has. The
+        expression runs to completion, since the suspension is already the one
+        turn in flight: a name `bindings` does not supply raises `NameError`
+        rather than reaching back out to you.
+        """
+
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A token this session never minted, or one already released, is ignored.
+        """
 
     def dump(self) -> bytes:
         """Serialize the suspended worker; restore via `MontySession.load_snapshot`."""
@@ -1320,6 +1483,29 @@ class AsyncFunctionSnapshot:
         is spawned and answered with a pending future, so other sandbox tasks
         keep running; it is later settled by `AsyncFutureSnapshot.resume_auto`."""
 
+    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+        """Evaluate one expression against the suspended session and return its
+        value, leaving this suspension resumable.
+
+        You are answering a call the sandbox made, and some answers can only be
+        decided by looking at the frame that is asking. Nothing runs while a
+        suspension waits, so the frame is readable: the expression sees the
+        globals exactly as the suspended snippet left them.
+
+        `bindings` are visible to this expression and to nothing after it, so
+        supplying a name here does not become a name the session has. The
+        expression runs to completion, since the suspension is already the one
+        turn in flight: a name `bindings` does not supply raises `NameError`
+        rather than reaching back out to you.
+        """
+
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A token this session never minted, or one already released, is ignored.
+        """
+
     def dump(self) -> bytes: ...
     def __repr__(self) -> str: ...
 
@@ -1334,6 +1520,29 @@ class AsyncNameLookupSnapshot:
     async def resume(self, *, value: Any = ...) -> AsyncSnapshot: ...
     async def resume_auto(self) -> AsyncSnapshot:
         """Async sibling of `NameLookupSnapshot.resume_auto`."""
+
+    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+        """Evaluate one expression against the suspended session and return its
+        value, leaving this suspension resumable.
+
+        You are answering a call the sandbox made, and some answers can only be
+        decided by looking at the frame that is asking. Nothing runs while a
+        suspension waits, so the frame is readable: the expression sees the
+        globals exactly as the suspended snippet left them.
+
+        `bindings` are visible to this expression and to nothing after it, so
+        supplying a name here does not become a name the session has. The
+        expression runs to completion, since the suspension is already the one
+        turn in flight: a name `bindings` does not supply raises `NameError`
+        rather than reaching back out to you.
+        """
+
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A token this session never minted, or one already released, is ignored.
+        """
 
     def dump(self) -> bytes: ...
     def __repr__(self) -> str: ...
@@ -1352,6 +1561,29 @@ class AsyncFutureSnapshot:
         `resume_auto` calls to settle, deliver them, and return the next
         snapshot. Raises if there are no pending coroutines to await (e.g. a
         snapshot restored via `load_snapshot`)."""
+
+    def probe(self, expr: str, *, bindings: dict[str, Any] | None = None, max_steps: int | None = None) -> Any:
+        """Evaluate one expression against the suspended session and return its
+        value, leaving this suspension resumable.
+
+        You are answering a call the sandbox made, and some answers can only be
+        decided by looking at the frame that is asking. Nothing runs while a
+        suspension waits, so the frame is readable: the expression sees the
+        globals exactly as the suspended snippet left them.
+
+        `bindings` are visible to this expression and to nothing after it, so
+        supplying a name here does not become a name the session has. The
+        expression runs to completion, since the suspension is already the one
+        turn in flight: a name `bindings` does not supply raises `NameError`
+        rather than reaching back out to you.
+        """
+
+    def release_refs(self, *tokens: int) -> None:
+        """Release your references to values this session exported, letting it
+        free each one once nothing else holds it.
+
+        A token this session never minted, or one already released, is ignored.
+        """
 
     def dump(self) -> bytes: ...
     def __repr__(self) -> str: ...

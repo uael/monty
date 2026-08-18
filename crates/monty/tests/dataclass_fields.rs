@@ -95,3 +95,34 @@ fn field_type_marker_is_not_implemented() {
 fn classvars_are_absent_from_the_mapping() {
     assert_snapshot!(eval_str("repr(list(Point.__dataclass_fields__))"), @"['x', 'y']");
 }
+
+/// A field's `default_factory` can be called, not only read.
+///
+/// `obj.name(...)` is `getattr(obj, "name")(...)`; the opcode that fuses the
+/// two is an optimization, so a type that answers a name through attribute
+/// lookup and holds no method of that name has to answer a call of it too.
+#[test]
+fn a_native_attribute_holding_a_callable_can_be_called() {
+    let run = MontyRun::new(
+        "\nfrom dataclasses import dataclass, field, fields\n\n@dataclass\nclass Holder:\n    xs: list = field(default_factory=list)\n\nf = fields(Holder)[0]\n(f.default_factory(), fields(Holder)[0].default_factory())\n"
+            .to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    )
+    .expect("code should compile");
+    assert_eq!(
+        run.run_no_limits(vec![]).expect("code should run"),
+        MontyObject::Tuple(vec![MontyObject::List(vec![]), MontyObject::List(vec![])])
+    );
+}
+
+/// A name the type answers with nothing still reports itself as absent,
+/// rather than as something that is not callable.
+#[test]
+fn a_native_attribute_that_is_absent_is_still_an_attribute_error() {
+    assert_eq!(
+        expect_error("Point.__dataclass_fields__['x'].nonesuch()"),
+        "'Field' object has no attribute 'nonesuch'"
+    );
+}

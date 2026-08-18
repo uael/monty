@@ -95,6 +95,21 @@ pub fn monty_to_js<'e>(obj: &MontyObject, env: &'e Env) -> Result<JsMontyObject<
         // Function objects are internal to the name lookup protocol and should not normally
         // appear as final output values. If they do, represent as a string with the function name.
         MontyObject::Function { name, .. } => env.create_string(name)?.into_unknown(env)?,
+        // A reference is only usable by a host that keeps a table to resolve
+        // it in, and this binding keeps none: it has no way to make a JS
+        // object reachable from the sandbox, nor to hold a session value for
+        // the caller. Refusing says so, where a marker string would look like
+        // a value and behave like nothing.
+        MontyObject::HostRef { type_name, .. } => {
+            return Err(Error::from_reason(format!(
+                "a reference to a host {type_name} cannot cross to JavaScript: this binding resolves no references"
+            )));
+        }
+        MontyObject::SessionRef { repr, .. } => {
+            return Err(Error::from_reason(format!(
+                "a reference to the session value {repr} cannot cross to JavaScript: this binding holds no references"
+            )));
+        }
     };
     Ok(JsMontyObject(unknown))
 }

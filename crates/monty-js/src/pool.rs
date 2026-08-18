@@ -244,6 +244,9 @@ impl NativePool {
                     AssertMessageAnnotations::default,
                     AssertMessageAnnotations::from_max_bytes,
                 ),
+                // This binding resolves no references, so asking for values to
+                // cross as ones would only produce values it must refuse.
+                cross_by_reference: false,
             },
             checkout: Arc::new(AsyncMutex::new(None)),
         })
@@ -358,7 +361,7 @@ impl NativeSession {
             outcome_fn(move |checkout, on_print| {
                 Box::pin(async move {
                     checkout
-                        .feed(&code, inputs, mounts, skip_type_check, None, on_print)
+                        .feed(&code, inputs, mounts, skip_type_check, None, "", on_print)
                         .await
                 })
             }),

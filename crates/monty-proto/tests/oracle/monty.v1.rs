@@ -22,7 +22,7 @@ pub struct Unit {}
 pub struct MontyObject {
     #[prost(
         oneof = "monty_object::Kind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
     )]
     pub kind: ::core::option::Option<monty_object::Kind>,
 }
@@ -105,7 +105,54 @@ pub mod monty_object {
         NotImplemented(super::Unit),
         #[prost(message, tag = "30")]
         Instance(super::Instance),
+        /// A host object the sandbox holds by reference.
+        #[prost(message, tag = "31")]
+        HostRef(super::HostRef),
+        /// A session value the host holds by reference.
+        #[prost(message, tag = "32")]
+        SessionRef(super::SessionRef),
     }
+}
+/// A host object the sandbox holds by reference rather than by value.
+///
+/// The boundary otherwise carries copies, so an object whose identity or whose
+/// live state is the point cannot cross at all. This crosses instead: the
+/// sandbox gets an opaque proxy, and every attribute read, call, method call
+/// and context-manager step on it arrives as a `FunctionCall` with
+/// `method_call` set and the reference as the first argument, so the parent
+/// resolves it in its own table and performs the operation on the real object.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HostRef {
+    /// The parent's own identifier for the object. Opaque to the child, and
+    /// never readable from sandboxed code: it is frequently a memory address.
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    /// `type(obj).__name__` on the parent, so repr and error messages inside the
+    /// sandbox can name what the proxy stands for without a round trip.
+    #[prost(string, tag = "2")]
+    pub type_name: ::prost::alloc::string::String,
+}
+/// A session value the parent holds by reference rather than by value.
+///
+/// The mirror image of `HostRef`, and the answer for a value whose structure
+/// is what the parent wants: a type object, a class, a template, a generator.
+/// Those cross as their `repr` otherwise, which the parent can print but not
+/// ask anything. The parent hands the reference back as an ordinary input and
+/// the session's own semantics answer whatever it wants to know.
+///
+/// The id names a place in the child session's heap. It is meaningful only to
+/// that session, and it survives that session's dump and load, since the dump
+/// carries the heap. An id the session did not mint, or one it has released,
+/// is refused as an input.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SessionRef {
+    /// The session's own identifier for the value. Opaque to the parent.
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    /// `repr()` of the value at export time, so a parent that only wants to
+    /// print it needs no round trip.
+    #[prost(string, tag = "2")]
+    pub repr: ::prost::alloc::string::String,
 }
 /// An instance of a class the sandbox itself defined.
 ///
@@ -481,7 +528,7 @@ pub struct ParentRequest {
     /// not depend on it, and it is absent whenever the parent is not tracing.
     #[prost(string, optional, tag = "20")]
     pub trace_parent: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(oneof = "parent_request::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
+    #[prost(oneof = "parent_request::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13")]
     pub kind: ::core::option::Option<parent_request::Kind>,
 }
 /// Nested message and enum types in `ParentRequest`.
@@ -512,6 +559,8 @@ pub mod parent_request {
         Parse(super::Parse),
         #[prost(message, tag = "12")]
         Probe(super::Probe),
+        #[prost(message, tag = "13")]
+        ReleaseRefs(super::ReleaseRefs),
     }
 }
 /// Configures the REPL session this child will serve until `Reset`, sent once
@@ -563,6 +612,11 @@ pub struct Configure {
     /// in-band negotiation, so an undeclared peer cannot be assumed compatible.
     #[prost(uint32, tag = "9")]
     pub protocol_version: u32,
+    /// Hand back a `SessionRef` for a value with no representation of its own,
+    /// rather than its `repr` string. See `SessionRef`; off by default, because
+    /// an exported value is pinned until `ReleaseRefs` frees it.
+    #[prost(bool, tag = "10")]
+    pub cross_by_reference: bool,
 }
 /// Executes one snippet against the session. Turn ends with `Complete`,
 /// `Error`, `TypingError`, or a suspension event.
@@ -582,6 +636,14 @@ pub struct Feed {
     /// source under the same budget fails with the same message every time.
     #[prost(uint64, optional, tag = "4")]
     pub max_steps: ::core::option::Option<u64>,
+    /// Filename this snippet's frames carry. Empty takes the session's generated
+    /// `<python-input-N>`.
+    ///
+    /// Used verbatim, including when an earlier snippet already used it: the
+    /// source kept for rendering tracebacks is keyed by this name, so reusing
+    /// one makes the older snippet's frames render against the newer text.
+    #[prost(string, tag = "5")]
+    pub script_name: ::prost::alloc::string::String,
 }
 /// Reads a snippet and answers what is statically true of it, running none of
 /// it. Turn ends with `ParseFacts`. Valid with or without a session, since
@@ -600,15 +662,48 @@ pub struct Parse {
     pub stores: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Evaluates one expression against the session's namespace and answers with
-/// its value. Binds nothing, so the session is left as it was. Turn ends with
-/// `Complete`, `Error`, or a suspension, exactly as a `Feed` does.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+/// its value. Binds nothing, so the session is left as it was.
+///
+/// Valid whether the session is idle or suspended mid-feed. Suspended, nothing
+/// is running (the child is waiting on the parent's answer), so the frame is
+/// readable and this is how a parent decides its answer BY what the frame that
+/// is asking contains. The suspension is left resumable, and the turn ends with
+/// `Complete` or `Error` rather than a suspension of its own: an expression
+/// reaching a name only the parent could answer raises `NameError`, since a
+/// second suspension would have nowhere to go.
+///
+/// Idle, the turn may still end in a suspension, exactly as a `Feed` does,
+/// unless `bindings` supplies what the expression needs.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Probe {
     #[prost(string, tag = "1")]
     pub expr: ::prost::alloc::string::String,
     /// Instructions the expression may execute, as in `Feed.max_steps`.
     #[prost(uint64, optional, tag = "2")]
     pub max_steps: ::core::option::Option<u64>,
+    /// Values visible to this expression and to nothing after it.
+    ///
+    /// Unlike a `Feed`'s inputs, and unlike a name resolved through a
+    /// `NameLookup`, these do not stay in the namespace: each binding's slot is
+    /// put back the way it was found. So supplying a name for one expression
+    /// cannot later answer a definition the session failed to make.
+    ///
+    /// Required while the session is suspended, since a name nothing supplies
+    /// raises there rather than reaching the parent.
+    #[prost(message, repeated, tag = "3")]
+    pub bindings: ::prost::alloc::vec::Vec<NamedValue>,
+}
+/// Releases the parent's references to values the session exported (see
+/// `SessionRef`), letting the session free each one once nothing else holds it.
+///
+/// An export is pinned until this arrives: nothing inside the sandbox can drop
+/// it, because the reference lives outside. A token this session never minted,
+/// or one already released, is ignored rather than taking a reference that is
+/// no longer the parent's. Turn ends with `Ok`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReleaseRefs {
+    #[prost(uint64, repeated, tag = "1")]
+    pub tokens: ::prost::alloc::vec::Vec<u64>,
 }
 /// Answers a `FunctionCall` or `OsCall` suspension. `call_id` must match the
 /// suspension event.

@@ -205,6 +205,8 @@ mod tag {
     pub const INSTANCE_TYPE: u32 = 28;
     pub const NOT_IMPLEMENTED: u32 = 29;
     pub const INSTANCE: u32 = 30;
+    pub const HOST_REF: u32 = 31;
+    pub const SESSION_REF: u32 = 32;
 }
 
 // ============================================================================
@@ -321,6 +323,16 @@ fn encode_object(obj: &MontyObject, buf: &mut impl BufMut) {
             encode_message_key(3, dict_len(attrs), buf);
             encode_dict(attrs, buf);
         }
+        MontyObject::HostRef { id, type_name } => {
+            encode_message_key(tag::HOST_REF, ref_len(*id, type_name), buf);
+            encode_uint64(1, *id, buf);
+            encode_str(2, type_name, buf);
+        }
+        MontyObject::SessionRef { id, repr } => {
+            encode_message_key(tag::SESSION_REF, ref_len(*id, repr), buf);
+            encode_uint64(1, *id, buf);
+            encode_str(2, repr, buf);
+        }
         MontyObject::Function { name, docstring } => {
             encode_message_key(
                 tag::FUNCTION,
@@ -391,6 +403,8 @@ fn object_len(obj: &MontyObject) -> usize {
         MontyObject::Instance { class, members, attrs } => {
             submessage_len(tag::INSTANCE, instance_len(class, members, attrs))
         }
+        MontyObject::HostRef { id, type_name } => submessage_len(tag::HOST_REF, ref_len(*id, type_name)),
+        MontyObject::SessionRef { id, repr } => submessage_len(tag::SESSION_REF, ref_len(*id, repr)),
         MontyObject::Function { name, docstring } => {
             submessage_len(tag::FUNCTION, str_len(1, name) + opt_str_len(2, docstring.as_deref()))
         }
@@ -525,6 +539,12 @@ fn dataclass_len(name: &str, type_id: u64, field_names: &[String], attrs: &DictP
         } else {
             0
         }
+}
+
+/// `HostRef` and `SessionRef` body: `uint64 id = 1; string <label> = 2`. One
+/// helper for both, since the two messages differ only in what the label means.
+fn ref_len(id: u64, label: &str) -> usize {
+    uint64_len(1, id) + str_len(2, label)
 }
 
 /// `Instance` body: `string class_name = 1; repeated string members = 2;
@@ -753,6 +773,20 @@ fn decode_field(
                 class: inst.class_name,
                 members: inst.members,
                 attrs: DictPairs::from(attrs.0),
+            }
+        }
+        tag::HOST_REF => {
+            let body: RefBody = merge_message(wire_type, buf, ctx)?;
+            MontyObject::HostRef {
+                id: body.id,
+                type_name: body.label,
+            }
+        }
+        tag::SESSION_REF => {
+            let body: RefBody = merge_message(wire_type, buf, ctx)?;
+            MontyObject::SessionRef {
+                id: body.id,
+                repr: body.label,
             }
         }
         tag::FUNCTION => {
@@ -985,6 +1019,45 @@ struct InstanceBody {
     class_name: String,
     members: Vec<String>,
     attrs: Option<PairList>,
+}
+
+/// Decode-only `prost::Message` for `HostRef` and `SessionRef`, which share a
+/// shape: an id and one label string. Decoding both through one body keeps the
+/// two arms from drifting; which message it came from is the tag, and that is
+/// what decides whether the label is a type name or a repr.
+#[derive(Default)]
+struct RefBody {
+    id: u64,
+    label: String,
+}
+
+impl Message for RefBody {
+    fn merge_field(
+        &mut self,
+        tag: u32,
+        wire_type: WireType,
+        buf: &mut impl Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError> {
+        match tag {
+            1 => encoding::uint64::merge(wire_type, &mut self.id, buf, ctx),
+            2 => encoding::string::merge(wire_type, &mut self.label, buf, ctx),
+            _ => skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+
+    fn encode_raw(&self, _buf: &mut impl BufMut) {
+        unreachable!("RefBody is decode-only")
+    }
+
+    fn encoded_len(&self) -> usize {
+        unreachable!("RefBody is decode-only")
+    }
+
+    fn clear(&mut self) {
+        self.id = 0;
+        self.label.clear();
+    }
 }
 
 impl Message for InstanceBody {

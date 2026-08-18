@@ -17,7 +17,7 @@ use crate::{
     heap::{DropGuard, Heap, HeapData, HeapId, HeapReadOutput},
     intern::Interns,
     types::{
-        Dataclass, Instance, LongInt, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type, allocate_tuple,
+        Dataclass, HostRef, Instance, LongInt, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type, allocate_tuple,
         bytes::Bytes,
         date as date_type, datetime as datetime_type,
         dict::Dict,
@@ -229,6 +229,21 @@ impl MontyObjectExt for MontyObject {
             },
             Self::BuiltinFunction(f) => Ok(Value::Builtin(Builtins::Function(f))),
             Self::Function { name, .. } => Ok(vm.heap.get_ext_function(&name)),
+            Self::HostRef { id, type_name } => Ok(Value::Ref(
+                vm.heap.allocate(HeapData::HostRef(HostRef::new(id, type_name))),
+            )),
+            // A session reference names a place in this session's heap, so it
+            // is resolved rather than built: the value is the one already
+            // there, and the reference hands back a count on it.
+            Self::SessionRef { id, repr } => {
+                let heap_id = vm.heap.exported(id).ok_or_else(|| {
+                    InvalidInputError::invalid_type(format!(
+                        "{repr} names an export this session has released or never made"
+                    ))
+                })?;
+                vm.heap.inc_ref(heap_id);
+                Ok(Value::Ref(heap_id))
+            }
             Self::Repr(_) => Err(InvalidInputError::invalid_type("'Repr' is not a valid input value")),
             Self::Cycle(_, _) => Err(InvalidInputError::invalid_type("'Cycle' is not a valid input value")),
         }
@@ -514,6 +529,16 @@ impl MontyObjectExt for MontyObject {
                         name: function.get(vm.heap).as_str().to_owned(),
                         docstring: None,
                     },
+                    // Back the way it came: the host recognises its own id and
+                    // resolves it to the object, so a reference handed in and
+                    // read back out is the same object, not a copy of one.
+                    HeapReadOutput::HostRef(host_ref) => {
+                        let host_ref = host_ref.get(vm.heap);
+                        Self::HostRef {
+                            id: host_ref.id(),
+                            type_name: host_ref.type_name().to_owned(),
+                        }
+                    }
                     HeapReadOutput::Instance(instance) => {
                         let class_id = instance.get(vm.heap).class();
                         let (class, members) = class_signature(class_id, vm);
@@ -527,7 +552,7 @@ impl MontyObjectExt for MontyObject {
                             attrs: pairs_to_objects(children, vm, visited).into(),
                         }
                     }
-                    _ => repr_or_error(object, vm),
+                    _ => cross_unrepresentable(object, vm),
                 };
 
                 // Remove from visited set after processing
@@ -644,6 +669,7 @@ impl MontyTypeExt for MontyType {
             Self::AttrGetter => Some(Type::AttrGetter),
             Self::ItertoolsAccumulate => Some(Type::ItertoolsAccumulate),
             Self::PartialMethod => Some(Type::PartialMethod),
+            Self::HostRef => Some(Type::HostRef),
         }
     }
 
@@ -764,6 +790,7 @@ impl MontyTypeExt for MontyType {
             // `type`, the family they belong to: a value of one of them crosses
             // as its `repr` (`list[int]`, `int | str`), like a class object.
             Type::GenericAlias | Type::Union | Type::Native(_) | Type::TypeVar => Self::Type,
+            Type::HostRef => Self::HostRef,
         }
     }
 
@@ -903,6 +930,31 @@ fn session_class(name: &str, members: &[String], vm: &VM<'_>) -> Option<HeapId> 
         let (found, found_members) = class_signature(*id, vm);
         (found == name && found_members == members).then_some(*id)
     })
+}
+
+/// How a value with no copy representation crosses: as a reference the host
+/// can hand back and interrogate when the session is in `cross_by_reference`
+/// mode, and as its `repr` string otherwise.
+///
+/// This is the one place a type object, a class object, a template, a
+/// generator decides what it becomes on the way out, so it is the one place
+/// the mode has to be read. A reference is only possible for a heap value:
+/// there is nothing to pin otherwise, and every non-heap value already has a
+/// copy representation.
+fn cross_unrepresentable(value: &Value, vm: &mut VM<'_>) -> MontyObject {
+    let Value::Ref(id) = *value else {
+        return repr_or_error(value, vm);
+    };
+    if !vm.heap.cross_by_reference() {
+        return repr_or_error(value, vm);
+    }
+    let MontyObject::Repr(repr) = repr_or_error(value, vm) else {
+        unreachable!("repr_or_error always answers with a Repr");
+    };
+    MontyObject::SessionRef {
+        id: vm.heap.export(id),
+        repr,
+    }
 }
 
 /// Converts a value to its repr string for `MontyObject`, falling back to a

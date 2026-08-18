@@ -306,6 +306,16 @@ pub enum Type {
     TaskGroup,
     #[strum(serialize = "Timeout")]
     Timeout,
+    /// A host object the sandbox holds by reference.
+    ///
+    /// One type for every such object, rather than one per host class: the
+    /// sandbox cannot name a host class, so a per-object type would only make
+    /// `type(a) is type(b)` answer False for two references to objects of the
+    /// same host class, which is worse than answering nothing. What the
+    /// reference stands for is on the reference (`repr`, and every error
+    /// message it raises), not in the type system.
+    #[strum(serialize = "hostref")]
+    HostRef,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

@@ -25,7 +25,8 @@ use crate::{
     types::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
-        FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor,
+        FrozenSet, GenericAlias, HostRef, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt,
+        MethodDescriptor,
         Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range, RangeIterator, ReMatch,
         RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator,
         Type, TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive,
@@ -236,6 +237,9 @@ pub(crate) enum HeapData {
     /// One of `asyncio`'s coordination objects: a lock, an event, a semaphore,
     /// a barrier, a queue, a task group, or a timeout.
     AsyncPrimitive(Box<AsyncPrimitive>),
+    /// A host object the sandbox holds by reference: an opaque proxy whose
+    /// operations suspend to the host rather than being answered here.
+    HostRef(HostRef),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -339,7 +343,10 @@ impl HeapData {
             | Self::TimeDelta(_)
             | Self::TimeZone(_)
             // A leaf: its paths are plain strings, never heap references.
-            | Self::AttrGetter(_) => false,
+            | Self::AttrGetter(_)
+            // A leaf: it owns an id and a name, and the object it names is not
+            // in this heap at all.
+            | Self::HostRef(_) => false,
         }
     }
 
@@ -363,6 +370,10 @@ impl HeapData {
                 | Self::Instance(_)
                 | Self::AttrGetter(_)
                 | Self::PartialMethod(_)
+                // Whether the host object is callable is the host's answer to
+                // give; the call goes out and comes back as a `TypeError` if
+                // it is not.
+                | Self::HostRef(_)
         )
     }
 
@@ -403,6 +414,7 @@ impl HeapData {
             Self::Coroutine(_) => Type::Coroutine,
             Self::Future(future) => future.py_type(),
             Self::Combinator(_) => Type::AsCompleted,
+            Self::HostRef(_) => Type::HostRef,
             Self::Generator(generator) => generator.py_type(),
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
@@ -639,6 +651,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::TypeVar($value) => $body,
             Self::AsyncPrimitive($value) => $body,
             Self::Combinator($value) => $body,
+            Self::HostRef($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -1199,6 +1212,9 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             | Self::Super(_)
             | Self::LongInt(_)
             | Self::Module(_)
+            // Iterating one would need a suspension per step, which
+            // `py_iter`/`py_next` have no room to take.
+            | Self::HostRef(_)
             | Self::Coroutine(_) => Err(ExcType::type_error_not_iterable(
                 &self.py_type(vm).name(vm.heap, vm.interns),
             )),

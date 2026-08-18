@@ -491,6 +491,10 @@ impl Executor {
             // fixture that leaves `asyncio.sleep(100)` parked has not leaked it, and
             // naming it a leak would only teach the tests to avoid unfinished tasks.
             roots.extend(vm.loop_root_ids());
+            // A value the host holds a reference to is owned by the export table
+            // for the same reason: the reference lives outside the sandbox, so no
+            // name in here explains it and it is not a leak.
+            roots.extend(vm.heap.export_ids());
             // Those are the only roots: locals are gone once the module frame exits, so
             // anything still live must hang off a name, the result, or one of those two
             // owners to not be a leak.

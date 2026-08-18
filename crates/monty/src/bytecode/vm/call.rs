@@ -27,6 +27,7 @@ use crate::{
         bytes::call_bytes_method,
         class::class_exc_base,
         construct_namedtuple,
+        host_ref::host_ref_call,
         instance::{class_member, class_name},
         instance_call, partialmethod,
         protocol::is_protocol_class,
@@ -515,6 +516,8 @@ impl VM<'_> {
 
         let (func_id, cells, defaults) = match self.heap.get(heap_id) {
             HeapData::Class(_) => return self.instantiate_class(heap_id, args),
+            // Calling a host object is the host's own `__call__`.
+            HeapData::HostRef(_) => return Ok(host_ref_call(heap_id, args, self)),
             // An instance is callable through its class's `__call__`.
             HeapData::Instance(_) => return instance_call(heap_id, args, self),
             // Calling a namedtuple class constructs a `NamedTuple` instance.

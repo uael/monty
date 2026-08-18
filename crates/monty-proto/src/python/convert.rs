@@ -1,7 +1,14 @@
 //! Bidirectional conversion between Monty's `MontyObject` and PyO3 Python
 //! objects: `py_to_monty` for inputs, `monty_to_py` for outputs.
 
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use monty_types::{
     FileMode, MontyDate, MontyDateTime, MontyException, MontyFileHandle, MontyObject, MontyTimeDelta, MontyTimeZone,
@@ -164,6 +171,16 @@ pub fn py_to_monty(obj: &Bound<'_, PyAny>, dc_registry: &DcRegistry, mut depth: 
         // Handle pathlib.PurePosixPath and thereby pathlib.PosixPath objects
         let path_str: String = obj.str()?.extract()?;
         Ok(MontyObject::Path(path_str))
+    } else if let Ok(host_ref) = obj.cast::<PyMontyRef>() {
+        // The host said this one crosses by reference, so only the token goes.
+        let host_ref = host_ref.get();
+        Ok(MontyObject::HostRef {
+            id: host_ref.token,
+            type_name: host_ref.type_name.clone(),
+        })
+    } else if let Ok(session_ref) = obj.cast::<PyMontySessionRef>() {
+        // A token the session minted, going home to be resolved there.
+        Ok(session_ref.get().as_object())
     } else if let Ok(instance) = obj.cast::<PyMontyInstance>() {
         // Carry an instance back into a session: the class is matched there by
         // the shape recorded here, since no heap id survives the crossing.
@@ -451,6 +468,26 @@ pub(crate) fn monty_to_py_inner(
             .into_any())
         }
         // Output-only types - convert to string representation
+        // Back to the object itself: a host reference resolves in the table
+        // that minted it, which is what makes the round trip an identity
+        // rather than a copy. A reference whose `MontyRef` has been collected
+        // resolves to nothing, and every operation on it says so.
+        MontyObject::HostRef { id, type_name } => host_object(*id, py).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "the host no longer holds the {type_name} object this reference names"
+            ))
+        }),
+        // Deliberately not resolved: the value lives in the session, and the
+        // host is handed the token to give back rather than anything to poke
+        // at from here.
+        MontyObject::SessionRef { id, repr } => Ok(Py::new(
+            py,
+            PyMontySessionRef {
+                id: *id,
+                repr: repr.clone(),
+            },
+        )?
+        .into_any()),
         MontyObject::Repr(s) => Ok(PyString::new(py, s).into_any().unbind()),
         MontyObject::Cycle(_, placeholder) => Ok(PyString::new(py, placeholder).into_any().unbind()),
         // Function objects are internal to the name lookup protocol and should not normally
@@ -819,6 +856,209 @@ impl PyMontyInstance {
             rendered.push(format!("{}={}", key.str()?, value.repr()?));
         }
         Ok(format!("{}({})", self.class_name, rendered.join(", ")))
+    }
+}
+
+/// The process-wide table of host objects the sandbox holds references to.
+///
+/// A reference crossing into a session carries only a token; resolving it back
+/// to the object is what this table is for. It holds a strong reference,
+/// because the sandbox's copy of the token is not something Python's garbage
+/// collector can see, so nothing else would keep the object alive.
+///
+/// Keyed by token so a token is never reused, and indexed by object address so
+/// two [`PyMontyRef`]s wrapping one object share a token and are therefore one
+/// object inside the sandbox. The address index is only ever consulted for an
+/// object the table already holds a strong reference to, so an address cannot
+/// have been recycled underneath it; a token, by contrast, outlives its entry
+/// (in a dumped session, say) and must never come back naming something else,
+/// which is why it is a counter and not an address.
+static HOST_OBJECTS: Mutex<HostObjects> = Mutex::new(HostObjects {
+    by_token: BTreeMap::new(),
+    by_address: BTreeMap::new(),
+});
+
+/// Source of host-reference tokens. Never restarts, so a token is unique for
+/// the life of the process.
+static NEXT_HOST_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// The host objects the sandbox can reach, and how many wrappers hold each.
+struct HostObjects {
+    by_token: BTreeMap<u64, (Py<PyAny>, u32)>,
+    by_address: BTreeMap<usize, u64>,
+}
+
+impl HostObjects {
+    /// Registers `obj`, reusing the token of a registration it already has.
+    fn hold(&mut self, obj: Py<PyAny>, py: Python<'_>) -> u64 {
+        let address = obj.as_ptr() as usize;
+        if let Some(&token) = self.by_address.get(&address) {
+            self.by_token
+                .get_mut(&token)
+                .expect("the address index only names live entries")
+                .1 += 1;
+            // The caller's reference is surplus: the entry already holds one.
+            drop(obj.into_bound(py));
+            return token;
+        }
+        let token = NEXT_HOST_TOKEN.fetch_add(1, Ordering::Relaxed);
+        self.by_address.insert(address, token);
+        self.by_token.insert(token, (obj, 1));
+        token
+    }
+
+    /// Drops one wrapper's hold, freeing the entry once none are left.
+    fn drop_hold(&mut self, token: u64) {
+        let Some((obj, holds)) = self.by_token.get_mut(&token) else {
+            return;
+        };
+        *holds -= 1;
+        if *holds > 0 {
+            return;
+        }
+        let address = obj.as_ptr() as usize;
+        self.by_token.remove(&token);
+        self.by_address.remove(&address);
+    }
+}
+
+/// A host object passed into a session by reference rather than by value.
+///
+/// Everything else at the boundary is a copy, so an object whose identity or
+/// whose live state is the point cannot cross at all. Wrap it in one of these
+/// and it can: sandboxed code gets an opaque proxy, and every attribute read,
+/// call, method call and `with` step on the proxy comes back to the host as an
+/// ordinary external call, which the callbacks answer by performing the
+/// operation on the real object.
+///
+/// The wrapper owns the registration. While a `MontyRef` is alive the sandbox
+/// can use the reference; once it is collected the reference is dead and an
+/// operation on it fails, which is how a host bounds what it has exposed.
+#[pyclass(name = "MontyRef", module = "pydantic_monty", frozen)]
+pub struct PyMontyRef {
+    token: u64,
+    type_name: String,
+}
+
+#[pymethods]
+impl PyMontyRef {
+    /// Registers `obj` and hands back the reference that names it.
+    #[new]
+    #[pyo3(signature = (obj))]
+    fn py_new(obj: Py<PyAny>, py: Python<'_>) -> PyResult<Self> {
+        let type_name = obj.bind(py).get_type().name()?.to_string();
+        let token = host_objects().hold(obj, py);
+        Ok(Self { token, type_name })
+    }
+
+    /// The object this reference names, or `None` once it has been released.
+    #[getter]
+    fn value(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        host_object(self.token, py)
+    }
+
+    /// The name of the referenced object's type, as the sandbox sees it.
+    #[getter]
+    fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// Drops this wrapper's hold now rather than waiting to be collected.
+    ///
+    /// The reference dies with the last hold on it: an operation the sandbox
+    /// performs on a dead one raises rather than reaching the object.
+    fn release(&self) {
+        host_objects().drop_hold(self.token);
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MontyRef({}, id={})", self.type_name, self.token)
+    }
+}
+
+impl Drop for PyMontyRef {
+    fn drop(&mut self) {
+        host_objects().drop_hold(self.token);
+    }
+}
+
+/// The host-object table, recovered from a poisoned lock.
+///
+/// A panic while the table is held leaves it structurally intact (every
+/// operation on it is a map insert, lookup or removal), so refusing to hand it
+/// back would strand every live reference for the rest of the process.
+fn host_objects() -> MutexGuard<'static, HostObjects> {
+    HOST_OBJECTS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The object a host reference names, for a callback about to perform an
+/// operation on it.
+#[must_use]
+pub fn host_object(token: u64, py: Python<'_>) -> Option<Py<PyAny>> {
+    host_objects().by_token.get(&token).map(|(obj, _)| obj.clone_ref(py))
+}
+
+/// A value living inside a session that the host holds a reference to.
+///
+/// The mirror image of [`PyMontyRef`], and what a value with no copy
+/// representation becomes on the way out once the session is configured for
+/// it: a type object, a class, a template, a generator. The host cannot
+/// inspect one directly, and is not meant to; it hands it back to the session
+/// as an ordinary input and asks the session, whose semantics are the only
+/// ones that can answer.
+///
+/// The token is the session's, and only that session (or one woken from its
+/// dump) can resolve it. The value stays alive until the session releases it.
+#[pyclass(name = "MontySessionRef", module = "pydantic_monty", frozen)]
+pub struct PyMontySessionRef {
+    id: u64,
+    repr: String,
+}
+
+#[pymethods]
+impl PyMontySessionRef {
+    /// Rebuilds a reference from its token, for a host that stored one rather
+    /// than keeping the object it was handed.
+    #[new]
+    #[pyo3(signature = (id, repr=String::new()))]
+    fn py_new(id: u64, repr: String) -> Self {
+        Self { id, repr }
+    }
+
+    /// The session's token for the value. Meaningful only to that session.
+    #[getter]
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// `repr()` of the value as the session rendered it when it crossed.
+    #[getter]
+    fn value_repr(&self) -> &str {
+        &self.repr
+    }
+
+    /// Identity: two references are the same value exactly when the session
+    /// gave them the same token.
+    fn __eq__(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+
+    fn __hash__(&self) -> u64 {
+        self.id
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MontySessionRef({}, id={})", self.repr, self.id)
+    }
+}
+
+impl PyMontySessionRef {
+    /// The reference this wrapper stands for.
+    pub(crate) fn as_object(&self) -> MontyObject {
+        MontyObject::SessionRef {
+            id: self.id,
+            repr: self.repr.clone(),
+        }
     }
 }
 

@@ -113,6 +113,7 @@ impl ChildProc {
 
     fn feed_with(&mut self, code: &str, inputs: Vec<pb::NamedValue>) -> (Vec<pb::Print>, pb::child_event::Kind) {
         self.send(pb::parent_request::Kind::Feed(pb::Feed {
+        script_name: String::new(),
             code: code.to_owned(),
             inputs,
             skip_type_check: false,
@@ -145,6 +146,7 @@ impl ChildProc {
     #[track_caller]
     fn feed_expecting_death(&mut self, code: &str) {
         self.send(pb::parent_request::Kind::Feed(pb::Feed {
+        script_name: String::new(),
             code: code.to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -1141,6 +1143,7 @@ fn killed_child_is_detected_as_eof() {
     child.create_repl();
     // run forever (no limits), then kill the child mid-execution
     child.send(pb::parent_request::Kind::Feed(pb::Feed {
+        script_name: String::new(),
         code: "while True:\n    pass".to_owned(),
         inputs: vec![],
         skip_type_check: false,

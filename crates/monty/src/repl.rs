@@ -23,6 +23,7 @@ use crate::{
     object_bridge::MontyObjectExt,
     parse::check_probe_expression,
     run::{CompileOptions, Executor},
+    types::PyTrait,
     run_progress::{ConvertedExit, ExtFunctionResult, ExtFunctionResultExt, NameLookupResult, convert_frame_exit},
     value::Value,
 };
@@ -138,7 +139,23 @@ impl MontyRepl {
         inputs: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<ReplProgress, Box<ReplStartError>> {
-        self.start(code, inputs, print, SnippetKind::Feed)
+        self.start(code, inputs, None, print, SnippetKind::Feed)
+    }
+
+    /// Starts a snippet under a filename of the caller's choosing, so its
+    /// frames say where the source came from; see
+    /// [`feed_run_named`](Self::feed_run_named).
+    ///
+    /// # Errors
+    /// As [`feed_start`](Self::feed_start).
+    pub fn feed_start_named(
+        self,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
+        print: PrintWriter<'_>,
+    ) -> Result<ReplProgress, Box<ReplStartError>> {
+        self.start(code, inputs, script_name, print, SnippetKind::Feed)
     }
 
     /// Evaluates one expression against the session's namespace and hands back
@@ -161,7 +178,7 @@ impl MontyRepl {
         if let Err(error) = check_probe_expression(expr, &self.script_name) {
             return Err(Box::new(ReplStartError { repl: self, error }));
         }
-        self.start(expr, Vec::new(), print, SnippetKind::Probe)
+        self.start(expr, Vec::new(), None, print, SnippetKind::Probe)
     }
 
     /// Shared body of [`feed_start`](Self::feed_start) and
@@ -171,6 +188,7 @@ impl MontyRepl {
         self,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         print: PrintWriter<'_>,
         kind: SnippetKind,
     ) -> Result<ReplProgress, Box<ReplStartError>> {
@@ -187,7 +205,7 @@ impl MontyRepl {
 
         let (input_names, input_values): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
 
-        let input_script_name = this.next_input_script_name(kind);
+        let input_script_name = this.snippet_script_name(script_name, kind);
         // Preserve this snippet's source (see `feed_run` for rationale).
         this.sources.insert(input_script_name.clone(), code.to_owned());
         let executor = match Executor::new_repl_snippet(
@@ -252,6 +270,25 @@ impl MontyRepl {
         inputs: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<FeedOutcome, MontyException> {
+        self.feed_run_named(code, inputs, None, print)
+    }
+
+    /// Feeds and executes a snippet under a filename of the caller's choosing,
+    /// so its frames say where the source came from.
+    ///
+    /// A session's snippets are otherwise named `<python-input-N>`, which is
+    /// right for a REPL and wrong for a host feeding chunks that have names of
+    /// their own. `None` takes the generated name.
+    ///
+    /// # Errors
+    /// As [`feed_run`](Self::feed_run).
+    pub fn feed_run_named(
+        &mut self,
+        code: &str,
+        inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
+        print: PrintWriter<'_>,
+    ) -> Result<FeedOutcome, MontyException> {
         if code.is_empty() {
             return Ok(FeedOutcome {
                 value: MontyObject::None,
@@ -261,7 +298,7 @@ impl MontyRepl {
 
         let (input_names, input_values): (Vec<_>, Vec<_>) = inputs.into_iter().unzip();
 
-        let input_script_name = self.next_input_script_name(SnippetKind::Feed);
+        let input_script_name = self.snippet_script_name(script_name, SnippetKind::Feed);
         // Preserve this snippet's source before anything can fail, so later
         // tracebacks with frames from this snippet can still resolve line/
         // column/preview information — `Executor.code` only survives until
@@ -392,6 +429,152 @@ impl MontyRepl {
         )
     }
 
+    /// Evaluates one expression against the session, with `bindings` visible
+    /// to it and to nothing after it, and hands back its value.
+    ///
+    /// Differs from [`probe_start`](Self::probe_start) in two ways, and both
+    /// are what make it usable from inside a suspension (see
+    /// [`ReplFunctionCall::probe`]): it runs to completion rather than
+    /// suspending, so an expression reaching for a name only the host could
+    /// answer raises `NameError`; and a binding is scoped to this one
+    /// expression rather than left in the namespace, so the session cannot
+    /// later resolve a name it never defined to something the host once
+    /// supplied.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a rejected expression, one that raises, or
+    /// one that reaches a name the bindings do not supply.
+    pub fn probe_scoped(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        probe_scoped_in(
+            SessionParts {
+                global_names: &mut self.global_names,
+                interns: &mut self.interns,
+                heap: &mut self.heap,
+                globals: &mut self.globals,
+            },
+            expr,
+            bindings,
+            print,
+            &self.script_name,
+            self.options,
+            &self.sources,
+        )
+    }
+
+    /// Pins the value bound to `name` and hands back the reference that names
+    /// it, so the host can hold it across turns and give it back later.
+    ///
+    /// This is how a value with no boundary representation reaches the host at
+    /// all. A type object, a class, a template, a generator crosses today as
+    /// its `repr`, which can be printed but not asked anything; a reference can
+    /// be handed back into a later feed or probe as an ordinary input, and the
+    /// session's own semantics answer whatever the host wants to know
+    /// (`__origin__`, `__args__`, `.interpolations`, ...). Values that DO have
+    /// a boundary representation are worth exporting too, when the host wants
+    /// identity rather than a copy.
+    ///
+    /// The reference survives this session's dump and load, because it names a
+    /// place in the heap that the dump carries.
+    ///
+    /// Every export must be released by [`release`](Self::release), including
+    /// repeated exports of one value: the pin is what keeps the value alive,
+    /// and nothing inside the sandbox can drop it.
+    ///
+    /// Returns `None` when the session binds no such name.
+    pub fn export_global(&mut self, name: &str, print: PrintWriter<'_>) -> Option<MontyObject> {
+        let slot = self
+            .interns
+            .get_string_id_by_name(name)
+            .and_then(|name_id| self.global_names.get(name_id))?
+            .index();
+        if !matches!(self.globals.get(slot), Some(value) if !matches!(value, Value::Undefined)) {
+            return None;
+        }
+        let assert_repr_max_bytes = self.options.assert_message_annotations.max_bytes();
+        HeapReader::with(
+            &mut self.heap,
+            &mut (&self.interns, print),
+            |reader, (interns, print)| {
+                let vm = &mut VM::new(
+                    mem::take(&mut self.globals),
+                    reader,
+                    interns,
+                    print.reborrow(),
+                    assert_repr_max_bytes,
+                );
+                let value = vm.globals[slot].clone_with_heap(vm);
+                defer_drop!(value, vm);
+                let exported = match *value {
+                    Value::Ref(id) => {
+                        // A `repr` runs sandbox code, so it is taken before the
+                        // pin rather than after: a `__repr__` that raises must
+                        // leave the export table as it found it, and a failed
+                        // one still leaves a usable reference.
+                        let repr = match value.py_repr(vm) {
+                            Ok(rendered) => {
+                                defer_drop!(rendered, vm);
+                                rendered.to_str(vm).map(str::to_owned).unwrap_or_default()
+                            }
+                            Err(_) => format!("<{} object, error on repr()>", value.py_type_name(vm)),
+                        };
+                        MontyObject::SessionRef {
+                            id: vm.heap.export(id),
+                            repr,
+                        }
+                    }
+                    // An immediate value is its own identity: there is nothing
+                    // in the heap to pin, and it crosses losslessly by value.
+                    ref value => MontyObject::from_value(value, vm),
+                };
+                self.globals = vm.take_globals();
+                Some(exported)
+            },
+        )
+    }
+
+    /// Whether a value with no copy representation crosses out of this session
+    /// as a reference rather than as its `repr` string.
+    #[must_use]
+    pub fn cross_by_reference(&self) -> bool {
+        self.heap.cross_by_reference()
+    }
+
+    /// Makes a value with no copy representation cross out as a reference
+    /// rather than as its `repr` string.
+    ///
+    /// A class object, a `list[int]`, a `t"..."` template, a generator all
+    /// reach the host today as text, which can be printed and nothing else.
+    /// In this mode each crosses as a [`MontyObject::SessionRef`] the host can
+    /// hand back into a later feed or probe, so the session's own semantics
+    /// answer whatever the host wants to know about it. This is what lets a
+    /// value the host cannot represent be *passed through* the host: a
+    /// contract handed to a host call, held, and given back later.
+    ///
+    /// Off by default, and the reason is ownership: every reference pins its
+    /// value until [`release`](Self::release) drops it, and a host that
+    /// ignores the references it is handed would grow the session's heap
+    /// without bound. Turn it on where the host is written to release.
+    ///
+    /// Travels with a dump, so a session woken from one keeps the mode.
+    pub fn set_cross_by_reference(&mut self, on: bool) {
+        self.heap.set_cross_by_reference(on);
+    }
+
+    /// Releases one of the host's references to an exported value, letting the
+    /// session free it once nothing else holds it.
+    ///
+    /// Returns whether the token named a live export. A token released twice,
+    /// or one this session never minted, answers `false` rather than taking a
+    /// reference that belongs to someone else.
+    pub fn release(&mut self, token: u64) -> bool {
+        self.heap.release_export(token)
+    }
+
     /// Returns a list of all callable function names defined in the session.
     ///
     /// Includes functions, closures, and functions with default arguments.
@@ -440,6 +623,20 @@ impl MontyRepl {
     /// makes REPL errors easier to correlate with user input history. A probe
     /// takes a name of its own from the same counter, so a traceback says which
     /// of the two produced the frame and no two snippets ever share a name.
+    /// The filename this snippet's frames carry, the caller's when it supplied
+    /// one and a generated `<python-input-N>` otherwise.
+    ///
+    /// A caller-supplied name is used verbatim, including when an earlier
+    /// snippet already used it: the source text kept for rendering tracebacks
+    /// is keyed by this name, so reusing one makes the older snippet's frames
+    /// render against the newer text. Names are the caller's to keep distinct.
+    fn snippet_script_name(&mut self, script_name: Option<&str>, kind: SnippetKind) -> String {
+        match script_name {
+            Some(name) if !name.is_empty() => name.to_owned(),
+            _ => self.next_input_script_name(kind),
+        }
+    }
+
     fn next_input_script_name(&mut self, kind: SnippetKind) -> String {
         let input_id = self.next_input_id;
         self.next_input_id += 1;
@@ -564,6 +761,46 @@ impl ReplProgress {
         }
     }
 
+    /// Evaluates one expression against the session, whatever the progress
+    /// state, and leaves that state as it was.
+    ///
+    /// Suspended, this is the only way to read the frame that is asking, and
+    /// the moment a host most needs to: it is deciding what to answer. See
+    /// [`ReplFunctionCall::probe`]. Complete, it is
+    /// [`MontyRepl::probe_scoped`], so a host driving progress in a loop needs
+    /// no special case for the arm it landed on.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a rejected expression, one that raises, or
+    /// one reaching a name `bindings` does not supply. The progress is
+    /// untouched either way.
+    pub fn probe(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        match self {
+            Self::FunctionCall(call) => call.probe(expr, bindings, print),
+            Self::OsCall(call) => call.probe(expr, bindings, print),
+            Self::ResolveFutures(state) => state.probe(expr, bindings, print),
+            Self::NameLookup(lookup) => lookup.probe(expr, bindings, print),
+            Self::Complete { repl, .. } => repl.probe_scoped(expr, bindings, print),
+        }
+    }
+
+    /// Releases one of the host's references to an exported value, whatever
+    /// the progress state; see [`MontyRepl::release`].
+    pub fn release(&mut self, token: u64) -> bool {
+        match self {
+            Self::FunctionCall(call) => call.release(token),
+            Self::OsCall(call) => call.release(token),
+            Self::ResolveFutures(state) => state.release(token),
+            Self::NameLookup(lookup) => lookup.release(token),
+            Self::Complete { repl, .. } => repl.release(token),
+        }
+    }
+
     /// Returns the session's resource tracker, whatever the progress state.
     ///
     /// Lets hosts read resource accounting — e.g. cumulative execution time
@@ -587,7 +824,7 @@ impl ReplProgress {
 /// REPL execution paused at an external function call or dataclass method call.
 ///
 /// Resume with `resume(result, print)` to provide the return value and continue,
-/// or `resume_pending(print)` to push an `ExternalFuture` for async resolution.
+/// or `resume_pending(print)` to push a `Future` for async resolution.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReplFunctionCall {
     /// The name of the function or method being called.
@@ -605,6 +842,41 @@ pub struct ReplFunctionCall {
 }
 
 impl ReplFunctionCall {
+    /// Releases one of the host's references to an exported value, as
+    /// [`MontyRepl::release`] does.
+    ///
+    /// Available here because the export table is heap state and the heap is
+    /// the session's throughout: an export made before this suspension, or by
+    /// the very call it is suspended in, is releasable without waiting for the
+    /// rung to finish.
+    pub fn release(&mut self, token: u64) -> bool {
+        self.snapshot.repl.release(token)
+    }
+
+    /// Evaluates one expression against the suspended session, with
+    /// `bindings` visible to it and to nothing after it, and leaves this
+    /// suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing is
+    /// running while it asks, so the frame is readable; the expression sees
+    /// the globals exactly as the suspended rung left them.
+    ///
+    /// Runs to completion, so an expression reaching a name the bindings do
+    /// not supply raises `NameError` rather than suspending again.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a rejected expression or one that raises.
+    /// Either way the suspension is untouched and still resumable.
+    pub fn probe(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.probe_scoped(expr, bindings, print)
+    }
+
     /// Extracts the REPL session, discarding the in-flight execution state.
     ///
     /// Restores globals from the VM snapshot so the REPL remains usable.
@@ -622,7 +894,7 @@ impl ReplFunctionCall {
         self.snapshot.run(result, print)
     }
 
-    /// Resumes execution by pushing an `ExternalFuture` for async resolution.
+    /// Resumes execution by pushing a `Future` for async resolution.
     ///
     /// Uses `self.call_id` internally — no need to pass it again.
     pub fn resume_pending(self, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
@@ -648,6 +920,41 @@ pub struct ReplOsCall {
 }
 
 impl ReplOsCall {
+    /// Releases one of the host's references to an exported value, as
+    /// [`MontyRepl::release`] does.
+    ///
+    /// Available here because the export table is heap state and the heap is
+    /// the session's throughout: an export made before this suspension, or by
+    /// the very call it is suspended in, is releasable without waiting for the
+    /// rung to finish.
+    pub fn release(&mut self, token: u64) -> bool {
+        self.snapshot.repl.release(token)
+    }
+
+    /// Evaluates one expression against the suspended session, with
+    /// `bindings` visible to it and to nothing after it, and leaves this
+    /// suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing is
+    /// running while it asks, so the frame is readable; the expression sees
+    /// the globals exactly as the suspended rung left them.
+    ///
+    /// Runs to completion, so an expression reaching a name the bindings do
+    /// not supply raises `NameError` rather than suspending again.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a rejected expression or one that raises.
+    /// Either way the suspension is untouched and still resumable.
+    pub fn probe(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.probe_scoped(expr, bindings, print)
+    }
+
     /// Extracts the REPL session, discarding the in-flight execution state.
     ///
     /// Restores globals from the VM snapshot so the REPL remains usable.
@@ -700,6 +1007,41 @@ pub struct ReplNameLookup {
 }
 
 impl ReplNameLookup {
+    /// Releases one of the host's references to an exported value, as
+    /// [`MontyRepl::release`] does.
+    ///
+    /// Available here because the export table is heap state and the heap is
+    /// the session's throughout: an export made before this suspension, or by
+    /// the very call it is suspended in, is releasable without waiting for the
+    /// rung to finish.
+    pub fn release(&mut self, token: u64) -> bool {
+        self.snapshot.repl.release(token)
+    }
+
+    /// Evaluates one expression against the suspended session, with
+    /// `bindings` visible to it and to nothing after it, and leaves this
+    /// suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing is
+    /// running while it asks, so the frame is readable; the expression sees
+    /// the globals exactly as the suspended rung left them.
+    ///
+    /// Runs to completion, so an expression reaching a name the bindings do
+    /// not supply raises `NameError` rather than suspending again.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a rejected expression or one that raises.
+    /// Either way the suspension is untouched and still resumable.
+    pub fn probe(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.probe_scoped(expr, bindings, print)
+    }
+
     /// Extracts the REPL session, discarding the in-flight execution state.
     ///
     /// Restores globals from the VM snapshot so the REPL remains usable.
@@ -807,6 +1149,49 @@ pub struct ReplResolveFutures {
 }
 
 impl ReplResolveFutures {
+    /// Releases one of the host's references to an exported value, as
+    /// [`MontyRepl::release`] does; see [`ReplFunctionCall::release`].
+    pub fn release(&mut self, token: u64) -> bool {
+        self.repl.release(token)
+    }
+
+    /// Evaluates one expression against the suspended session, with
+    /// `bindings` visible to it and to nothing after it, and leaves this
+    /// suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing is
+    /// running while it asks, so the frame is readable; the expression sees
+    /// the globals exactly as the suspended rung left them.
+    ///
+    /// Runs to completion, so an expression reaching a name the bindings do
+    /// not supply raises `NameError` rather than suspending again.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a rejected expression or one that raises.
+    /// Either way the suspension is untouched and still resumable.
+    pub fn probe(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        probe_scoped_in(
+            SessionParts {
+                global_names: &mut self.executor.globals,
+                interns: &mut self.executor.interns,
+                heap: &mut self.repl.heap,
+                globals: &mut self.vm_state.globals,
+            },
+            expr,
+            bindings,
+            print,
+            &self.repl.script_name,
+            self.repl.options,
+            &self.repl.sources,
+        )
+    }
+
     /// Extracts the REPL session, restoring globals from the suspended VM state.
     ///
     /// As with the other REPL snapshot types, globals live inside the VM
@@ -998,6 +1383,40 @@ impl ReplSnapshot {
         repl
     }
 
+    /// Evaluates one expression against the suspended session, leaving the
+    /// suspension resumable.
+    ///
+    /// Nothing is running: the worker is stopped at the exit it took, waiting
+    /// for the host's answer. So the frame is readable, and the only reason it
+    /// was not is that the session's three pieces are split across the
+    /// suspension while it lasts. [`SessionParts`] names them; the expression
+    /// sees the globals as the rung left them, including whatever it bound
+    /// before it suspended.
+    ///
+    /// This is what lets a host decide its answer BY looking at the frame that
+    /// is asking, which is the only moment some questions can be asked at all.
+    fn probe_scoped(
+        &mut self,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        probe_scoped_in(
+            SessionParts {
+                global_names: &mut self.executor.globals,
+                interns: &mut self.executor.interns,
+                heap: &mut self.repl.heap,
+                globals: &mut self.vm_state.globals,
+            },
+            expr,
+            bindings,
+            print,
+            &self.repl.script_name,
+            self.repl.options,
+            &self.repl.sources,
+        )
+    }
+
     /// Continues snippet execution with an external result.
     fn run(
         self,
@@ -1074,6 +1493,108 @@ fn inject_inputs_into_vm(
         old.drop_with(vm);
     }
     Ok(())
+}
+
+/// The mutable session state one expression needs to run against, borrowed
+/// from wherever it currently lives.
+///
+/// While a snippet is suspended the session is split: the heap stays on the
+/// [`MontyRepl`], the live name map and interns are on the in-flight
+/// [`Executor`], and the globals are inside the [`VMSnapshot`]. Idle, all four
+/// are on the repl. Naming the four pieces is what lets one implementation
+/// serve both.
+struct SessionParts<'a> {
+    global_names: &'a mut NameMap,
+    interns: &'a mut Interns,
+    heap: &'a mut Heap,
+    globals: &'a mut Vec<Value>,
+}
+
+/// Evaluates one expression against `parts`, with `bindings` visible to it and
+/// to nothing else, and leaves the session as it was.
+///
+/// The expression binds nothing: `check_probe_expression` refuses source that
+/// could, and each binding's slot is put back the way it was found afterwards,
+/// so a name supplied here does not become a name the session has. That is the
+/// difference from an input to a feed, and from a name resolved through the
+/// host: both of those stay in the namespace, where a later snippet finds them
+/// and a missing definition is silently answered by them.
+///
+/// Runs to completion. An expression that reaches for something only the host
+/// can answer raises `NameError` rather than suspending, because this is
+/// itself reachable from inside a suspension and a second one would have
+/// nowhere to go. Anything the expression needs is a binding.
+fn probe_scoped_in(
+    parts: SessionParts<'_>,
+    expr: &str,
+    bindings: Vec<(String, MontyObject)>,
+    print: PrintWriter<'_>,
+    script_name: &str,
+    options: CompileOptions,
+    sources: &AHashMap<String, String>,
+) -> Result<MontyObject, MontyException> {
+    let SessionParts {
+        global_names,
+        interns,
+        heap,
+        globals,
+    } = parts;
+    check_probe_expression(expr, script_name)?;
+    let (binding_names, binding_values): (Vec<_>, Vec<_>) = bindings.into_iter().unzip();
+    let executor = Executor::new_repl_snippet(
+        expr.to_owned(),
+        script_name,
+        global_names.clone(),
+        interns,
+        &binding_names,
+        options,
+    )?;
+    globals.resize_with(globals.len().max(executor.namespace_size()), || Value::Undefined);
+
+    let result = HeapReader::with(heap, &mut (&executor, print), |reader, (executor, print)| {
+        let vm = &mut VM::new(
+            mem::take(globals),
+            reader,
+            &executor.interns,
+            print.reborrow(),
+            executor.assert_repr_max_bytes,
+        );
+        // Taken before injection and put back after, so the binding is visible
+        // to this expression and to nothing that runs later.
+        let displaced: Vec<Value> = executor
+            .input_slots
+            .iter()
+            .map(|slot| vm.globals[slot.index()].clone_with_heap(vm))
+            .collect();
+
+        // `run_to_completion` opens and closes the execution window itself,
+        // so the time budget advances here as it does for a feed.
+        let result = inject_inputs_into_vm(executor, binding_values, vm).and_then(|()| {
+            executor
+                .run_to_completion(vm)
+                .map_err(|e| e.into_python_exception(&executor.interns, |fname| sources.get(fname).map(String::as_str)))
+        });
+
+        for (slot, old) in executor.input_slots.iter().zip(displaced) {
+            let injected = mem::replace(&mut vm.globals[slot.index()], old);
+            injected.drop_with(vm);
+        }
+        *globals = vm.take_globals();
+        result
+    });
+
+    // Committed whether or not the expression succeeded: the interner is
+    // append-only, and a value the expression left in the heap can name a
+    // string only this compilation interned. The name map goes with it so a
+    // second probe reuses the slots this one claimed instead of adding more.
+    let Executor {
+        globals: probe_globals,
+        interns: probe_interns,
+        ..
+    } = executor;
+    *global_names = probe_globals;
+    *interns = probe_interns;
+    result
 }
 
 /// Assembles a `ReplProgress` from already-converted data.

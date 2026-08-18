@@ -45,6 +45,14 @@ pub struct ReplConfig {
     /// (see `limitations/assert.md`). On by default with a 120-byte
     /// operand-repr truncation; `MaxBytes` customizes the truncation.
     pub assert_message_annotations: AssertMessageAnnotations,
+    /// Hand back a reference for a session value with no representation of its
+    /// own, rather than its `repr` string. See
+    /// [`MontyObject::SessionRef`](monty_types::MontyObject::SessionRef).
+    ///
+    /// Off by default: a reference pins its value until
+    /// [`Checkout::release_refs`] frees it, so a host that ignores what it is
+    /// handed would grow the session's heap without bound.
+    pub cross_by_reference: bool,
 }
 
 impl Default for ReplConfig {
@@ -56,6 +64,7 @@ impl Default for ReplConfig {
             type_check_stubs: None,
             type_check_config: TypeCheckingConfig::default(),
             assert_message_annotations: AssertMessageAnnotations::default(),
+            cross_by_reference: false,
         }
     }
 }
@@ -317,6 +326,7 @@ impl Checkout {
             // is not the binary this crate ships — a system-packaged `monty`,
             // or a remote worker reached over a socket.
             protocol_version: PROTOCOL_VERSION,
+            cross_by_reference: repl.cross_by_reference,
             // Diagnostic only, so a rejection can report both builds.
             monty_version: MONTY_VERSION.to_owned(),
         }));
@@ -401,6 +411,7 @@ impl Checkout {
     /// # Errors
     /// [`PoolError::Runtime`] / [`PoolError::Typing`] leave the session
     /// usable; all other errors mean the worker was discarded.
+    #[expect(clippy::too_many_arguments, reason = "each is one option of the caller's feed")]
     pub async fn feed(
         &mut self,
         code: &str,
@@ -408,6 +419,7 @@ impl Checkout {
         mounts: Vec<MountSpec>,
         skip_type_check: bool,
         max_steps: Option<u64>,
+        script_name: &str,
         on_print: OnPrint<'_>,
     ) -> Result<TurnEvent, PoolError> {
         self.ensure_ready()?;
@@ -420,6 +432,7 @@ impl Checkout {
         self.feed_mounts = Self::build_feed_mounts(mounts);
         let request = request(pb::parent_request::Kind::Feed(pb::Feed {
             code: code.to_owned(),
+            script_name: script_name.to_owned(),
             inputs: inputs
                 .into_iter()
                 .map(|(name, value)| pb::NamedValue {
@@ -445,20 +458,43 @@ impl Checkout {
     pub async fn probe(
         &mut self,
         expr: &str,
+        bindings: Vec<(String, MontyObject)>,
         max_steps: Option<u64>,
         on_print: OnPrint<'_>,
     ) -> Result<TurnEvent, PoolError> {
         self.ensure_ready()?;
-        if self.pending.is_some() {
-            return Err(PoolError::Protocol(
-                "probe called while a suspension is awaiting an answer".into(),
-            ));
-        }
+        ensure_sendable(bindings.iter().map(|(_, value)| value))?;
         let request = request(pb::parent_request::Kind::Probe(pb::Probe {
             expr: expr.to_owned(),
             max_steps,
+            bindings: bindings
+                .into_iter()
+                .map(|(name, value)| pb::NamedValue {
+                    name,
+                    value: Some(value.into()),
+                })
+                .collect(),
         }));
         self.expect_turn(&request, on_print).await
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored:
+    /// a second release would take a reference that is no longer the host's.
+    ///
+    /// # Errors
+    /// Worker failures only. Valid whether the session is idle or suspended.
+    pub async fn release_refs(&mut self, tokens: Vec<u64>) -> Result<(), PoolError> {
+        self.ensure_ready()?;
+        let request = request(pb::parent_request::Kind::ReleaseRefs(pb::ReleaseRefs { tokens }));
+        let mut no_print = on_print_sync(|_, _| {});
+        let deadline = self.pool.config.request_timeout;
+        match self.request_turn(&request, deadline, &mut no_print).await? {
+            ControlEvent::Ok => Ok(()),
+            other => Err(self.protocol_violation(format!("unexpected reply to ReleaseRefs: {other:?}"))),
+        }
     }
 
     /// Reads a snippet and returns what is statically true of it, running none
@@ -1040,6 +1076,12 @@ impl Checkout {
                 _ => self.poison("sending a request").await,
             });
         }
+        // A probe sent while a suspension is awaiting its answer READS the
+        // suspended session; it does not end it. Its reply therefore leaves
+        // the pending call and this feed's mounts exactly as it found them,
+        // the way an error reply to `Dump` already does.
+        let reads_a_suspension =
+            self.pending.is_some() && matches!(request.kind, Some(pb::parent_request::Kind::Probe(_)));
         loop {
             let event = match self.worker.as_mut().expect("checked above").recv().await {
                 Ok(event) => event,
@@ -1129,10 +1171,12 @@ impl Checkout {
                     }));
                 }
                 Some(pb::child_event::Kind::Complete(complete)) => {
-                    self.pending = None;
-                    // the feed is over — drop its mounts so overlay writes
-                    // cannot leak into the next feed
-                    self.feed_mounts = None;
+                    if !reads_a_suspension {
+                        self.pending = None;
+                        // the feed is over: drop its mounts so overlay writes
+                        // cannot leak into the next feed
+                        self.feed_mounts = None;
+                    }
                     return self.convert_turn(|| {
                         let value = complete
                             .value
@@ -1161,7 +1205,7 @@ impl Checkout {
                     // an error reply to `Dump` (e.g. an oversize dump) does not
                     // end the in-flight feed — the child stays suspended and
                     // resumable, so keep the pending call and mounts
-                    if !matches!(request.kind, Some(pb::parent_request::Kind::Dump(_))) {
+                    if !reads_a_suspension && !matches!(request.kind, Some(pb::parent_request::Kind::Dump(_))) {
                         self.pending = None;
                         self.feed_mounts = None;
                     }

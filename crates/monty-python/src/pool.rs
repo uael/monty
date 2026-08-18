@@ -175,6 +175,7 @@ impl PyMonty {
         type_check_color = false,
         assert_message_annotations = AssertAnnotationsArg::default(),
         dataclass_registry = None,
+        cross_by_reference = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn checkout(
@@ -188,6 +189,7 @@ impl PyMonty {
         type_check_color: bool,
         assert_message_annotations: AssertAnnotationsArg,
         dataclass_registry: Option<&Bound<'_, PyList>>,
+        cross_by_reference: bool,
     ) -> PyResult<PyMontySession> {
         Ok(PyMontySession {
             pool: Arc::clone(&self.pool),
@@ -202,6 +204,7 @@ impl PyMonty {
                     color: type_check_color,
                 },
                 assert_message_annotations,
+                cross_by_reference,
             )?,
             dc_registry: DcRegistry::from_list(py, dataclass_registry)?,
             checkout: Arc::new(AsyncMutex::new(None)),
@@ -268,7 +271,7 @@ impl PyMontySession {
     ///
     /// Blocks the calling thread with the GIL released; async external
     /// functions are not supported here — use [`AsyncMonty`].
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None, script_name=""))]
     #[expect(clippy::too_many_arguments)]
     fn feed_run(
         &self,
@@ -281,6 +284,7 @@ impl PyMontySession {
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
         max_steps: Option<u64>,
+        script_name: &str,
     ) -> PyResult<Py<PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -294,7 +298,8 @@ impl PyMontySession {
             os,
             skip_type_check,
             max_steps,
-        )?;
+        )?
+        .named(script_name);
         drive_sync(py, args, external_lookup)
     }
 
@@ -311,7 +316,7 @@ impl PyMontySession {
     /// captured on the snapshot so `snapshot.resume_auto()` can answer
     /// subsequent suspensions from them (and from this feed's mounts), letting
     /// a caller iterate to completion without resolving each call by hand.
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None, script_name=""))]
     #[expect(clippy::too_many_arguments)]
     fn feed_start(
         &self,
@@ -324,6 +329,7 @@ impl PyMontySession {
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
         max_steps: Option<u64>,
+        script_name: &str,
     ) -> PyResult<Py<PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -337,7 +343,8 @@ impl PyMontySession {
             os,
             skip_type_check,
             max_steps,
-        )?;
+        )?
+        .named(script_name);
         let ext = external_lookup.map(|d| d.clone().unbind());
         feed_start_sync(py, args, ext, self.repl_config.script_name.clone())
     }
@@ -415,6 +422,30 @@ impl PyMontySession {
         build_snapshot(py, ctx, event, false)
     }
 
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A value crosses out as a `MontySessionRef` only when the session was
+    /// checked out with `cross_by_reference=True`, and stays pinned until
+    /// released: nothing inside the sandbox can drop it, because the reference
+    /// lives outside. A token this session never minted, or one already
+    /// released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.used.store(true, Ordering::Relaxed);
+        let checkout = SharedCheckout::clone(&self.checkout);
+        py.detach(|| {
+            block_on_sync(async {
+                let mut guard = checkout.lock().await;
+                match guard.as_mut() {
+                    Some(checkout) => checkout.release_refs(tokens).await,
+                    None => Err(PoolError::Finished),
+                }
+            })
+        })?
+        .map_err(|e| pool_err_to_py(py, e))
+    }
+
     /// Serializes the worker's session state (idle or suspended) into opaque
     /// bytes via monty's existing dump format. The session stays usable.
     fn dump<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -433,11 +464,13 @@ impl PyMontySession {
     /// quietly leaving the session changed; what the expression *calls* can of
     /// course still mutate what it reaches. Suspensions are answered from
     /// `external_lookup` / `os` exactly as in `feed_run`.
-    #[pyo3(signature = (expr, *, external_lookup=None, print_callback=None, os=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, external_lookup=None, print_callback=None, os=None, max_steps=None))]
+    #[expect(clippy::too_many_arguments, reason = "each is one keyword argument of the Python method")]
     fn probe(
         &self,
         py: Python<'_>,
         expr: &Bound<'_, PyString>,
+        bindings: Option<&Bound<'_, PyDict>>,
         external_lookup: Option<&Bound<'_, PyDict>>,
         print_callback: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
@@ -449,7 +482,7 @@ impl PyMontySession {
             &self.checkout,
             &self.dc_registry,
             expr,
-            None,
+            bindings,
             print_callback,
             None,
             os,
@@ -614,6 +647,7 @@ impl PyAsyncMonty {
         type_check_color = false,
         assert_message_annotations = AssertAnnotationsArg::default(),
         dataclass_registry = None,
+        cross_by_reference = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn checkout(
@@ -627,6 +661,7 @@ impl PyAsyncMonty {
         type_check_color: bool,
         assert_message_annotations: AssertAnnotationsArg,
         dataclass_registry: Option<&Bound<'_, PyList>>,
+        cross_by_reference: bool,
     ) -> PyResult<PyAsyncMontySession> {
         Ok(PyAsyncMontySession {
             pool: Arc::clone(&self.pool),
@@ -641,6 +676,7 @@ impl PyAsyncMonty {
                     color: type_check_color,
                 },
                 assert_message_annotations,
+                cross_by_reference,
             )?,
             dc_registry: DcRegistry::from_list(py, dataclass_registry)?,
             checkout: Arc::new(AsyncMutex::new(None)),
@@ -735,6 +771,7 @@ impl PyAsyncMontyWebsocket {
         type_check_color = false,
         assert_message_annotations = AssertAnnotationsArg::default(),
         dataclass_registry = None,
+        cross_by_reference = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn checkout(
@@ -748,6 +785,7 @@ impl PyAsyncMontyWebsocket {
         type_check_color: bool,
         assert_message_annotations: AssertAnnotationsArg,
         dataclass_registry: Option<&Bound<'_, PyList>>,
+        cross_by_reference: bool,
     ) -> PyResult<PyAsyncMontySession> {
         Ok(PyAsyncMontySession {
             pool: Arc::clone(&self.pool),
@@ -762,6 +800,7 @@ impl PyAsyncMontyWebsocket {
                     color: type_check_color,
                 },
                 assert_message_annotations,
+                cross_by_reference,
             )?,
             dc_registry: DcRegistry::from_list(py, dataclass_registry)?,
             checkout: Arc::new(AsyncMutex::new(None)),
@@ -829,7 +868,7 @@ impl PyAsyncMontySession {
     /// print callbacks in this process. Session state persists across feeds.
     ///
     /// Worker I/O runs on the tokio runtime, off the asyncio event loop.
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None, script_name=""))]
     #[expect(clippy::too_many_arguments)]
     fn feed_run<'py>(
         &self,
@@ -842,6 +881,7 @@ impl PyAsyncMontySession {
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
         max_steps: Option<u64>,
+        script_name: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -855,7 +895,8 @@ impl PyAsyncMontySession {
             os,
             skip_type_check,
             max_steps,
-        )?;
+        )?
+        .named(script_name);
         let ext = external_lookup.map(|d| d.clone().unbind());
         let abandoned = Arc::clone(&self.drive_abandoned);
         future_into_py(py, async move { drive_async(args, ext, abandoned).await })
@@ -866,7 +907,7 @@ impl PyAsyncMontySession {
     /// is awaitable) or a `MontyComplete`. See that method for the
     /// snapshot-driven protocol and the `external_lookup` / `os` capture that
     /// backs `resume_auto()`.
-    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None))]
+    #[pyo3(signature = (code, *, inputs=None, external_lookup=None, print_callback=None, mount=None, os=None, skip_type_check=false, max_steps=None, script_name=""))]
     #[expect(clippy::too_many_arguments)]
     fn feed_start<'py>(
         &self,
@@ -879,6 +920,7 @@ impl PyAsyncMontySession {
         os: Option<Py<PyAny>>,
         skip_type_check: bool,
         max_steps: Option<u64>,
+        script_name: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         self.used.store(true, Ordering::Relaxed);
         let args = FeedArgs::extract(
@@ -892,7 +934,8 @@ impl PyAsyncMontySession {
             os,
             skip_type_check,
             max_steps,
-        )?;
+        )?
+        .named(script_name);
         let ext = external_lookup.map(|d| d.clone().unbind());
         feed_start_async(py, args, ext, self.repl_config.script_name.clone())
     }
@@ -971,6 +1014,22 @@ impl PyAsyncMontySession {
         })
     }
 
+    /// Async counterpart of [`PyMontySession::release_refs`]: releases the
+    /// host's references to values this session exported.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs<'py>(&self, py: Python<'py>, tokens: Vec<u64>) -> PyResult<Bound<'py, PyAny>> {
+        self.used.store(true, Ordering::Relaxed);
+        let checkout = Arc::clone(&self.checkout);
+        future_into_py(py, async move {
+            let mut guard = checkout.lock().await;
+            match guard.as_mut() {
+                Some(checkout) => checkout.release_refs(tokens).await,
+                None => Err(PoolError::Finished),
+            }
+            .map_err(|e| Python::attach(|py| pool_err_to_py(py, e)))
+        })
+    }
+
     /// Serializes the worker's session state (idle or suspended) into opaque
     /// bytes via monty's existing dump format. The session stays usable.
     fn dump<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -986,11 +1045,13 @@ impl PyAsyncMontySession {
     /// Async counterpart of [`PyMontySession::probe`]: the returned coroutine
     /// resolves to the expression's value. Coroutine externals are awaited as
     /// in `feed_run`.
-    #[pyo3(signature = (expr, *, external_lookup=None, print_callback=None, os=None, max_steps=None))]
+    #[pyo3(signature = (expr, *, bindings=None, external_lookup=None, print_callback=None, os=None, max_steps=None))]
+    #[expect(clippy::too_many_arguments, reason = "each is one keyword argument of the Python method")]
     fn probe<'py>(
         &self,
         py: Python<'py>,
         expr: &Bound<'_, PyString>,
+        bindings: Option<&Bound<'_, PyDict>>,
         external_lookup: Option<&Bound<'_, PyDict>>,
         print_callback: Option<&Bound<'_, PyAny>>,
         os: Option<Py<PyAny>>,
@@ -1002,7 +1063,7 @@ impl PyAsyncMontySession {
             &self.checkout,
             &self.dc_registry,
             expr,
-            None,
+            bindings,
             print_callback,
             None,
             os,
@@ -1213,6 +1274,7 @@ fn parse_websocket_config(
 
 /// Builds the worker-side REPL session config from the (shared) `checkout`
 /// arguments.
+#[expect(clippy::too_many_arguments, reason = "each is one keyword argument of the `checkout` methods")]
 pub(crate) fn parse_repl_config(
     py: Python<'_>,
     script_name: &str,
@@ -1221,6 +1283,7 @@ pub(crate) fn parse_repl_config(
     type_check_stubs: Option<&Bound<'_, PyString>>,
     type_check_config: TypeCheckingConfig,
     assert_message_annotations: AssertAnnotationsArg,
+    cross_by_reference: bool,
 ) -> PyResult<ReplConfig> {
     Ok(ReplConfig {
         script_name: script_name.to_owned(),
@@ -1229,6 +1292,7 @@ pub(crate) fn parse_repl_config(
         type_check_stubs: extract_type_check_stubs(py, type_check_stubs)?,
         type_check_config,
         assert_message_annotations: assert_message_annotations.0,
+        cross_by_reference,
     })
 }
 
@@ -1326,6 +1390,9 @@ pub(crate) struct FeedArgs {
     /// feed. Only the opening turn differs; every suspension after it is
     /// answered the same way.
     pub(crate) probe: bool,
+    /// Filename this snippet's frames carry; empty takes the session's
+    /// generated `<python-input-N>`.
+    pub(crate) script_name: String,
     pub(crate) os: Option<Py<PyAny>>,
     pub(crate) print_target: PrintTarget,
     pub(crate) checkout: SharedCheckout,
@@ -1354,6 +1421,7 @@ impl FeedArgs {
             skip_type_check,
             max_steps,
             probe: false,
+            script_name: String::new(),
             os,
             print_target: PrintTarget::from_py(print_callback)?,
             checkout: Arc::clone(checkout),
@@ -1363,6 +1431,12 @@ impl FeedArgs {
 
     /// Marks these arguments as one expression to evaluate rather than a
     /// snippet to feed.
+    /// Names this snippet, so its frames say where the source came from.
+    pub(crate) fn named(mut self, script_name: &str) -> Self {
+        script_name.clone_into(&mut self.script_name);
+        self
+    }
+
     pub(crate) fn probing(mut self) -> Self {
         self.probe = true;
         self
@@ -1466,6 +1540,7 @@ fn drive_sync(py: Python<'_>, args: FeedArgs, external_lookup: Option<&Bound<'_,
         skip_type_check,
         max_steps,
         probe,
+        script_name: feed_name,
         os,
         print_target,
         checkout,
@@ -1479,9 +1554,9 @@ fn drive_sync(py: Python<'_>, args: FeedArgs, external_lookup: Option<&Bound<'_,
         turn_fn(move |c, p| {
             Box::pin(async move {
                 if probe {
-                    c.probe(&code, max_steps, p).await
+                    c.probe(&code, inputs, max_steps, p).await
                 } else {
-                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p).await
                 }
             })
         }),
@@ -1654,6 +1729,7 @@ async fn drive_async_inner(
         skip_type_check,
         max_steps,
         probe,
+        script_name: feed_name,
         os,
         print_target,
         checkout,
@@ -1671,9 +1747,9 @@ async fn drive_async_inner(
             started.store(true, Ordering::Release);
             Box::pin(async move {
                 if probe {
-                    c.probe(&code, max_steps, p).await
+                    c.probe(&code, inputs, max_steps, p).await
                 } else {
-                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p).await
                 }
             })
         }),

@@ -95,6 +95,31 @@ Divergences:
   `pydantic_monty` / `@pydantic/monty` raise the native Python exception for
   `exc_type`, so a caller catching it sees `Exception('done')`, not a `Halt`
   class. There is no sandbox class object to reconstruct host-side.
+- **An exception raised on the host crosses as its nearest builtin ancestor,
+  and the host class does not cross at all.** A host `raise ValueError('x')`
+  arrives in the sandbox as a `ValueError` and `except ValueError:` catches it.
+  A host `class Halt(Exception)` arrives as a bare `Exception`, with the class
+  name dropped even from the message: sandbox code sees `Exception('stopped')`
+  and `type(e).__name__ == 'Exception'`.
+
+  **So `except Halt:` in sandbox code never catches what the host raised**,
+  including when the sandbox defines its own class of the same name. A sandbox
+  class and a host class are different classes; nothing makes them one. Two
+  ways to write code that works with that, in preference order:
+
+  1. Have the host raise one of the builtin exceptions, which do cross by
+     type, and put the detail in the message. This is the only spelling under
+     which `except` in the sandbox selects on what went wrong.
+  2. Have the host *return* the failure rather than raise it (a value the
+     sandbox inspects), when the sandbox must distinguish outcomes the builtin
+     hierarchy cannot express.
+
+  Note the asymmetry with the two entries above: a sandbox class name survives
+  outward (`user_type`), while a host class name is not carried inward at all.
+  Closing it would mean deciding whether a sandbox class is "the same class" as
+  a host class of the same name; the instance boundary answers a related
+  question by matching on name *and* member shape, which an exception class,
+  usually having no members, would reduce to a bare name match.
 - **The traceback message is `str(exc)` computed at raise time**, not at print
   time. A custom `__str__` is used, but one that mutates state or depends on
   attributes set after the raise renders differently from CPython. A `__str__`

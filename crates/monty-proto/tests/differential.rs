@@ -192,6 +192,23 @@ fn corpus() -> Vec<MontyObject> {
             ]
             .into(),
         },
+        // Both defaults, so both fields are skipped and the body is empty
+        MontyObject::HostRef {
+            id: 0,
+            type_name: String::new(),
+        },
+        MontyObject::HostRef {
+            id: u64::MAX,
+            type_name: "Cursor".to_owned(),
+        },
+        MontyObject::SessionRef {
+            id: 0,
+            repr: String::new(),
+        },
+        MontyObject::SessionRef {
+            id: 7,
+            repr: "list[Chunk]".to_owned(),
+        },
     ]
 }
 
@@ -284,6 +301,14 @@ fn to_oracle(obj: &MontyObject) -> oracle::MontyObject {
             class_name: class.clone(),
             members: members.clone(),
             attrs: Some(oracle_dict(attrs)),
+        }),
+        MontyObject::HostRef { id, type_name } => Kind::HostRef(oracle::HostRef {
+            id: *id,
+            type_name: type_name.clone(),
+        }),
+        MontyObject::SessionRef { id, repr } => Kind::SessionRef(oracle::SessionRef {
+            id: *id,
+            repr: repr.clone(),
         }),
         MontyObject::Function { name, docstring } => Kind::Function(oracle::Function {
             name: name.clone(),

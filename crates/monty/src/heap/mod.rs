@@ -35,6 +35,7 @@ use crate::{
     types::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
+        HostRef,
         FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module,
         NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, Range, RangeIterator, ReMatch, RePattern, Set,
         SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator,
@@ -53,7 +54,7 @@ use stable_heap::StableHeap;
 /// The ID does not encode ownership. Local IDs should normally be borrowed or
 /// wrapped immediately in `Value::Ref`; owned fields must document and release
 /// their reference through `HeapItem` or `DropWithContext` cleanup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HeapId(usize);
 
 impl HeapId {
@@ -238,6 +239,7 @@ pub enum HeapReadOutput<'a> {
     Closure(HeapRead<'a, Closure>),
     FunctionDefaults(HeapRead<'a, FunctionDefaults>),
     ExtFunction(HeapRead<'a, ExtFunction>),
+    HostRef(HeapRead<'a, HostRef>),
     Cell(HeapRead<'a, CellValue>),
     Range(HeapRead<'a, Range>),
     Slice(HeapRead<'a, Slice>),
@@ -679,6 +681,7 @@ impl<'a> HeapPtr<'a> {
                 HeapReadOutput::FunctionDefaults(heap_read(base, function_defaults, readers))
             }
             HeapData::ExtFunction(name) => HeapReadOutput::ExtFunction(heap_read(base, name, readers)),
+            HeapData::HostRef(host_ref) => HeapReadOutput::HostRef(heap_read(base, host_ref, readers)),
             HeapData::Cell(cell_value) => HeapReadOutput::Cell(heap_read(base, cell_value, readers)),
             HeapData::Range(range) => HeapReadOutput::Range(heap_read(base, range, readers)),
             HeapData::Slice(slice) => HeapReadOutput::Slice(heap_read(base, slice, readers)),
@@ -891,17 +894,43 @@ pub(crate) struct Heap {
     /// and across a dump/load, both of which carry the heap and neither of
     /// which carries a VM.
     modules: BTreeMap<u8, HeapId>,
+    /// Values the host holds a reference to, and how many references it holds.
+    ///
+    /// A value the host names must not be freed while it is named, and nothing
+    /// inside the sandbox keeps it alive: the reference lives outside. Each
+    /// outstanding export owns one refcount, so an exported value stays live
+    /// exactly as long as the host has not released it, and repeated exports of
+    /// one value each need their own release.
+    ///
+    /// Lives on the heap for the reason `modules` does: the identity has to
+    /// hold across feeds and across dump/load, and only the heap travels
+    /// through both. That is also what makes an exported reference survive the
+    /// session being dumped and woken elsewhere in the same host.
+    exports: BTreeMap<HeapId, u32>,
+    /// Whether a value with no copy representation crosses the boundary as a
+    /// reference instead of as its `repr` string.
+    ///
+    /// Off by default, because an exported value is pinned until the host
+    /// releases it and a host that ignores the reference would grow the heap
+    /// without bound. On, `MontyObject::Repr` stops being reachable for heap
+    /// values: a class object, a `list[int]`, a template, a generator crosses
+    /// as something the host can hand back and ask questions of.
+    ///
+    /// Travels with the heap so a session dumped in this mode wakes in it.
+    cross_by_reference: bool,
 }
 
 impl serde::Serialize for Heap {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Heap", 6)?;
+        let mut state = serializer.serialize_struct("Heap", 8)?;
         state.serialize_field("entries", &self.entries)?;
         state.serialize_field("tracker", &self.tracker)?;
         state.serialize_field("purple_count", &self.purple_count)?;
         state.serialize_field("allocations_since_gc", &self.allocations_since_gc.get())?;
         state.serialize_field("timezone_utc", &self.timezone_utc)?;
         state.serialize_field("modules", &self.modules)?;
+        state.serialize_field("exports", &self.exports)?;
+        state.serialize_field("cross_by_reference", &self.cross_by_reference)?;
         state.end()
     }
 }
@@ -920,6 +949,10 @@ impl<'de> serde::Deserialize<'de> for Heap {
             timezone_utc: Option<HeapId>,
             #[serde(default)]
             modules: BTreeMap<u8, HeapId>,
+            #[serde(default)]
+            exports: BTreeMap<HeapId, u32>,
+            #[serde(default)]
+            cross_by_reference: bool,
         }
         let fields = HeapFields::deserialize(deserializer)?;
         let mut entries = fields.entries;
@@ -942,6 +975,8 @@ impl<'de> serde::Deserialize<'de> for Heap {
             timezone_utc: fields.timezone_utc,
             ext_function_cache,
             modules: fields.modules,
+            exports: fields.exports,
+            cross_by_reference: fields.cross_by_reference,
         })
     }
 }
@@ -976,6 +1011,8 @@ impl Heap {
             timezone_utc: None,
             ext_function_cache: BTreeMap::new(),
             modules: BTreeMap::new(),
+            exports: BTreeMap::new(),
+            cross_by_reference: false,
         };
 
         // The empty-tuple singleton starts with refcount = 1 — that single ref *is* the
@@ -1117,6 +1154,67 @@ impl Heap {
     #[cfg(feature = "ref-count-return")]
     pub fn module_ids(&self) -> impl Iterator<Item = HeapId> + '_ {
         self.modules.values().copied()
+    }
+
+    /// Pins `id` for the host to hold a reference to, and answers the token
+    /// that names it.
+    ///
+    /// The token is the heap index itself, which makes exporting one value
+    /// twice hand back one token, so the host recognises a value it already
+    /// holds by identity rather than by comparing contents. Each export owns a
+    /// refcount of its own, so the two exports are two releases.
+    pub fn export(&mut self, id: HeapId) -> u64 {
+        self.inc_ref(id);
+        *self.exports.entry(id).or_insert(0) += 1;
+        id.index() as u64
+    }
+
+    /// The value `token` names, if the host still holds an export of it.
+    ///
+    /// Answering only from the export table is what makes a token unforgeable:
+    /// an arbitrary integer names an arbitrary heap slot, and a host that
+    /// invented one (or kept one past its release) must not be handed whatever
+    /// now lives there.
+    pub fn exported(&self, token: u64) -> Option<HeapId> {
+        let id = HeapId::from_index(usize::try_from(token).ok()?);
+        self.exports.contains_key(&id).then_some(id)
+    }
+
+    /// Releases one of the host's references to `token`, freeing the value once
+    /// nothing else holds it.
+    ///
+    /// Returns whether the token named a live export; releasing one twice is
+    /// reported rather than silently accepted, since the second release would
+    /// otherwise take a refcount that belongs to someone else.
+    pub fn release_export(&mut self, token: u64) -> bool {
+        let Some(id) = self.exported(token) else {
+            return false;
+        };
+        match self.exports.get_mut(&id) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                self.exports.remove(&id);
+            }
+        }
+        self.dec_ref(id);
+        true
+    }
+
+    /// Every value the host currently holds a reference to, for callers that
+    /// must account for a heap-owned reference no Python name explains.
+    #[cfg(feature = "ref-count-return")]
+    pub fn export_ids(&self) -> impl Iterator<Item = HeapId> + '_ {
+        self.exports.keys().copied()
+    }
+
+    /// Whether a value with no copy representation crosses as a reference.
+    pub fn cross_by_reference(&self) -> bool {
+        self.cross_by_reference
+    }
+
+    /// Sets whether a value with no copy representation crosses as a reference.
+    pub fn set_cross_by_reference(&mut self, on: bool) {
+        self.cross_by_reference = on;
     }
 
     /// Increments the reference count for an existing heap entry.

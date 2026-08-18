@@ -18,10 +18,10 @@ use super::{Type, allocate_string};
 use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
-    exception_private::{ExcType, ExcTypeExt, RunResult, SimpleException},
+    exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     expressions::CmpOperator,
     hash::HashValue,
-    heap::{DropWithContext, HeapId},
+    heap::{DropGuard, DropWithContext, HeapId},
     intern::StringId,
     value::{EitherStr, Value},
 };
@@ -498,6 +498,31 @@ pub(crate) trait PyTrait<'h> {
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
+        // `obj.name(...)` is `getattr(obj, "name")(...)`, and the opcode that
+        // fuses the two is an optimization, not a different operation. A type
+        // that answers a name through `py_getattr` and holds no method of that
+        // name therefore answers a call of it too: without this, an attribute
+        // whose value happens to be callable can be read and not called, which
+        // is a distinction Python does not have.
+        match self.py_getattr(attr, vm)? {
+            Some(CallResult::Value(attribute)) => {
+                let mut guard = DropGuard::new(attribute, vm);
+                let (attribute, vm) = guard.as_parts_mut();
+                return vm.call_function(attribute, args);
+            }
+            // A getattr that suspends has no value to call yet, and the
+            // resumed value would arrive after this call was meant to happen.
+            // Only a host reference does that, and it is intercepted before
+            // reaching any type's `py_call_attr`.
+            Some(suspended) => {
+                suspended.drop_with(vm);
+                args.drop_with(vm);
+                return Err(RunError::internal(
+                    "py_call_attr: an attribute read that suspends cannot be called in place",
+                ));
+            }
+            None => {}
+        }
         // `py_call_attr` takes ownership of the argument bundle. Implementations that
         // do not recognize the attribute still need to release those values before
         // reporting `AttributeError`, otherwise method calls on unsupported types leak

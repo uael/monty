@@ -235,7 +235,8 @@ impl Child {
             }
             pb::parent_request::Kind::Feed(feed) => self.handle_repl_feed(feed, sink),
             pb::parent_request::Kind::Parse(parse) => self.handle_parse(&parse),
-            pb::parent_request::Kind::Probe(probe) => self.handle_probe(&probe, sink),
+            pb::parent_request::Kind::Probe(probe) => self.handle_probe(probe, sink),
+            pb::parent_request::Kind::ReleaseRefs(release) => self.handle_release_refs(&release),
             // The Monty sandbox has no host interpreter to install packages for;
             // dependency installation is only supported by the CPython worker.
             // Answer with a session-preserving error rather than a hard failure.
@@ -412,6 +413,7 @@ impl Child {
             protocol_version: _,
             // informational only — never checked
             monty_version: _,
+            cross_by_reference,
         } = *config;
         let limits = limits.unwrap_or_default().into();
         self.script_name = script_name;
@@ -427,11 +429,9 @@ impl Child {
                 AssertMessageAnnotations::from_max_bytes,
             ),
         };
-        self.state = SessionState::Ready(Box::new(MontyRepl::new(
-            &self.script_name,
-            ResourceTracker::new(limits),
-            options,
-        )));
+        let mut repl = MontyRepl::new(&self.script_name, ResourceTracker::new(limits), options);
+        repl.set_cross_by_reference(cross_by_reference);
+        self.state = SessionState::Ready(Box::new(repl));
         Ok(())
     }
 
@@ -469,7 +469,12 @@ impl Child {
             state.pending_snippet = Some(feed.code.clone());
         }
         let mut print = ProtoPrint::new(sink);
-        let result = repl.feed_start(&feed.code, inputs, PrintWriter::Callback(&mut print));
+        let result = repl.feed_start_named(
+            &feed.code,
+            inputs,
+            (!feed.script_name.is_empty()).then_some(feed.script_name.as_str()),
+            PrintWriter::Callback(&mut print),
+        );
         let event = self.drive(result, &mut print);
         print.drain();
         event
@@ -493,23 +498,70 @@ impl Child {
         }))
     }
 
-    /// Evaluates one expression against the ready session and drives it to the
-    /// turn-ending event, exactly as a feed is driven. Nothing is bound, so the
-    /// snippet never joins the type-check context.
-    fn handle_probe(&mut self, probe: &pb::Probe, sink: &mut dyn EventSink) -> pb::ChildEvent {
+    /// Evaluates one expression against the session and drives it to the
+    /// turn-ending event. Nothing is bound, so the snippet never joins the
+    /// type-check context.
+    ///
+    /// Ready, this is a feed that binds nothing and may suspend like one.
+    /// Suspended, it reads the frame that is asking without disturbing it: the
+    /// child is stopped waiting on the parent's answer, so nothing is running
+    /// and the frame is readable, and the expression runs to completion rather
+    /// than suspending again, which there would be no way to answer.
+    fn handle_probe(&mut self, probe: pb::Probe, sink: &mut dyn EventSink) -> pb::ChildEvent {
+        let bindings = match named_inputs(probe.bindings) {
+            Ok(bindings) => bindings,
+            Err(event) => return *event,
+        };
+        if let SessionState::Suspended(progress) = &mut self.state {
+            progress.tracker().begin_call_steps(probe.max_steps);
+            let mut print = ProtoPrint::new(sink);
+            let probed = progress.probe(&probe.expr, bindings, PrintWriter::Callback(&mut print));
+            print.drain();
+            return probe_event(probed);
+        }
         if let Err(event) = self.ensure_repl() {
             return *event;
         }
         let SessionState::Ready(repl) = mem::replace(&mut self.state, SessionState::Configured(None)) else {
-            // ensure_repl left it un-Ready only when mid-suspension
-            return protocol_violation("Probe without a session ready for input");
+            // ensure_repl left it un-Ready only when mid-suspension, handled above
+            return protocol_violation("Probe without a session");
         };
         repl.tracker().begin_call_steps(probe.max_steps);
         let mut print = ProtoPrint::new(sink);
-        let result = repl.probe_start(&probe.expr, PrintWriter::Callback(&mut print));
+        let result = if bindings.is_empty() {
+            repl.probe_start(&probe.expr, PrintWriter::Callback(&mut print))
+        } else {
+            let mut repl = repl;
+            let probed = repl.probe_scoped(&probe.expr, bindings, PrintWriter::Callback(&mut print));
+            print.drain();
+            self.state = SessionState::Ready(repl);
+            return probe_event(probed);
+        };
         let event = self.drive(result, &mut print);
         print.drain();
         event
+    }
+
+    /// Releases the parent's references to exported values.
+    ///
+    /// Valid while suspended too: the export table is heap state, so an
+    /// export made by the very call the session is suspended in can be
+    /// released without waiting for the rung to finish.
+    fn handle_release_refs(&mut self, release: &pb::ReleaseRefs) -> pb::ChildEvent {
+        match &mut self.state {
+            SessionState::Ready(repl) => {
+                for &token in &release.tokens {
+                    repl.release(token);
+                }
+            }
+            SessionState::Suspended(progress) => {
+                for &token in &release.tokens {
+                    progress.release(token);
+                }
+            }
+            SessionState::Configured(_) => return protocol_violation("ReleaseRefs without a session"),
+        }
+        ok_event()
     }
 
     /// Answers a suspended external function or OS call with the parent's
@@ -918,6 +970,21 @@ fn suspension_event_os_call(call: &monty::ReplOsCall) -> pb::ChildEvent {
         call_id: call.call_id,
         call: Some(call.function_call.clone().into()),
     }))
+}
+
+/// Turn-ending event for a probe that ran to completion: its value, or the
+/// exception it raised. Unlike [`Child::drive`]'s, this changes no session
+/// state, since a probe leaves the session exactly as it found it.
+fn probe_event(probed: Result<MontyObject, MontyException>) -> pb::ChildEvent {
+    match probed {
+        // A value too deep for the wire must fail cleanly rather than ship an
+        // undecodable frame the parent has to read as a crashed worker.
+        Ok(value) if exceeds_max_value_depth(&value) => error_event(ExcType::RuntimeError, "Max output depth exceeded"),
+        Ok(value) => complete_event(FeedOutcome { value, returned: false }),
+        Err(error) => event(pb::child_event::Kind::Error(pb::Error {
+            exception: Some((&error).into()),
+        })),
+    }
 }
 
 fn complete_event(outcome: FeedOutcome) -> pb::ChildEvent {

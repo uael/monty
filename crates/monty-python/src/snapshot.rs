@@ -47,6 +47,7 @@ use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{
     async_dispatch::{dispatch_function_call, spawn_coroutine_task, wait_for_futures},
+    build::extract_repl_inputs,
     exceptions::MontyError,
     external::{CallResult, ExternalLookup},
     pool::{
@@ -142,6 +143,7 @@ pub(crate) fn feed_start_sync(
         max_steps,
         // a probe is driven to a value, never to a snapshot
         probe: _,
+        script_name: feed_name,
         os,
         print_target,
         checkout,
@@ -152,7 +154,10 @@ pub(crate) fn feed_start_sync(
         py,
         ctx,
         turn_fn(move |c, p| {
-            Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await })
+            Box::pin(async move {
+                c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p)
+                    .await
+            })
         }),
     )
 }
@@ -174,6 +179,7 @@ pub(crate) fn feed_start_async(
         max_steps,
         // a probe is driven to a value, never to a snapshot
         probe: _,
+        script_name: feed_name,
         os,
         print_target,
         checkout,
@@ -184,7 +190,10 @@ pub(crate) fn feed_start_async(
         drive_async(
             ctx,
             turn_fn(move |c, p| {
-                Box::pin(async move { c.feed(&code, inputs, mounts, skip_type_check, max_steps, p).await })
+                Box::pin(async move {
+                    c.feed(&code, inputs, mounts, skip_type_check, max_steps, &feed_name, p)
+                        .await
+                })
             }),
         )
         .await
@@ -358,6 +367,11 @@ impl SnapshotState {
         }
     }
 
+    /// The conversion registry this session's values cross through.
+    fn registry(&self) -> &DcRegistry {
+        &self.ctx.dc_registry
+    }
+
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
         // Check resumed only under the checkout lock
         let checkout = SharedCheckout::clone(&self.ctx.checkout);
@@ -382,6 +396,73 @@ impl SnapshotState {
                 "cannot dump a snapshot that has already been resumed",
             )),
         }
+    }
+
+    /// Evaluates one expression against the suspended session, leaving the
+    /// suspension resumable.
+    ///
+    /// Nothing is running while a suspension waits, so the frame is readable,
+    /// and this is the only moment some questions can be asked: the answer the
+    /// host is about to give may depend on what the frame asking for it
+    /// contains.
+    ///
+    /// Runs to completion. The suspension is already the one turn in flight,
+    /// so a second one would have nowhere to go: a name `bindings` does not
+    /// supply raises `NameError` rather than reaching the host.
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let checkout = SharedCheckout::clone(&self.ctx.checkout);
+        let resumed = &self.resumed;
+        let expr = expr.to_owned();
+        let event = py
+            .detach(|| {
+                block_on_sync(async {
+                    let mut guard = checkout.lock().await;
+                    if resumed.load(Ordering::SeqCst) {
+                        return Ok(None);
+                    }
+                    match guard.as_mut() {
+                        Some(checkout) => checkout
+                            .probe(&expr, bindings, max_steps, &mut monty_pool::on_print_sync(|_, _| {}))
+                            .await
+                            .map(Some),
+                        None => Err(PoolError::Finished),
+                    }
+                })
+            })?
+            .map_err(|e| pool_err_to_py(py, e))?;
+        match event {
+            Some(TurnEvent::Complete(outcome)) => monty_to_py(py, &outcome.value, &self.ctx.dc_registry),
+            // The child answers a suspended probe with a value or an error and
+            // nothing else, so any other event means the two disagree about
+            // what a probe is.
+            Some(other) => Err(PyRuntimeError::new_err(format!(
+                "a probe of a suspended session answered with {other:?}"
+            ))),
+            None => Err(PyRuntimeError::new_err(
+                "cannot probe a snapshot that has already been resumed",
+            )),
+        }
+    }
+
+    /// Releases the host's references to values this session exported.
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        let checkout = SharedCheckout::clone(&self.ctx.checkout);
+        py.detach(|| {
+            block_on_sync(async {
+                let mut guard = checkout.lock().await;
+                match guard.as_mut() {
+                    Some(checkout) => checkout.release_refs(tokens).await,
+                    None => Err(PoolError::Finished),
+                }
+            })
+        })?
+        .map_err(|e| pool_err_to_py(py, e))
     }
 }
 
@@ -629,6 +710,40 @@ impl PyFunctionSnapshot {
         drive_sync(py, ctx, turn_fn(move |c, p| Box::pin(c.resume(value, p))))
     }
 
+    /// Evaluates one expression against the suspended session and returns its
+    /// value, leaving this suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing runs
+    /// while a suspension waits, so the frame is readable: the expression sees
+    /// the globals exactly as the suspended snippet left them.
+    ///
+    /// `bindings` are visible to this expression and to nothing after it, so
+    /// supplying a name here does not become a name the session has. The
+    /// expression runs to completion, since the suspension is already the one
+    /// turn in flight: a name `bindings` does not supply raises `NameError`
+    /// rather than reaching back out to the host.
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Option<&Bound<'_, PyDict>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
+        self.0.snapshot.probe(py, expr, bindings, max_steps)
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.0.snapshot.release_refs(py, tokens)
+    }
+
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
         self.0.snapshot.dump(py)
     }
@@ -759,6 +874,40 @@ impl PyAsyncFunctionSnapshot {
         })
     }
 
+    /// Evaluates one expression against the suspended session and returns its
+    /// value, leaving this suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing runs
+    /// while a suspension waits, so the frame is readable: the expression sees
+    /// the globals exactly as the suspended snippet left them.
+    ///
+    /// `bindings` are visible to this expression and to nothing after it, so
+    /// supplying a name here does not become a name the session has. The
+    /// expression runs to completion, since the suspension is already the one
+    /// turn in flight: a name `bindings` does not supply raises `NameError`
+    /// rather than reaching back out to the host.
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Option<&Bound<'_, PyDict>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
+        self.0.snapshot.probe(py, expr, bindings, max_steps)
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.0.snapshot.release_refs(py, tokens)
+    }
+
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
         self.0.snapshot.dump(py)
     }
@@ -856,6 +1005,40 @@ impl PyNameLookupSnapshot {
         drive_sync(py, ctx, turn_fn(move |c, p| Box::pin(c.resume_name_lookup(value, p))))
     }
 
+    /// Evaluates one expression against the suspended session and returns its
+    /// value, leaving this suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing runs
+    /// while a suspension waits, so the frame is readable: the expression sees
+    /// the globals exactly as the suspended snippet left them.
+    ///
+    /// `bindings` are visible to this expression and to nothing after it, so
+    /// supplying a name here does not become a name the session has. The
+    /// expression runs to completion, since the suspension is already the one
+    /// turn in flight: a name `bindings` does not supply raises `NameError`
+    /// rather than reaching back out to the host.
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Option<&Bound<'_, PyDict>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
+        self.0.snapshot.probe(py, expr, bindings, max_steps)
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.0.snapshot.release_refs(py, tokens)
+    }
+
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
         self.0.snapshot.dump(py)
     }
@@ -904,6 +1087,40 @@ impl PyAsyncNameLookupSnapshot {
             };
             drive_async(ctx, turn_fn(move |c, p| Box::pin(c.resume_name_lookup(value, p)))).await
         })
+    }
+
+    /// Evaluates one expression against the suspended session and returns its
+    /// value, leaving this suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing runs
+    /// while a suspension waits, so the frame is readable: the expression sees
+    /// the globals exactly as the suspended snippet left them.
+    ///
+    /// `bindings` are visible to this expression and to nothing after it, so
+    /// supplying a name here does not become a name the session has. The
+    /// expression runs to completion, since the suspension is already the one
+    /// turn in flight: a name `bindings` does not supply raises `NameError`
+    /// rather than reaching back out to the host.
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Option<&Bound<'_, PyDict>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
+        self.0.snapshot.probe(py, expr, bindings, max_steps)
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.0.snapshot.release_refs(py, tokens)
     }
 
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
@@ -982,6 +1199,40 @@ impl PyFutureSnapshot {
         Err(PyRuntimeError::new_err("async external functions require AsyncMonty"))
     }
 
+    /// Evaluates one expression against the suspended session and returns its
+    /// value, leaving this suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing runs
+    /// while a suspension waits, so the frame is readable: the expression sees
+    /// the globals exactly as the suspended snippet left them.
+    ///
+    /// `bindings` are visible to this expression and to nothing after it, so
+    /// supplying a name here does not become a name the session has. The
+    /// expression runs to completion, since the suspension is already the one
+    /// turn in flight: a name `bindings` does not supply raises `NameError`
+    /// rather than reaching back out to the host.
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Option<&Bound<'_, PyDict>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
+        self.0.snapshot.probe(py, expr, bindings, max_steps)
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.0.snapshot.release_refs(py, tokens)
+    }
+
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
         self.0.snapshot.dump(py)
     }
@@ -1042,6 +1293,40 @@ impl PyAsyncFutureSnapshot {
             };
             drive_async(ctx, turn_fn(move |c, p| Box::pin(c.resume_futures(results, p)))).await
         })
+    }
+
+    /// Evaluates one expression against the suspended session and returns its
+    /// value, leaving this suspension resumable.
+    ///
+    /// The host is answering a call the sandbox made, and some answers can
+    /// only be decided by looking at the frame that is asking. Nothing runs
+    /// while a suspension waits, so the frame is readable: the expression sees
+    /// the globals exactly as the suspended snippet left them.
+    ///
+    /// `bindings` are visible to this expression and to nothing after it, so
+    /// supplying a name here does not become a name the session has. The
+    /// expression runs to completion, since the suspension is already the one
+    /// turn in flight: a name `bindings` does not supply raises `NameError`
+    /// rather than reaching back out to the host.
+    #[pyo3(signature = (expr, *, bindings=None, max_steps=None))]
+    fn probe(
+        &self,
+        py: Python<'_>,
+        expr: &str,
+        bindings: Option<&Bound<'_, PyDict>>,
+        max_steps: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let bindings = extract_repl_inputs(bindings, self.0.snapshot.registry())?;
+        self.0.snapshot.probe(py, expr, bindings, max_steps)
+    }
+
+    /// Releases the host's references to values this session exported, letting
+    /// it free each one once nothing else holds it.
+    ///
+    /// A token this session never minted, or one already released, is ignored.
+    #[pyo3(signature = (*tokens))]
+    fn release_refs(&self, py: Python<'_>, tokens: Vec<u64>) -> PyResult<()> {
+        self.0.snapshot.release_refs(py, tokens)
     }
 
     fn dump(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {

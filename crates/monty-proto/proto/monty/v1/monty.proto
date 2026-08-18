@@ -83,7 +83,48 @@ message MontyObject {
     string instance_type = 28;
     Unit not_implemented = 29;
     Instance instance = 30;
+    // A host object the sandbox holds by reference.
+    HostRef host_ref = 31;
+    // A session value the host holds by reference.
+    SessionRef session_ref = 32;
   }
+}
+
+// A host object the sandbox holds by reference rather than by value.
+//
+// The boundary otherwise carries copies, so an object whose identity or whose
+// live state is the point cannot cross at all. This crosses instead: the
+// sandbox gets an opaque proxy, and every attribute read, call, method call
+// and context-manager step on it arrives as a `FunctionCall` with
+// `method_call` set and the reference as the first argument, so the parent
+// resolves it in its own table and performs the operation on the real object.
+message HostRef {
+  // The parent's own identifier for the object. Opaque to the child, and
+  // never readable from sandboxed code: it is frequently a memory address.
+  uint64 id = 1;
+  // `type(obj).__name__` on the parent, so repr and error messages inside the
+  // sandbox can name what the proxy stands for without a round trip.
+  string type_name = 2;
+}
+
+// A session value the parent holds by reference rather than by value.
+//
+// The mirror image of `HostRef`, and the answer for a value whose structure
+// is what the parent wants: a type object, a class, a template, a generator.
+// Those cross as their `repr` otherwise, which the parent can print but not
+// ask anything. The parent hands the reference back as an ordinary input and
+// the session's own semantics answer whatever it wants to know.
+//
+// The id names a place in the child session's heap. It is meaningful only to
+// that session, and it survives that session's dump and load, since the dump
+// carries the heap. An id the session did not mint, or one it has released,
+// is refused as an input.
+message SessionRef {
+  // The session's own identifier for the value. Opaque to the parent.
+  uint64 id = 1;
+  // `repr()` of the value at export time, so a parent that only wants to
+  // print it needs no round trip.
+  string repr = 2;
 }
 
 // An instance of a class the sandbox itself defined.
@@ -379,6 +420,7 @@ message ParentRequest {
     Shutdown shutdown = 10;
     Parse parse = 11;
     Probe probe = 12;
+    ReleaseRefs release_refs = 13;
   }
 
   // W3C `traceparent` identifying the caller's span, so a child that exports
@@ -427,6 +469,10 @@ message Configure {
   // is not a monty parent — and is always rejected. The protocol has no
   // in-band negotiation, so an undeclared peer cannot be assumed compatible.
   uint32 protocol_version = 9;
+  // Hand back a `SessionRef` for a value with no representation of its own,
+  // rather than its `repr` string. See `SessionRef`; off by default, because
+  // an exported value is pinned until `ReleaseRefs` frees it.
+  bool cross_by_reference = 10;
 }
 
 // Rendering of the typing diagnostics a `TypingError` carries; mirrors ty's
@@ -458,6 +504,13 @@ message Feed {
   // underneath; whichever is tighter trips first. Deterministic, so the same
   // source under the same budget fails with the same message every time.
   optional uint64 max_steps = 4;
+  // Filename this snippet's frames carry. Empty takes the session's generated
+  // `<python-input-N>`.
+  //
+  // Used verbatim, including when an earlier snippet already used it: the
+  // source kept for rendering tracebacks is keyed by this name, so reusing
+  // one makes the older snippet's frames render against the newer text.
+  string script_name = 5;
 }
 
 // Reads a snippet and answers what is statically true of it, running none of
@@ -474,12 +527,43 @@ message Parse {
 }
 
 // Evaluates one expression against the session's namespace and answers with
-// its value. Binds nothing, so the session is left as it was. Turn ends with
-// `Complete`, `Error`, or a suspension, exactly as a `Feed` does.
+// its value. Binds nothing, so the session is left as it was.
+//
+// Valid whether the session is idle or suspended mid-feed. Suspended, nothing
+// is running (the child is waiting on the parent's answer), so the frame is
+// readable and this is how a parent decides its answer BY what the frame that
+// is asking contains. The suspension is left resumable, and the turn ends with
+// `Complete` or `Error` rather than a suspension of its own: an expression
+// reaching a name only the parent could answer raises `NameError`, since a
+// second suspension would have nowhere to go.
+//
+// Idle, the turn may still end in a suspension, exactly as a `Feed` does,
+// unless `bindings` supplies what the expression needs.
 message Probe {
   string expr = 1;
   // Instructions the expression may execute, as in `Feed.max_steps`.
   optional uint64 max_steps = 2;
+  // Values visible to this expression and to nothing after it.
+  //
+  // Unlike a `Feed`'s inputs, and unlike a name resolved through a
+  // `NameLookup`, these do not stay in the namespace: each binding's slot is
+  // put back the way it was found. So supplying a name for one expression
+  // cannot later answer a definition the session failed to make.
+  //
+  // Required while the session is suspended, since a name nothing supplies
+  // raises there rather than reaching the parent.
+  repeated NamedValue bindings = 3;
+}
+
+// Releases the parent's references to values the session exported (see
+// `SessionRef`), letting the session free each one once nothing else holds it.
+//
+// An export is pinned until this arrives: nothing inside the sandbox can drop
+// it, because the reference lives outside. A token this session never minted,
+// or one already released, is ignored rather than taking a reference that is
+// no longer the parent's. Turn ends with `Ok`.
+message ReleaseRefs {
+  repeated uint64 tokens = 1;
 }
 
 // Answers a `FunctionCall` or `OsCall` suspension. `call_id` must match the

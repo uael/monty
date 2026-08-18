@@ -87,7 +87,7 @@ async fn drives_a_session_over_websocket() {
     assert_eq!(checkout.pid(), None);
 
     let event = checkout
-        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect("feed");
     assert!(
@@ -197,6 +197,7 @@ async fn mounted_reads_are_serviced_from_the_parent_filesystem() {
             vec![MountSpec::new("/mnt", dir.path(), MountSpecMode::ReadOnly).unwrap()],
             false,
             None,
+            "",
             &mut no_print,
         )
         .await
@@ -258,6 +259,7 @@ async fn malformed_os_call_is_a_protocol_error() {
             vec![MountSpec::new("/mnt", dir.path(), MountSpecMode::ReadOnly).unwrap()],
             false,
             None,
+            "",
             &mut no_print,
         )
         .await
@@ -298,7 +300,7 @@ async fn duration_backstop_kills_an_unresponsive_worker() {
         .await
         .expect("checkout");
     let err = checkout
-        .feed("while True:\n    pass", vec![], vec![], false, None, &mut no_print)
+        .feed("while True:\n    pass", vec![], vec![], false, None, "", &mut no_print)
         .await
         .unwrap_err();
     let PoolError::Timeout { timeout } = err else {
@@ -338,6 +340,7 @@ async fn duration_backstop_arms_on_the_raw_path() {
         .expect("checkout");
     let request = pb::ParentRequest {
         kind: Some(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "while True:\n    pass".to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -400,6 +403,7 @@ async fn a_raw_load_adopts_the_dumps_duration_budget() {
     checkout.turn_raw(&load, &mut on_event).await.expect("load");
     let feed = pb::ParentRequest {
         kind: Some(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "while True:\n    pass".to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -461,6 +465,7 @@ async fn lifecycle_requests_are_refused_on_the_raw_path() {
     // the session survived every refusal
     let feed = pb::ParentRequest {
         kind: Some(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "1 + 1".to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -516,6 +521,7 @@ async fn an_oversize_raw_load_keeps_the_duration_budget() {
     assert!(matches!(err, PoolError::Runtime(_)), "got {err:?}");
     let feed = pb::ParentRequest {
         kind: Some(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "while True:\n    pass".to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -559,6 +565,7 @@ async fn a_shutdown_dump_on_the_raw_path_discards_the_worker() {
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let request = pb::ParentRequest {
         kind: Some(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "1 + 1".to_owned(),
             inputs: vec![],
             skip_type_check: false,
@@ -617,6 +624,7 @@ async fn a_mounted_feed_turn_is_still_bounded_by_the_request_timeout() {
             vec![MountSpec::new("/mnt", dir.path(), MountSpecMode::ReadOnly).unwrap()],
             false,
             None,
+            "",
             &mut no_print,
         )
         .await
@@ -668,7 +676,7 @@ async fn restored_session_rearms_the_duration_backstop() {
     assert!(event.is_none());
     assert_eq!(script_name.as_deref(), Some("restored.py"));
     let err = checkout
-        .feed("while True:\n    pass", vec![], vec![], false, None, &mut no_print)
+        .feed("while True:\n    pass", vec![], vec![], false, None, "", &mut no_print)
         .await
         .unwrap_err();
     let PoolError::Timeout { timeout } = err else {
@@ -797,7 +805,7 @@ async fn shutdown_hands_back_a_restorable_dump() {
     let pool = websocket_pool(port).await;
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let err = checkout
-        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect_err("a draining server must not run the feed");
     let PoolError::Shutdown { dump: Some(dump) } = err else {
@@ -811,7 +819,7 @@ async fn shutdown_hands_back_a_restorable_dump() {
     let (event, _name) = checkout.restore(dump, vec![], &mut no_print).await.expect("restore");
     assert!(event.is_none(), "an idle dump has no suspension to re-announce");
     let event = checkout
-        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect("feed on the restored session");
     assert!(
@@ -854,7 +862,7 @@ async fn shutdown_during_a_suspension_carries_the_suspended_dump() {
     let pool = websocket_pool(port).await;
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let event = checkout
-        .feed("ext()", vec![], vec![], false, None, &mut no_print)
+        .feed("ext()", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect("feed");
     assert!(
@@ -972,7 +980,7 @@ async fn finishing_a_checkout_sends_a_close_frame() {
 
     let (_pool, mut checkout) = websocket_checkout(port).await;
     checkout
-        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect("feed");
     checkout.finish().await.expect("finish");
@@ -1015,7 +1023,7 @@ async fn a_timed_out_turn_sends_a_close_frame() {
     let pool = Pool::new(config).await.expect("pool");
     let mut checkout = pool.checkout(&ReplConfig::default()).await.expect("checkout");
     let err = checkout
-        .feed("while True:\n    pass", vec![], vec![], false, None, &mut no_print)
+        .feed("while True:\n    pass", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect_err("the turn must time out");
     assert!(matches!(err, PoolError::Timeout { .. }), "got {err:?}");
@@ -1057,7 +1065,7 @@ async fn cancelling_finish_does_not_leak_capacity() {
 
     let wedge = "#".repeat(32 * 1024 * 1024);
     let mut on_print = no_print;
-    let feed = checkout.feed(&wedge, vec![], vec![], false, None, &mut on_print);
+    let feed = checkout.feed(&wedge, vec![], vec![], false, None, "", &mut on_print);
     assert!(
         timeout(Duration::from_secs(1), feed).await.is_err(),
         "the unread feed must block, wedging the socket"
@@ -1103,7 +1111,7 @@ async fn a_dropped_connection_is_a_disconnect() {
 
     let (_pool, mut checkout) = websocket_checkout(port).await;
     let event = checkout
-        .feed("1 + 1", vec![], vec![], false, None, &mut no_print)
+        .feed("1 + 1", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect("feed");
     assert!(
@@ -1120,7 +1128,7 @@ async fn a_dropped_connection_is_a_disconnect() {
     // next feed — the failure mode this test pins
     join_server(server).await;
     let err = checkout
-        .feed("x", vec![], vec![], false, None, &mut no_print)
+        .feed("x", vec![], vec![], false, None, "", &mut no_print)
         .await
         .expect_err("a closed connection must fail the turn");
     assert!(matches!(err, PoolError::Disconnected { .. }), "got {err:?}");

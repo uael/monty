@@ -671,7 +671,10 @@ impl<'h> VM<'h> {
 
     /// Whether the class of the instance at `id` defines `__await__`.
     fn defines_await(&self, id: HeapId) -> bool {
-        instance_class_id(id, self).is_some_and(|class_id| class_defines(class_id, "__await__", self))
+        // A host object's awaitability is the host's answer: the `__await__`
+        // goes out, and what comes back is what gets awaited.
+        matches!(self.heap.get(id), HeapData::HostRef(_))
+            || instance_class_id(id, self).is_some_and(|class_id| class_defines(class_id, "__await__", self))
     }
 
     /// The exception object standing for `error`, or `None` when it has no

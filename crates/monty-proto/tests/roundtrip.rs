@@ -574,6 +574,7 @@ fn nest_dataclass(depth: usize) -> MontyObject {
 fn decodes_in_frame(value: &MontyObject) -> bool {
     let request = pb::ParentRequest {
         kind: Some(pb::parent_request::Kind::Feed(pb::Feed {
+            script_name: String::new(),
             code: String::new(),
             inputs: vec![pb::NamedValue {
                 name: "v".to_owned(),

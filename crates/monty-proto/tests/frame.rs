@@ -20,6 +20,7 @@ impl<R: Read> Read for OneByteReader<R> {
 fn feed() -> pb::ParentRequest {
     pb::ParentRequest {
         kind: Some(RequestKind::Feed(pb::Feed {
+            script_name: String::new(),
             code: "1 + 1".to_owned(),
             inputs: vec![],
             skip_type_check: false,
