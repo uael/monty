@@ -11,8 +11,8 @@ use crate::{
     intern::{Interns, StaticStrings, StringId},
     modules::collections,
     types::{
-        AttrCallResult, Bytes, Deque, Dict, FrozenSet, List, LongInt, Path, PyTrait, Range, Set, Slice, Str, TimeZone,
-        Tuple, attrgetter,
+        AttrCallResult, Bytes, Deque, Dict, FrozenSet, List, LongInt, NativeClass, Path, PyTrait, Range, Set, Slice,
+        Str, TimeZone, Tuple, attrgetter,
         bytes::{bytes_fromhex, bytes_repr},
         contextvars, date, datetime,
         dict::{DictKind, dict_fromkeys},
@@ -268,6 +268,14 @@ pub enum Type {
     /// `get_origin(int | str) is UnionType` true.
     #[strum(serialize = "typing.Union")]
     Union,
+    /// A class the interpreter provides rather than the sandbox: a `typing`
+    /// form or a `collections.abc` abstract class.
+    ///
+    /// `#[strum(disabled)]` for the same reason as [`Exception`](Self::Exception):
+    /// the name lives on [`NativeClass`]'s own strum derive, and every consumer
+    /// peels this variant off explicitly.
+    #[strum(disabled)]
+    Native(NativeClass),
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -290,6 +298,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match *self {
             Self::Exception(exc_type) => exc_type.into(),
+            Self::Native(native) => native.into(),
             Self::Instance(_) => unreachable!("Type::Instance must be rendered via Type::name"),
             other => other.into(),
         })
@@ -308,6 +317,7 @@ impl Type {
         match self {
             Self::Instance(class_id) => class_name(class_id, heap, interns),
             Self::Exception(exc_type) => Cow::Borrowed(exc_type.into()),
+            Self::Native(native) => Cow::Borrowed(native.into()),
             other => Cow::Borrowed(other.into()),
         }
     }
@@ -348,6 +358,7 @@ impl Type {
             Self::Iterator => Some("iter"),
             Self::Type => Some("type"),
             Self::Property => Some("property"),
+            Self::Native(NativeClass::Object) => Some("object"),
             _ => None,
         }
     }
@@ -378,6 +389,9 @@ impl Type {
             "iter" => Some(Self::Iterator),
             "type" => Some(Self::Type),
             "property" => Some(Self::Property),
+            // The one native class a bare name resolves to: every other lives
+            // behind an import (`collections.abc`, `typing`, `contextlib`).
+            "object" => Some(Self::Native(NativeClass::Object)),
             _ => None,
         }
     }
@@ -390,6 +404,10 @@ impl Type {
     /// as it does there.
     #[must_use]
     pub(crate) const fn is_subscriptable_class(self) -> bool {
+        if matches!(self, Self::Native(NativeClass::Object)) {
+            // `object` is the one native class CPython does not parameterize.
+            return false;
+        }
         matches!(
             self,
             Self::List
@@ -405,6 +423,9 @@ impl Type {
                 | Self::ReMatch
                 | Self::StaticMethod
                 | Self::ClassMethod
+                // Every `collections.abc` class is generic; `typing.Protocol`
+                // and `typing.Generic` take their parameters the same way.
+                | Self::Native(_)
         )
     }
 

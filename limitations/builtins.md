@@ -21,6 +21,12 @@ lookup invokes and the zero-argument `super()`.
 `set`, `slice`, `str`, `tuple`. Exception classes (`ValueError`,
 `TypeError`, etc.) are also names in the builtin namespace.
 
+`object` is a name too, and answers `isinstance` / `issubclass` for every
+value and every class, which is what makes it usable as the contract that
+proves nothing. It builds no instances (`object()` raises `TypeError`) and takes no
+parameters, because nothing in Monty needs a bare instance of it and
+CPython refuses the subscript as well.
+
 ## Builtins that are NOT implemented
 
 These raise `NameError`:
@@ -31,17 +37,16 @@ These raise `NameError`:
   implemented, but only for modules; see below.
 - **Interactive**: `input`, `breakpoint`, `help`.
 - **Construction / coercion**: `bytearray`, `complex`, `memoryview`,
-  `object`, `format`, `ascii`.
+  `format`, `ascii`.
 - **Other**: `callable`, `delattr`, `aiter`, `anext`.
 
-## Two names only the type checker resolves
+## One name only the type checker resolves
 
-`object` and `UnicodeError` type-check and then raise `NameError` when the
-code runs. Both are structural in the vendored stub rather than deliberate:
-`object` is the root every other stub class inherits from, and `UnicodeError`
-is the declared base of `UnicodeDecodeError` / `UnicodeEncodeError`, so
-filtering either away would leave the classes naming it describing nothing.
-Every other builtin name agrees in both directions, which
+`UnicodeError` type-checks and then raises `NameError` when the code runs. It
+is structural in the vendored stub rather than deliberate: it is the declared
+base of `UnicodeDecodeError` / `UnicodeEncodeError`, so filtering it away
+would leave the classes naming it describing nothing. Every other builtin name
+agrees in both directions, which
 `crates/monty-runtime/tests/typeshed_builtins.rs` pins against the interpreter's
 own `vars(builtins)`.
 

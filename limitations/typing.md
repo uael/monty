@@ -10,9 +10,8 @@ annotated code can `import` it.
 
 `types.GenericAlias` — subscripting a class builds one, and it behaves as in
 CPython: `__origin__`, `__args__`, `repr`, equality, hashing, calling through
-to the origin (`list[int]() == []`), attribute fall-through to the origin
-(`list[int].__name__ == 'list'`), and use as a base class (`class B(list[int])`
-inherits from `list`). Only the classes CPython parameterizes are
+to the origin (`list[int]() == []`) and attribute fall-through to the origin
+(`list[int].__name__ == 'list'`). Only the classes CPython parameterizes are
 subscriptable: `list`, `dict`, `tuple`, `set`, `frozenset`, `type`,
 `enumerate`, `staticmethod`, `classmethod`, `collections.deque`,
 `collections.defaultdict`, `collections.Counter`, `re.Pattern`, `re.Match`,
@@ -55,7 +54,8 @@ Divergences:
 `Callable`, `Type`, `Sequence`, `Mapping`, `Iterable`, `Iterator`,
 `Generator`, `ClassVar`, `Final`, `Literal`, `TypeVar`, `Generic`,
 `Protocol`, `Annotated`, `Self`, `Never`, `NoReturn`, `TYPE_CHECKING`,
-`get_origin`, `get_args`, `overload`, `dataclass_transform`.
+`get_origin`, `get_args`, `overload`, `dataclass_transform`,
+`runtime_checkable`.
 
 `TYPE_CHECKING` is `False`, as in CPython at runtime.
 
@@ -74,6 +74,68 @@ not work — CPython gives those the *class* as their origin while still printin
 the `typing.` name, and one alias object cannot do both — so use the builtin
 generics and `collections.abc` instead.
 
+## `collections.abc` and `typing.Protocol`
+
+The whole of `collections.abc.__all__` is implemented — `Hashable`, `Sized`,
+`Container`, `Iterable`, `Iterator`, `Reversible`, `Collection`, `Callable`,
+`Generator`, `Sequence`, `MutableSequence`, `ByteString`, `Set`, `MutableSet`,
+`Mapping`, `MutableMapping`, `MappingView`, `KeysView`, `ItemsView`,
+`ValuesView`, `Awaitable`, `Coroutine`, `AsyncIterable`, `AsyncIterator`,
+`AsyncGenerator` and `Buffer` — alongside `typing.Protocol` and
+`typing.Generic`. All of them are classes the interpreter provides rather than
+sandbox `class` statements, and all behave the same way:
+
+- **`isinstance` / `issubclass` give CPython's answers.** A builtin object
+  matches through the same registration table CPython uses (`isinstance({},
+  Mapping)`, `issubclass(str, Sequence)`), and a sandbox class matches
+  structurally where CPython defines a `__subclasshook__` (`Iterable` wants
+  `__iter__`, `Collection` wants `__len__`/`__iter__`/`__contains__`, and so
+  on). `Sequence`, `Mapping` and `Set` have no hook in CPython either, so only
+  a declared base counts for them.
+- **Subscripting one builds a `types.GenericAlias`**: `Mapping[str, int]`,
+  `Callable[[int], str]`.
+- **One may stand in a base list.** It adds no link to the single-inheritance
+  chain — the derived class still has at most one concrete base — but it is
+  remembered, so `isinstance(Countdown(), Iterator)` is true and the base's
+  default members arrive: `Iterator.__iter__` returns `self`, so a class
+  defining only `__next__` iterates. A subscripted one (`class C(Iterator[int])`)
+  resolves through `__mro_entries__` to the class it subscripted first.
+
+`typing.Protocol` additionally behaves as it does in CPython: a class naming it
+directly gets `_is_protocol = True` and cannot be instantiated (`TypeError:
+Protocols cannot be instantiated`), a concrete subclass gets
+`_is_protocol = False` and can be; `isinstance`/`issubclass` against a protocol
+that is not `@runtime_checkable` raise `TypeError: Instance and class checks can
+only be used with @runtime_checkable protocols`, even for a class that really
+does derive from it; and `@runtime_checkable` records `__protocol_attrs__` (a
+`frozenset`) and `_is_runtime_protocol = True`, after which `isinstance` and
+`issubclass` test for those members structurally. The recorded members are the
+names the protocol and its bases *bind* plus the names they *annotate*, which
+is what makes a data protocol (`class HasContent(Protocol): content: str`)
+mean anything: it binds nothing at all, and an empty member set is satisfied by
+every object.
+
+Divergences:
+
+- **`__name__` is the qualified name.** `Mapping.__name__` is
+  `'collections.abc.Mapping'` where CPython says `'Mapping'`, the same choice
+  `deque` documents in ./collections.md; `repr` and error messages match
+  CPython exactly.
+- **`type(Mapping)` is `type`**, where CPython reports `abc.ABCMeta`; likewise
+  `type(Protocol)` rather than `typing._ProtocolMeta`.
+- **`register()` is not implemented**: the registration table is fixed, so a
+  sandbox class cannot declare itself a `Sequence` after the fact — name the
+  base instead.
+- **`Generator`, `AsyncIterable`, `AsyncIterator`, `AsyncGenerator` and
+  `Buffer` match no builtin object**, since Monty has no generator, async
+  iterator or buffer of its own; a sandbox class still matches them
+  structurally.
+- **Abstractness is not enforced**: a class naming an abstract base is
+  instantiable even when it implements none of the abstract methods, where
+  CPython raises. Only `Protocol` refuses instantiation.
+- **`Generic` is not a distinct mechanism**: `class C(Generic[T])` is accepted
+  and erased, exactly as PEP 695's `class C[T]` is.
+
 ## The `types` module
 
 `types` exports the runtime type objects Monty can name exactly: `UnionType`,
@@ -91,7 +153,7 @@ apart what CPython tells apart.
 ## Not implemented
 
 - `get_type_hints`, `cast`, `assert_type`,
-  `assert_never`, `final`, `NewType`,
+  `assert_never`, `final`, `NewType`, `TypeVar` as a callable,
   `NamedTuple`, `TypedDict`, `ParamSpec`,
   `Concatenate`, `Unpack`, `TypeAlias`, `LiteralString`.
 - `typing.TypeAliasType` is **not** exported by this module even though the

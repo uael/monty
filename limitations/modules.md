@@ -11,9 +11,9 @@ and no way for sandboxed code to load additional modules.
 | `asyncio`      | ./asyncio.md     |
 | `builtins`     | ./builtins.md    |
 | `collections`  | ./collections.md |
-| `collections.abc` | ./typing.md   |
 | `contextlib`   | ./contextlib.md  |
 | `contextvars`  | ./contextvars.md |
+| `collections.abc` | ./typing.md   |
 | `dataclasses`  | ./dataclasses.md |
 | `datetime`     | ./datetime.md    |
 | `functools`    | ./functools.md   |
@@ -37,15 +37,14 @@ and `namedtuple`; `OrderedDict`, `ChainMap`, and the `UserDict` / `UserList`
 
 A submodule is registered under its full dotted name. `import a.b` binds the
 package `a` and reaches the submodule as `a.b`, as in CPython, so
-`import os.path` gives the name `os`. That form needs the package to be a
-module Monty implements: `os.path` qualifies, while `import string.templatelib`
-is rejected at compile time because `string` itself is not importable here, and
+`import os.path` gives the name `os` and `import collections.abc` gives
+`collections`. That form needs the package to be a module Monty implements:
+`os.path` and `collections.abc` qualify, while `import string.templatelib` is
+rejected at compile time because `string` itself is not importable here, and
 points at `import string.templatelib as tl` or
 `from string.templatelib import Template`, which name the submodule directly.
 The `string` package has no other importable submodule (see
-./string_templatelib.md). `collections.abc` is registered the same way, so
-`from collections.abc import Mapping` and `import collections.abc as abc` work
-while the unaliased `import collections.abc` is rejected.
+./string_templatelib.md).
 
 Each module is built once and cached, as CPython's `sys.modules` does, so every
 import of a name hands back that one object: `import sys` twice, or

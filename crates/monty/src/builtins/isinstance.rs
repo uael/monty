@@ -7,7 +7,13 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{HeapData, HeapId, HeapReadOutput},
-    types::{PyTrait, Type, class_is_subclass, generic_alias::union_arg_values, instance::instance_exc_base},
+    types::{
+        PyTrait, Type, class_is_subclass,
+        generic_alias::union_arg_values,
+        instance::instance_exc_base,
+        native_class::native_isinstance,
+        protocol::{ProtocolCheck, protocol_check, protocol_check_refused, protocol_instance_of},
+    },
     value::Value,
 };
 
@@ -43,10 +49,19 @@ pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) 
         Value::Builtin(Builtins::Function(BuiltinsFunctions::Classmethod)) => {
             Ok(obj.py_type(vm).is_instance_of(Type::ClassMethod))
         }
+        // An abstract class answers from the interpreter's own knowledge of the
+        // object, not from a class chain.
+        Value::Builtin(Builtins::Type(Type::Native(native))) => native_isinstance(obj, *native, vm),
         Value::Builtin(Builtins::Type(t)) => Ok(obj.py_type(vm).is_instance_of(*t)),
         Value::Builtin(Builtins::ExcType(handler_type)) => Ok(exception_instance_of(obj, *handler_type, vm)),
-        // A user-defined class: true iff `obj` is an instance of exactly this class.
-        Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => Ok(instance_of_class(obj, *id, vm)),
+        // A user-defined class: true iff `obj` is an instance of exactly this
+        // class, or structurally an instance of it when it is a
+        // `@runtime_checkable` protocol.
+        Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => match protocol_check(*id, vm) {
+            ProtocolCheck::Ordinary => Ok(instance_of_class(obj, *id, vm)),
+            ProtocolCheck::Structural => Ok(instance_of_class(obj, *id, vm) || protocol_instance_of(obj, *id, vm)?),
+            ProtocolCheck::Refused => Err(protocol_check_refused()),
+        },
         // A `collections.namedtuple` class, matched by the instance's `class_id`.
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::NamedTupleClass(_)) => {
             Ok(instance_of_namedtuple_class(obj, *id, vm))

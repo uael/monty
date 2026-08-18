@@ -1183,6 +1183,67 @@ pub enum StaticStrings {
     /// `__class_getitem__`, the hook a class defines to be subscriptable.
     #[strum(serialize = "__class_getitem__")]
     DunderClassGetitem,
+
+    // ==========================
+    // `collections.abc` names. The family reuses the existing typing strings
+    // for `Callable`, `Sequence`, `Mapping`, `Iterable`, `Iterator`,
+    // `Generator` and `Set`; the rest are new here. Appended at the enum end:
+    // discriminants are serialized `StringId`s, so mid-enum insertion would
+    // shift every later id.
+    /// Module name for `from collections.abc import ...`. The whole dotted path
+    /// is interned as one string, which is what the import lookup matches.
+    #[strum(serialize = "collections.abc")]
+    CollectionsAbc,
+    #[strum(serialize = "Hashable")]
+    Hashable,
+    #[strum(serialize = "Sized")]
+    Sized,
+    #[strum(serialize = "Container")]
+    Container,
+    #[strum(serialize = "Reversible")]
+    Reversible,
+    #[strum(serialize = "Collection")]
+    Collection,
+    #[strum(serialize = "MutableSequence")]
+    MutableSequence,
+    #[strum(serialize = "ByteString")]
+    ByteString,
+    #[strum(serialize = "MutableSet")]
+    MutableSet,
+    #[strum(serialize = "MutableMapping")]
+    MutableMapping,
+    #[strum(serialize = "MappingView")]
+    MappingView,
+    #[strum(serialize = "KeysView")]
+    KeysView,
+    #[strum(serialize = "ItemsView")]
+    ItemsView,
+    #[strum(serialize = "ValuesView")]
+    ValuesView,
+    #[strum(serialize = "Awaitable")]
+    Awaitable,
+    /// `collections.abc.Coroutine`. Distinct from [`Self::Coroutine`] if one is
+    /// ever added; nothing else interns the bare word today.
+    #[strum(serialize = "Coroutine")]
+    CoroutineClass,
+    #[strum(serialize = "AsyncIterable")]
+    AsyncIterable,
+    #[strum(serialize = "AsyncIterator")]
+    AsyncIterator,
+    #[strum(serialize = "AsyncGenerator")]
+    AsyncGenerator,
+    #[strum(serialize = "Buffer")]
+    Buffer,
+    /// `_is_protocol`, the flag CPython's `Protocol.__init_subclass__` writes.
+    #[strum(serialize = "_is_protocol")]
+    IsProtocol,
+    /// `_is_runtime_protocol`, written by `typing.runtime_checkable`.
+    #[strum(serialize = "_is_runtime_protocol")]
+    IsRuntimeProtocol,
+    /// `__protocol_attrs__`, the member names a runtime-checkable protocol
+    /// tests an instance for.
+    #[strum(serialize = "__protocol_attrs__")]
+    DunderProtocolAttrs,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

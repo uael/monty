@@ -18,6 +18,7 @@ use crate::{
 pub(crate) mod asyncio;
 pub(crate) mod builtins;
 pub(crate) mod collections;
+pub(crate) mod collections_abc;
 pub(crate) mod contextlib;
 pub(crate) mod contextvars;
 pub(crate) mod dataclasses;
@@ -91,6 +92,9 @@ pub(crate) enum StandardLib {
     /// The `types` module exposing the runtime type objects Monty can name
     /// exactly, `UnionType` and `GenericAlias` among them.
     Types,
+    /// The `collections.abc` module exposing the abstract classes
+    /// `isinstance` answers structurally.
+    CollectionsAbc,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -127,6 +131,7 @@ impl StandardLib {
             StaticStrings::Builtins => Some(Self::Builtins),
             StaticStrings::Functools => Some(Self::Functools),
             StaticStrings::TypesModule => Some(Self::Types),
+            StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -161,6 +166,7 @@ impl StandardLib {
             Self::Builtins => builtins::create_module(vm),
             Self::Functools => functools::create_module(vm),
             Self::Types => types_module::create_module(vm),
+            Self::CollectionsAbc => collections_abc::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }
@@ -181,6 +187,8 @@ pub(crate) enum ModuleFunctions {
     Itertools(itertools::ItertoolsFunctions),
     Dataclasses(dataclasses::DataclassesFunctions),
     Typing(typing::TypingFunctions),
+    CollectionsAbc(collections_abc::CollectionsAbcFunctions),
+    Contextlib(contextlib::ContextlibFunctions),
     /// `gc` module functions — only present under the `test-hooks` feature.
     /// See [`gc`] for why it is gated; as in [`StandardLib`], the gated block
     /// goes last and new variants are appended ahead of it.
@@ -208,6 +216,8 @@ impl fmt::Display for ModuleFunctions {
             Self::Itertools(func) => write!(f, "{func}"),
             Self::Dataclasses(func) => write!(f, "{func}"),
             Self::Typing(func) => write!(f, "{func}"),
+            Self::CollectionsAbc(func) => write!(f, "{func}"),
+            Self::Contextlib(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
             Self::Gc(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
@@ -217,6 +227,19 @@ impl fmt::Display for ModuleFunctions {
 }
 
 impl ModuleFunctions {
+    /// Whether this function binds its receiver when found through a class,
+    /// the way a plain Python function does.
+    ///
+    /// True only for the families that exist *as* class members — the default
+    /// methods a natively provided base contributes, which stand in for
+    /// functions CPython writes in Python. An ordinary module function stored
+    /// on a class (`f = math.sqrt`) must keep CPython's behaviour of not
+    /// binding, so nothing else may join this list.
+    #[must_use]
+    pub(crate) const fn binds_as_method(self) -> bool {
+        matches!(self, Self::CollectionsAbc(_) | Self::Contextlib(_))
+    }
+
     /// Calls the module function with the given arguments.
     ///
     /// Returns `CallResult` to support both immediate values and OS calls that
@@ -234,6 +257,8 @@ impl ModuleFunctions {
             Self::Itertools(functions) => itertools::call(vm, functions, args).map(CallResult::Value),
             Self::Dataclasses(functions) => dataclasses::call(vm, functions, args).map(CallResult::Value),
             Self::Typing(functions) => typing::call(vm, functions, args).map(CallResult::Value),
+            Self::CollectionsAbc(functions) => collections_abc::call(vm, functions, args).map(CallResult::Value),
+            Self::Contextlib(functions) => contextlib::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]
             Self::Gc(functions) => gc::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]

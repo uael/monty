@@ -22,7 +22,7 @@ use crate::{
     bytecode::VM,
     heap::{HeapData, HeapId},
     intern::StaticStrings,
-    types::{Module, Type, str::allocate_string},
+    types::{Module, NativeClass, Type, str::allocate_string},
     value::Value,
 };
 
@@ -46,6 +46,7 @@ const BUILTIN_TYPES: &[Type] = &[
     Type::Iterator,
     Type::Type,
     Type::Property,
+    Type::Native(NativeClass::Object),
 ];
 
 /// Creates the `builtins` module on the heap.

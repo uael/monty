@@ -750,7 +750,7 @@ impl MontyTypeExt for MontyType {
             // The runtime type forms have no host counterpart and degrade to
             // `type`, the family they belong to: a value of one of them crosses
             // as its `repr` (`list[int]`, `int | str`), like a class object.
-            Type::GenericAlias | Type::Union => Self::Type,
+            Type::GenericAlias | Type::Union | Type::Native(_) => Self::Type,
         }
     }
 

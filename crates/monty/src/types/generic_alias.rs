@@ -123,6 +123,27 @@ pub(crate) fn write_type_arg(
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => {
             Ok(f.write_str(&class_name(*id, vm.heap, vm.interns))?)
         }
+        // A list argument is itself a type expression, which is how
+        // `Callable[[int], str]` prints its parameter list.
+        Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::List(_)) => {
+            let items = match vm.heap.get(*id) {
+                HeapData::List(list) => list
+                    .as_slice()
+                    .iter()
+                    .map(|v| v.clone_with_heap(vm.heap))
+                    .collect::<Vec<_>>(),
+                _ => unreachable!("matched a list"),
+            };
+            defer_drop!(items, vm);
+            f.write_str("[")?;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                write_type_arg(item, f, vm, heap_ids)?;
+            }
+            Ok(f.write_str("]")?)
+        }
         other => other.py_repr_fmt(f, vm, heap_ids),
     }
 }

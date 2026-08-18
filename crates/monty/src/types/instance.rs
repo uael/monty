@@ -17,6 +17,7 @@ use crate::{
     types::{
         allocate_string,
         class::{MAX_MRO_DEPTH, class_base_id, class_exc_base},
+        native_class::native_default_member,
         property::MethodKind,
     },
     value::{EitherStr, Value},
@@ -871,7 +872,7 @@ pub(crate) fn instance_defines_iter(self_id: HeapId, vm: &VM<'_>) -> bool {
 /// `None` value opts the class out of the protocol wants
 /// [`class_defines_not_none`] instead.
 pub(crate) fn class_defines(class_id: HeapId, dunder: &str, vm: &VM<'_>) -> bool {
-    class_lookup(class_id, dunder, vm).is_some()
+    class_has_member(class_id, dunder, vm)
 }
 
 /// Whether `class_id` or one of its bases defines `dunder` as something other
@@ -883,7 +884,11 @@ pub(crate) fn class_defines(class_id: HeapId, dunder: &str, vm: &VM<'_>) -> bool
 /// general — `__next__ = None` keeps the class an iterator (see
 /// [`HeapRead::py_is_iterator`]), so use [`class_defines`] there.
 pub(crate) fn class_defines_not_none(class_id: HeapId, dunder: &str, vm: &VM<'_>) -> bool {
-    matches!(class_lookup(class_id, dunder, vm), Some(member) if !matches!(member, Value::None))
+    match class_lookup(class_id, dunder, vm) {
+        Some(member) => !matches!(member, Value::None),
+        // A natively provided base can only supply a real member, never `None`.
+        None => native_default_member(class_id, dunder, vm).is_some(),
+    }
 }
 
 /// Borrows `name` out of the first class in `class_id`'s base chain that binds
@@ -1022,7 +1027,20 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 /// Looks up a member in a class and its bases, cloning it out; `None` if no
 /// class in the chain binds `name`.
 pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
-    class_lookup(class_id, name, vm).map(|v| v.clone_with_heap(vm.heap))
+    match class_lookup(class_id, name, vm) {
+        Some(member) => Some(member.clone_with_heap(vm.heap)),
+        // Nothing in the chain binds it, so a natively provided base gets its
+        // turn: this is what makes `Iterator.__iter__` reach a subclass that
+        // only defined `__next__`.
+        None => native_default_member(class_id, name, vm),
+    }
+}
+
+/// Whether `class_id` or one of its bases binds `name`, without taking a
+/// reference to the value: the answer a structural check needs, and a clone
+/// taken to be thrown away would strand its refcount.
+pub(crate) fn class_has_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> bool {
+    class_lookup(class_id, name, vm).is_some() || native_default_member(class_id, name, vm).is_some()
 }
 
 /// The `staticmethod`/`classmethod` wrapper `member` is, with its wrapped
@@ -1212,6 +1230,9 @@ fn call_member_bound(
 fn is_method_value(value: &Value, vm: &VM<'_>) -> bool {
     match value {
         Value::DefFunction(_) => true,
+        // The default methods a natively provided base contributes stand in for
+        // functions CPython writes in Python, so they bind like one.
+        Value::ModuleFunction(func) => func.binds_as_method(),
         // A `partialmethod` binds `self` like a function does — that binding is
         // the whole of what makes it a method (see `types::partialmethod`).
         Value::Ref(id) => matches!(

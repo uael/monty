@@ -6,9 +6,9 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
-    heap::{DropWithContext, HeapData},
+    heap::{DropGuard, DropWithContext, HeapData},
     intern::StaticStrings,
-    types::{Class, Dict, PyTrait, Type},
+    types::{Class, Dict, PyTrait, Type, protocol::mark_protocol},
     value::Value,
 };
 
@@ -170,6 +170,9 @@ fn create_class(
     if source.get_by_str("__doc__", vm.heap, vm.interns).is_none() {
         pairs.push((Value::InternString(StaticStrings::DunderDoc.into()), Value::None));
     }
+    if source.get_by_str("_is_protocol", vm.heap, vm.interns).is_none() {
+        mark_protocol(&mut pairs, &base_values, vm);
+    }
     let namespace_dict = Dict::from_pairs(pairs, vm)?;
 
     let class_id = vm.heap.allocate(HeapData::Class(Box::new(Class::new(
@@ -184,34 +187,70 @@ fn create_class(
 /// Validates a `bases` tuple and takes an owned reference to each entry,
 /// returning them alongside the nearest builtin exception ancestor.
 ///
-/// Monty implements single inheritance, so more than one base is rejected
-/// rather than linearized: there is no MRO algorithm behind this, only a chain
-/// walk (see `limitations/classes.md`). A base must be a class defined in the
-/// sandbox or a builtin exception type; `object` and every other builtin type
-/// are rejected, since their instances have no `__dict__` to inherit into.
+/// Each base is first put through the `__mro_entries__` protocol, which means
+/// a subscripted class (`Spawned[T]`) stands for the class it subscripted.
+///
+/// What survives is of two kinds. A **concrete** base — a sandbox class or a
+/// builtin exception type — joins the inheritance chain, and Monty implements
+/// single inheritance, so a second one is rejected rather than linearized:
+/// there is no MRO algorithm behind this, only a chain walk (see
+/// `limitations/classes.md`). A **natively provided** base
+/// ([`Type::Native`]: `typing.Protocol`, the `collections.abc` classes) adds
+/// no link to that chain but is kept in `bases`, which is what later makes
+/// `isinstance(Foo(), Iterator)` true and lets the base contribute default
+/// members. Every other base — `object` and the remaining builtin types — is
+/// rejected, since their instances have no `__dict__` to inherit into.
 fn resolve_bases(bases: &[Value], vm: &mut VM<'_>) -> RunResult<(Vec<Value>, Option<ExcType>)> {
-    let [base] = bases else {
-        return if bases.is_empty() {
-            Ok((Vec::new(), None))
-        } else {
-            Err(ExcType::not_implemented("multiple inheritance is not supported").into())
-        };
-    };
-    let exc_base = match base {
-        Value::Builtin(Builtins::ExcType(exc_type)) => Some(*exc_type),
-        Value::Ref(id) if let HeapData::Class(class) = vm.heap.get(*id) => class.exc_base(),
-        other => {
-            // A builtin type names itself (`int`), not its own type (`type`),
-            // which is what the reader wrote in the base list.
-            let got = match other {
-                Value::Builtin(Builtins::Type(t)) => t.name(vm.heap, vm.interns),
-                _ => other.py_type(vm).cpython_arg_name(vm.heap, vm.interns),
-            };
-            return Err(ExcType::not_implemented(format!(
-                "inheriting from '{got}' is not supported; a base must be a class defined in the sandbox or a builtin exception"
-            ))
-            .into());
+    let mut guard = DropGuard::new(Vec::<Value>::with_capacity(bases.len()), vm);
+    let mut exc_base = None;
+    let mut concrete = 0usize;
+    for declared in bases {
+        let base = mro_entry(declared, guard.ctx());
+        let (kept, vm) = guard.as_parts_mut();
+        match &base {
+            Value::Builtin(Builtins::Type(Type::Native(_))) => {}
+            Value::Builtin(Builtins::ExcType(exc_type)) => {
+                concrete += 1;
+                exc_base = Some(*exc_type);
+            }
+            Value::Ref(id) if let HeapData::Class(class) = vm.heap.get(*id) => {
+                concrete += 1;
+                exc_base = class.exc_base();
+            }
+            other => {
+                // A builtin type names itself (`int`), not its own type (`type`),
+                // which is what the reader wrote in the base list.
+                let got = match other {
+                    Value::Builtin(Builtins::Type(t)) => t.name(vm.heap, vm.interns).into_owned(),
+                    _ => other.py_type(vm).cpython_arg_name(vm.heap, vm.interns).into_owned(),
+                };
+                base.drop_with(vm);
+                return Err(ExcType::not_implemented(format!(
+                    "inheriting from '{got}' is not supported; a base must be a class defined in the sandbox or a builtin exception"
+                ))
+                .into());
+            }
         }
-    };
-    Ok((vec![base.clone_with_heap(vm.heap)], exc_base))
+        kept.push(base);
+    }
+    let (kept, vm) = guard.into_parts();
+    if concrete > 1 {
+        kept.drop_with(vm);
+        return Err(ExcType::not_implemented("multiple inheritance is not supported").into());
+    }
+    Ok((kept, exc_base))
+}
+
+/// The `__mro_entries__` of one base, as an owned reference.
+///
+/// Only `types.GenericAlias` defines the protocol here, and it resolves to its
+/// origin — so `class Held(Spawned[T])` inherits from `Spawned`. Every other
+/// base stands for itself.
+fn mro_entry(base: &Value, vm: &mut VM<'_>) -> Value {
+    match base {
+        Value::Ref(id) if let HeapData::GenericAlias(alias) = vm.heap.get(*id) => {
+            alias.origin().clone_with_heap(vm.heap)
+        }
+        other => other.clone_with_heap(vm.heap),
+    }
 }

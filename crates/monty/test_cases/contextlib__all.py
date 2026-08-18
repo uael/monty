@@ -152,6 +152,47 @@ except Halt as e:
 
 
 # === AbstractContextManager ===
-# Subscripting yields the base itself rather than a distinct alias object, so
-# only the class is asserted here (see limitations/contextlib.md).
+# A class the interpreter provides: nameable as a base, subscriptable, and
+# answering `isinstance` structurally.
 assert AbstractContextManager['X'] is not None
+
+
+class Session(AbstractContextManager['Session']):
+    def __init__(self):
+        self.closed = False
+
+    # CPython marks `__exit__` abstract, so a subclass must define it; the
+    # inherited `__enter__` returning the receiver is what both share.
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+
+session = Session()
+with session as entered:
+    assert entered is session
+assert session.closed
+
+# `__exit__` returning a false value lets the exception through.
+try:
+    with Session():
+        raise ValueError('propagates')
+    raise AssertionError('the ValueError should have propagated')
+except ValueError as e:
+    assert str(e) == 'propagates'
+
+assert isinstance(session, AbstractContextManager)
+# Structural, so a class that never names the base still counts.
+
+
+class Standalone:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+assert isinstance(Standalone(), AbstractContextManager)
+assert isinstance(suppress(ValueError), AbstractContextManager)
+assert not isinstance(42, AbstractContextManager)

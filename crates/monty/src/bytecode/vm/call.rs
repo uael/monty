@@ -29,6 +29,7 @@ use crate::{
         construct_namedtuple,
         instance::{class_member, class_name},
         instance_call, partialmethod,
+        protocol::is_protocol_class,
         str::call_str_method,
         super_object::set_exception_args,
     },
@@ -970,6 +971,12 @@ impl VM<'_> {
     /// on external/OS calls; the `is_initializer` flag is threaded through frame
     /// serialization so a suspended initializer resumes correctly.
     fn instantiate_class(&mut self, class_id: HeapId, args: ArgValues) -> Result<CallResult, RunError> {
+        // A protocol describes an interface and has no instances of its own; a
+        // concrete subclass carries `_is_protocol = False` and passes here.
+        if is_protocol_class(class_id, self) {
+            args.drop_with(self);
+            return Err(ExcType::type_error("Protocols cannot be instantiated"));
+        }
         let instance_id = self
             .heap
             .allocate(HeapData::Instance(Box::new(Instance::new(class_id, Dict::new()))));

@@ -67,6 +67,18 @@ assert not isinstance(err, ValueError)
 assert issubclass(Halt, Fault)
 assert issubclass(Halt, Exception)
 
+# A builtin exception class is a class too, so it can be asked about directly.
+assert issubclass(ValueError, Exception)
+assert issubclass(ValueError, BaseException)
+assert issubclass(KeyError, LookupError)
+assert issubclass(ValueError, ValueError)
+assert not issubclass(Exception, ValueError)
+assert issubclass(ValueError, (TypeError, Exception))
+# The two hierarchies never cross: a sandbox class is not a builtin's subclass,
+# and no builtin descends from one.
+assert not issubclass(ValueError, Halt)
+assert not issubclass(Halt, ValueError)
+
 # === Raising a bare class instantiates it ===
 try:
     raise Halt

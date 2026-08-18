@@ -45,8 +45,8 @@ plain Python class rather than a validating constructor:
 
 ## `AbstractContextManager`
 
-Present as a name to annotate with and to subscript, with no behaviour of its
-own.
+A class the interpreter provides (see ./typing.md for that family), so it can
+be named as a base, subscripted, and asked about:
 
 - **It cannot be used as a base class.** A base must be a class defined in the
   sandbox or a builtin exception (see ./classes.md), and this is neither: it is

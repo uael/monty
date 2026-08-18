@@ -22,12 +22,10 @@ const BUILTINS_STUB: &str = include_str!("../../monty-typeshed/vendor/typeshed/s
 
 /// Names the stub binds that the interpreter deliberately does not.
 ///
-/// `object` is the root every other stub class inherits from and
-/// `UnicodeError` is the declared base of the two codec errors, so filtering
-/// either away would leave the classes that name it describing nothing. Both
-/// are recorded in `limitations/builtins.md` as names only the type checker
-/// resolves.
-const STUB_ONLY: [&str; 2] = ["object", "UnicodeError"];
+/// `UnicodeError` is the declared base of the two codec errors, so filtering it
+/// away would leave the classes that name it describing nothing. It is recorded
+/// in `limitations/builtins.md` as a name only the type checker resolves.
+const STUB_ONLY: [&str; 1] = ["UnicodeError"];
 
 /// Every name the builtin namespace binds, straight from the interpreter:
 /// `vars(builtins)` is assembled from the same three sources a bare name

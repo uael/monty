@@ -343,3 +343,27 @@ fn output_deque_mutated_by_nested_repr() {
         ])
     );
 }
+
+/// A subclass of `AbstractContextManager` that defines neither method still
+/// works as a context manager: it inherits an `__enter__` returning the
+/// receiver and an `__exit__` that swallows nothing. CPython refuses to
+/// instantiate it instead, `__exit__` being abstract there and Monty having no
+/// abc machinery, so this cannot be a comparative test case.
+#[test]
+fn abstract_context_manager_contributes_both_methods() {
+    let code = "from contextlib import AbstractContextManager\n\
+                class Session(AbstractContextManager['Session']):\n    pass\n\
+                s = Session()\n\
+                with s as entered:\n    same = entered is s\n\
+                same";
+    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    assert_eq!(ex.run_no_limits(vec![]).unwrap(), MontyObject::Bool(true));
+
+    // The inherited `__exit__` returns `None`, so an exception keeps going.
+    let raising = "from contextlib import AbstractContextManager\n\
+                   class Session(AbstractContextManager):\n    pass\n\
+                   with Session():\n    raise ValueError('propagates')";
+    let ex = MontyRun::new(raising.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let err = ex.run_no_limits(vec![]).unwrap_err();
+    assert_eq!(err.message(), Some("propagates"));
+}

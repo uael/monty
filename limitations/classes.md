@@ -34,10 +34,10 @@ shapes), instance and class attribute get/set (including `setattr(Foo, ...)`
 and function-attributes-become-methods), bound methods, class variables
 (arbitrary expressions, evaluated in a real suspendable class-body scope),
 **class decorators** (`@deco class Foo`), **method decorators** taking any
-callable in scope,
-`__repr__`/`__str__`/`__enter__`/`__exit__`/`__eq__`/`__hash__` dispatch,
-**class decorators** (`@deco class Foo`), **single inheritance** (`class B(A)`,
-inherited methods/class variables/`__init__`, `super()`),
+callable in scope, **single inheritance** (`class B(A)`, inherited
+methods/class variables/`__init__`, `super()`), **abstract bases**
+(`typing.Protocol` and the `collections.abc` classes, which add no link to the
+inheritance chain — see ./typing.md),
 **descriptors** (`property`, `staticmethod`, `classmethod`),
 `__repr__`/`__str__`/`__enter__`/`__exit__`/`__eq__`/`__hash__`/`__call__`/
 `__getitem__`/`__setitem__`/`__len__`/`__bool__` dispatch,
@@ -77,12 +77,12 @@ walk it too. Divergences:
   derived of them.
 - **`super()` outside a method** raises `RuntimeError: super(): no arguments`,
   matching CPython's wording for a missing `__class__` cell.
-- **A generic base is not supported.** `class Held[T](Spawned[T])` parses (PEP
-  695 type parameters are accepted and ignored, see ./typing.md) but fails at
-  runtime with `TypeError: 'type' object is not subscriptable`: subscripting a
-  class dispatches neither `__class_getitem__` nor `__mro_entries__`, and a
-  PEP 695 generic class gets no implicit `Generic` base to supply them. A
-  non-subscripted base of the same class works.
+- **A generic base resolves to the class it subscripts.** A base that is a
+  `types.GenericAlias` goes through `__mro_entries__` and stands for its
+  `__origin__`, so `class Sub(Base[int])` inherits from `Base`. Subscripting
+  the base needs a `__class_getitem__` on it (see ./typing.md); `class
+  Held[T](Spawned[T])` additionally needs `T` to be bound, which PEP 695 type
+  parameters still are not.
 - **The implicit root class is minimal.** `super().__init__()` falls back to
   `object.__init__` (zero arguments) or, in an exception class,
   `BaseException.__init__` (which stores `args`). No other `object` method
@@ -92,19 +92,20 @@ walk it too. Divergences:
 ## Descriptors
 
 `property`, `staticmethod` and `classmethod` are real objects, and class
-attribute lookup invokes them. Because decorators on a `def` inside a class
-body are still rejected at parse time, they are written in the assignment
-form:
+attribute lookup invokes them. Both the decorator and the assignment form
+work:
 
 ```python
 class C:
-    def _get(self):
+    @property
+    def x(self):
         return self._v
 
     def _set(self, value):
         self._v = value
 
-    x = property(_get, _set)
+    # `@x.setter` does not work; see below
+    x = x.setter(_set)
 ```
 
 Divergences:
@@ -112,16 +113,16 @@ Divergences:
 - **`property()` takes positional arguments only.** `property(fget=f)` raises
   a `TypeError`; CPython accepts all four as keywords. The fourth argument
   (`doc`) is accepted and discarded, since there is no `property.__doc__`.
-- **A property's deleter never fires.** `del obj.x` is rejected at parse time
-  (the `del` statement is unsupported generally), so `fdel` is stored but
-  unreachable.
+- **A property's accessors are reachable only as calls**, so `@x.setter` (and
+  `@x.getter` / `@x.deleter`) raises `AttributeError: 'property' object has no
+  attribute 'setter'`: reading a method off a property to hand to the decorator
+  is what fails, while `x = x.setter(f)` in the class body returns the new
+  property CPython's decorator form would have bound.
 - **`repr(property_object)` is `<property object>`**, without CPython's
   `at 0x..` address.
 - **A general user-defined descriptor protocol is not implemented.** Only
   these three built-in descriptors are invoked; a class defining `__get__` /
   `__set__` / `__delete__` and used as a class attribute is returned as-is.
-- `p.getter(f)` / `p.setter(f)` / `p.deleter(f)` work and return a new
-  property, so the `@x.setter` form will work once method decorators land.
 
 ## Dynamic class creation — `type(name, bases, dict)`
 
@@ -274,19 +275,13 @@ host that wants to construct instances asks the sandbox to.
   `__delete__` on a user class); see "Descriptors" for the three built-in
   ones that do work.
 - Abstract base classes (`abc.ABC`, `@abstractmethod`).
-- `@classmethod`, `@staticmethod` and `@property` — the *decorator syntax* on a
-  method works and applies any callable in scope, but these three builtin
-  descriptors do not exist, so the names raise `NameError`. A method decorator
-  is otherwise an ordinary call: the member is bound to whatever it returns,
-  and the wrapper receives `self` as its first argument like any other function.
-  Because a function exposes no attributes (see ./language.md),
-  `functools.wraps`-style metadata copying has no equivalent here either.
+- `functools.wraps`-style metadata copying, for a method decorator or any
+  other: a function exposes no attributes to copy (see ./language.md). The
+  decorator itself is an ordinary call, so the member is bound to whatever it
+  returns, and a plain wrapper receives `self` as its first argument like any
+  other function.
 - **Tracebacks from a method decorator that raises** point at the whole `class`
   statement, like class decorators below, rather than at the decorator line.
-- Decorators on a `def` inside a class body (rejected at parse time), so
-  `@classmethod`/`@staticmethod`/`@property` must be written in the assignment
-  form; see "Descriptors". Decorators on classes and on non-method functions
-  are supported.
 - **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
   are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
   latter with stringized values, see ./typing.md). A class decorator
@@ -298,13 +293,10 @@ host that wants to construct instances asks the sandbox to.
   identifies which one raised.
 - Dunder protocols other than `__init__`, `__repr__`, `__str__`,
   `__enter__`, `__exit__`, `__iter__`, `__next__`, `__contains__`, `__eq__`,
-  `__hash__`, `__call__`, `__getitem__`, `__setitem__`, `__len__` and
-  `__bool__`: `__new__`, `__add__`, `__ne__`, `__lt__`, `__getattr__`, etc. are
-  not dispatched for user-defined instances. `__ne__` is always the negation of
+  `__hash__`, `__call__`, `__getitem__`, `__setitem__`, `__delitem__`,
+  `__len__` and `__bool__`: `__new__`, `__add__`, `__ne__`, `__lt__`,
+  `__getattr__`, etc. are not dispatched for user-defined instances. `__ne__` is always the negation of
   `__eq__`, as CPython derives it by default, so a custom `__ne__` is ignored.
-- `__delitem__` is **defined but unreachable**: `del obj[k]` is rejected at
-  parse time (the `del` statement is unsupported generally), so a class
-  defining it never has it called.
 - `__iter__` / `__next__` / `__contains__` **are** dispatched, but like
   `__repr__`/`__str__` they run synchronously, so one that calls an external or
   OS function cannot suspend and raises `NotImplementedError`. Two related
@@ -352,7 +344,9 @@ host that wants to construct instances asks the sandbox to.
   the walrus never binds; CPython raises `SyntaxError`. This follows from
   annotations never being evaluated, so it would change if they ever are (see
   ./typing.md).
-- `del obj.attr` (the `del` statement is unsupported generally).
+- `del Foo.attr` on a class object, which raises `AttributeError: 'type' object
+  has no attribute '<name>' and no __dict__ for setting new attributes`.
+  `del obj.attr` on an instance works; see ./language.md.
 
 ## `FrozenInstanceError`
 

@@ -1335,11 +1335,6 @@ impl<'h> PyTrait<'h> for Value {
                 let byte = get_byte_at_index(bytes, index).ok_or_else(ExcType::bytes_index_error)?;
                 Ok(Self::Int(i64::from(byte)))
             }
-            // `AbstractContextManager[T]` is a generic alias in CPython, which
-            // exists to be named as a base class. Monty has no alias object, so
-            // the subscript yields the base itself — the parameter is dropped
-            // rather than recorded (see `limitations/contextlib.md`).
-            Self::Marker(marker) if marker.0 == StaticStrings::AbstractContextManager => Ok(Self::Marker(*marker)),
             // `typing.Optional[X]` is the spelled-out `X | None`.
             Self::Marker(Marker(StaticStrings::Optional)) => {
                 union_from_members(vec![key.clone_with_heap(vm.heap), Self::None], vm)

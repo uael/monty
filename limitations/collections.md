@@ -10,12 +10,13 @@ the type objects themselves (like `deque`), so `type(d) is defaultdict` and
 
 ## Not implemented
 
-`OrderedDict`, `ChainMap`, `UserDict`, `UserList`, `UserString`, and the
-`collections.abc` submodule. Importing one raises `ImportError: cannot import
-name 'OrderedDict' from 'collections' (unknown location)` (or `AttributeError`
-as an attribute); `import collections.abc` raises `ModuleNotFoundError`. The
-narrowed typeshed stub makes `from collections import OrderedDict` a type error
-too, rather than something that type-checks and then fails at runtime.
+`OrderedDict`, `ChainMap`, `UserDict`, `UserList`, and `UserString`. Importing
+one raises `ImportError: cannot import name 'OrderedDict' from 'collections'
+(unknown location)` (or `AttributeError` as an attribute). The narrowed typeshed
+stub makes `from collections import OrderedDict` a type error too, rather than
+something that type-checks and then fails at runtime.
+
+The `collections.abc` submodule **is** implemented; see ./typing.md.
 
 ## `deque`
 

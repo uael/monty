@@ -19,7 +19,7 @@ use crate::{
     heap::{DropWithContext, HeapData, HeapId},
     intern::StaticStrings,
     modules::ModuleFunctions,
-    types::{Module, Type, allocate_tuple, generic_alias::origin_and_args},
+    types::{Module, NativeClass, Type, allocate_tuple, generic_alias::origin_and_args, protocol::runtime_checkable},
     value::{Marker, Value},
 };
 
@@ -40,6 +40,8 @@ pub(crate) enum TypingFunctions {
     /// The decorator `dataclass_transform` returns: it hands back whatever it
     /// is applied to, the whole point being that only a type checker reads it.
     Identity,
+    /// `typing.runtime_checkable(cls)`.
+    RuntimeCheckable,
 }
 
 impl fmt::Display for TypingFunctions {
@@ -51,6 +53,7 @@ impl fmt::Display for TypingFunctions {
             Self::OverloadDummy => "_overload_dummy",
             Self::DataclassTransform => "dataclass_transform",
             Self::Identity => "decorator",
+            Self::RuntimeCheckable => "runtime_checkable",
         })
     }
 }
@@ -73,12 +76,15 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         module.set_attr(*name, Value::ModuleFunction(ModuleFunctions::Typing(*func)), vm);
     }
     // `Union` is a real type object, not a marker: it is what `type(int | str)`
-    // reports and what `types.UnionType` names.
-    module.set_attr(
-        StaticStrings::UnionType,
-        Value::Builtin(Builtins::Type(Type::Union)),
-        vm,
-    );
+    // reports and what `types.UnionType` names. `Protocol` and `Generic` are
+    // real classes too, so a class statement can name one as a base.
+    for (name, ty) in [
+        (StaticStrings::UnionType, Type::Union),
+        (StaticStrings::Protocol, Type::Native(NativeClass::Protocol)),
+        (StaticStrings::Generic, Type::Native(NativeClass::Generic)),
+    ] {
+        module.set_attr(name, Value::Builtin(Builtins::Type(ty)), vm);
+    }
 
     vm.heap.allocate(HeapData::Module(Box::new(module)))
 }
@@ -106,8 +112,6 @@ const MARKER_ATTRS: &[StaticStrings] = &[
     StaticStrings::FinalType,
     StaticStrings::Literal,
     StaticStrings::TypeVar,
-    StaticStrings::Generic,
-    StaticStrings::Protocol,
     StaticStrings::Annotated,
     StaticStrings::SelfType,
     StaticStrings::Never,
@@ -120,6 +124,7 @@ const FUNCTION_ATTRS: &[(StaticStrings, TypingFunctions)] = &[
     (StaticStrings::GetArgs, TypingFunctions::GetArgs),
     (StaticStrings::Overload, TypingFunctions::Overload),
     (StaticStrings::DataclassTransform, TypingFunctions::DataclassTransform),
+    (StaticStrings::RuntimeCheckable, TypingFunctions::RuntimeCheckable),
 ];
 
 /// Dispatches a `typing` module function call.
@@ -171,5 +176,9 @@ pub(super) fn call(vm: &mut VM<'_>, func: TypingFunctions, args: ArgValues) -> R
             )))
         }
         TypingFunctions::Identity => args.get_one_arg("decorator", vm.heap),
+        TypingFunctions::RuntimeCheckable => {
+            let cls = args.get_one_arg("runtime_checkable", vm.heap)?;
+            runtime_checkable(cls, vm)
+        }
     }
 }
