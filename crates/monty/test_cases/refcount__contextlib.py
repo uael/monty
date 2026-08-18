@@ -15,7 +15,7 @@ gone = None
 # A manager inside a cycle: the list holds the only reference to a suppress
 # that holds the list back, so only tracing through it can collect either.
 cyclic = []
-cyclic.append(suppress(cyclic))  # pyright: ignore[reportArgumentType]
+cyclic.append(suppress(cyclic))
 
 # Entering and leaving must not leak: the normal exit, the suppressing exit,
 # and the propagating exit are three separate paths out of __exit__.
@@ -35,7 +35,7 @@ except ValueError:
 
 # The __exit__ error path: a non-class argument raises out of __exit__ while an
 # exception is already propagating, the narrowest exit from the method.
-bad = suppress(1)  # pyright: ignore[reportArgumentType]
+bad = suppress(1)
 try:
     with bad:
         raise ValueError('x')

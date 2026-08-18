@@ -81,11 +81,11 @@ assert s.__exit__(None, None, None) is None
 # === arguments are validated on exit, not on construction ===
 # CPython's suppress stores its arguments untouched and only calls issubclass
 # when an exception reaches __exit__, so a bad argument is inert until then.
-with suppress(1):  # pyright: ignore[reportArgumentType]
+with suppress(1):
     pass
 
 try:
-    with suppress(1):  # pyright: ignore[reportArgumentType]
+    with suppress(1):
         raise ValueError('x')
     raise AssertionError('expected TypeError')
 except TypeError as e:
@@ -93,12 +93,12 @@ except TypeError as e:
 
 # issubclass stops at the first match, so a bad argument *after* a matching one
 # is never reached and never raises.
-with suppress(ValueError, 1):  # pyright: ignore[reportArgumentType]
+with suppress(ValueError, 1):
     raise ValueError('x')
 
 # Before one, it is reached first.
 try:
-    with suppress(1, ValueError):  # pyright: ignore[reportArgumentType]
+    with suppress(1, ValueError):
         raise ValueError('x')
     raise AssertionError('expected TypeError')
 except TypeError as e:

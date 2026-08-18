@@ -51,39 +51,39 @@ assert repr(attrgetter('b.c')) == "operator.attrgetter('b.c')"
 
 # === construction errors ===
 try:
-    attrgetter()  # pyright: ignore[reportCallIssue]
+    attrgetter()
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'attrgetter expected 1 argument, got 0'
 
 try:
-    attrgetter(1)  # pyright: ignore[reportArgumentType]
+    attrgetter(1)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'attribute name must be a string'
 
 # A non-string anywhere in the list is rejected, not just the first.
 try:
-    attrgetter('x', 1)  # pyright: ignore[reportArgumentType]
+    attrgetter('x', 1)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'attribute name must be a string'
 
 try:
-    attrgetter(x=1)  # pyright: ignore[reportCallIssue]
+    attrgetter(x=1)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'attrgetter() takes no keyword arguments'
 
 # === call errors ===
 try:
-    get_x()  # pyright: ignore[reportCallIssue]
+    get_x()
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'attrgetter expected 1 argument, got 0'
 
 try:
-    get_x(obj, obj)  # pyright: ignore[reportCallIssue]
+    get_x(obj, obj)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'attrgetter expected 1 argument, got 2'

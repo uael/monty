@@ -58,7 +58,7 @@ for bad in [1, 'x', [1], (1,), {1: 2}, None, 1.5]:
         assert str(e) == 'vars() argument must have __dict__ attribute'
 
 try:
-    vars(math, math)  # pyright: ignore[reportCallIssue]
+    vars(math, math)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'vars expected at most 1 argument, got 2'

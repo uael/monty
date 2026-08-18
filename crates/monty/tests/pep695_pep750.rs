@@ -215,16 +215,17 @@ fn debug_interpolation_keeps_its_spacing() {
 // Importing the module
 // ---------------------------------------------------------------------------
 
-/// Monty interns a dotted module path as one name and has no package objects,
-/// so the plain `import a.b` form would bind a name no expression can spell.
-/// CPython binds `string` and reaches the submodule through it.
+/// The plain `import a.b` form binds the package `a`, as CPython does, so it
+/// needs `a` to be a module Monty implements. `os.path` qualifies; `string`
+/// does not, leaving `string.templatelib` reachable only by the two forms that
+/// name the submodule directly.
 #[test]
 fn dotted_import_without_alias_is_rejected() {
     assert_raises(
         "import string.templatelib",
         ExcType::NotImplementedError,
-        "importing a submodule without an alias; use `import string.templatelib as <name>` \
-         or `from string.templatelib import <name>`",
+        "importing a submodule of `string`, which is not itself implemented; use \
+         `import string.templatelib as <name>` or `from string.templatelib import <name>`",
     );
 }
 

@@ -687,26 +687,26 @@ assert list(itertools.islice(itertools.accumulate(itertools.repeat(2)), 4)) == [
 
 # === accumulate errors ===
 try:
-    itertools.accumulate()  # pyright: ignore[reportCallIssue]
+    itertools.accumulate()
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == "accumulate() missing required argument 'iterable' (pos 1)"
 
 try:
-    itertools.accumulate([1], _mul, 2)  # pyright: ignore[reportCallIssue]
+    itertools.accumulate([1], _mul, 2)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'accumulate() takes at most 2 positional arguments (3 given)'
 
 # The iterable is resolved eagerly, so a non-iterable raises at construction.
 try:
-    itertools.accumulate(1)  # pyright: ignore[reportArgumentType]
+    itertools.accumulate(1)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == "'int' object is not iterable"
 
 # A non-callable `func` raises only when a second item needs folding.
-lazy_bad_func = itertools.accumulate([1, 2], 1)  # pyright: ignore[reportArgumentType]
+lazy_bad_func = itertools.accumulate([1, 2], 1)
 assert next(lazy_bad_func) == 1
 try:
     next(lazy_bad_func)

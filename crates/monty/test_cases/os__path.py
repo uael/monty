@@ -56,25 +56,25 @@ if sys.platform != 'win32':
     # CPython 3.14 resolves normpath to posix._path_normpath, whose errors name
     # that C function rather than `normpath`.
     try:
-        normpath(1)  # pyright: ignore[reportArgumentType]
+        normpath(1)
         raise AssertionError('expected TypeError')
     except TypeError as e:
         assert str(e) == '_path_normpath: path should be string, bytes or os.PathLike, not int'
 
     try:
-        normpath(None)  # pyright: ignore[reportArgumentType]
+        normpath(None)
         raise AssertionError('expected TypeError')
     except TypeError as e:
         assert str(e) == '_path_normpath: path should be string, bytes or os.PathLike, not NoneType'
 
     try:
-        normpath()  # pyright: ignore[reportCallIssue]
+        normpath()
         raise AssertionError('expected TypeError')
     except TypeError as e:
         assert str(e) == "_path_normpath() missing required argument 'path' (pos 1)"
 
     try:
-        normpath('a', 'b')  # pyright: ignore[reportCallIssue]
+        normpath('a', 'b')
         raise AssertionError('expected TypeError')
     except TypeError as e:
         assert str(e) == '_path_normpath() takes at most 1 argument (2 given)'

@@ -61,7 +61,7 @@ assert keyed.keywords == {'k': 2}
 
 # === construction errors ===
 try:
-    partialmethod()  # pyright: ignore[reportCallIssue]
+    partialmethod()
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == "_partial_new() missing 1 required positional argument: 'func'"
@@ -81,7 +81,7 @@ except TypeError as e:
 
 # === errors from the wrapped function surface unchanged ===
 try:
-    obj.abort(1, 2)  # pyright: ignore[reportCallIssue]
+    obj.abort(1, 2)
     raise AssertionError('expected TypeError')
 except TypeError:
     pass

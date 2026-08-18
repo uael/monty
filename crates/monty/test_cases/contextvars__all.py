@@ -72,7 +72,7 @@ assert w.get() == 7
 
 # === reset type check ===
 try:
-    a.reset(5)  # pyright: ignore[reportArgumentType]
+    a.reset(5)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'expected an instance of Token, got 5'
@@ -85,33 +85,33 @@ assert holder.get() is box
 
 # === construction errors ===
 try:
-    ContextVar(1)  # pyright: ignore[reportArgumentType]
+    ContextVar(1)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'context variable name must be a str'
 
 try:
-    ContextVar('a', bogus=1)  # pyright: ignore[reportCallIssue]
+    ContextVar('a', bogus=1)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == "ContextVar() got an unexpected keyword argument 'bogus'"
 
 # The ceiling counts the keyword-only `default` as well as the positional name.
 try:
-    ContextVar('a', default=1, x=2)  # pyright: ignore[reportCallIssue]
+    ContextVar('a', default=1, x=2)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'ContextVar() takes at most 2 arguments (3 given)'
 
 # === method arity ===
 try:
-    v.get(1, 2)  # pyright: ignore[reportCallIssue]
+    v.get(1, 2)
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'get expected at most 1 argument, got 2'
 
 try:
-    v.set()  # pyright: ignore[reportCallIssue]
+    v.set()
     raise AssertionError('expected TypeError')
 except TypeError as e:
     assert str(e) == 'ContextVar.set() takes exactly one argument (0 given)'
