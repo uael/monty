@@ -123,7 +123,7 @@ def mapping(x):
 
 
 assert mapping({'a': 1, 'b': 2}) == 'a1 b2'
-assert mapping({'a': 9, 'c': 3, 'd': 4}) == 'a9 rest [\'c\', \'d\']'
+assert mapping({'a': 9, 'c': 3, 'd': 4}) == "a9 rest ['c', 'd']"
 assert mapping({'z': 1}) == 'any mapping'
 assert mapping([]) == 'other'
 # A mapping pattern ignores the keys it does not name
@@ -379,7 +379,7 @@ try:
             pass
     assert False, 'expected a duplicated sub-pattern to be refused'
 except TypeError as exc:
-    assert str(exc) == 'OneArg() got multiple sub-patterns for attribute \'x\''
+    assert str(exc) == "OneArg() got multiple sub-patterns for attribute 'x'"
 
 not_a_class = 5
 try:

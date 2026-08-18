@@ -53,7 +53,10 @@ extend-exclude = [
 "crates/monty/test_cases/tstring__all.py" = "py314"
 # PEP 695 `type X = ...` and type parameter lists.
 "crates/monty/test_cases/typealias__pep695.py" = "py312"
+"crates/monty/test_cases/typing__generic_class.py" = "py312"
 "crates/monty/test_cases/typing__runtime_types.py" = "py312"
+# PEP 634 `match` statements.
+"crates/monty/test_cases/match__patterns.py" = "py310"
 
 [tool.uv]
 # this is a monorepo without a root package
@@ -220,6 +223,16 @@ reportOptionalMemberAccess = false
 # under test is the `TypeAliasType` object and its lazily evaluated
 # `__value__`, not whether the right-hand side is a well-formed type.
 reportInvalidTypeForm = false
+# the runtime-generics tests subscript classes a checker says are not generic
+# (`str[int]`, `list[int, str]`), which is the runtime error they assert on
+reportInvalidTypeArguments = false
+# ...and name a generic class bare in a base list or an `isinstance`, where
+# what is under test is the runtime object rather than its parameters
+reportMissingTypeArgument = false
+# a `match` without a wildcard case is the point of the fall-through tests
+reportMatchNotExhaustive = false
+# instantiating a Protocol is the `TypeError` the protocol tests assert on
+reportAbstractUsage = false
 # a decorator defined *inside* a class body takes the decorated function, not
 # `self`, which the method-decorator tests exercise, and the descriptor tests
 # also write `staticmethod`/`classmethod` in the assignment form
