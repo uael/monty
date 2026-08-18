@@ -15,7 +15,10 @@ use crate::{
     bytecode::VM,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{HeapData, HeapId},
-    modules::{ModuleFunctions, collections_abc::CollectionsAbcFunctions},
+    modules::{
+        ModuleFunctions, collections_abc::CollectionsAbcFunctions, contextlib::ContextlibFunctions,
+        typing::TypingFunctions,
+    },
     types::{
         PyTrait, Type,
         class::{MAX_MRO_DEPTH, class_base_id},
@@ -197,6 +200,20 @@ impl NativeClass {
             (Self::Iterator, "__iter__") => Some(Value::ModuleFunction(ModuleFunctions::CollectionsAbc(
                 CollectionsAbcFunctions::IteratorIter,
             ))),
+            // What makes a PEP 695 generic class subscriptable: the compiler
+            // gives one an implicit `Generic` base, exactly as CPython does.
+            (Self::Generic | Self::Protocol, "__class_getitem__") => Some(Value::ModuleFunction(
+                ModuleFunctions::Typing(TypingFunctions::ClassGetitem),
+            )),
+            // CPython's `AbstractContextManager` defines exactly these two: an
+            // `__enter__` returning `self` and an `__exit__` returning `None`,
+            // which is what makes naming it as a base worth anything.
+            (Self::AbstractContextManager, "__enter__") => Some(Value::ModuleFunction(ModuleFunctions::Contextlib(
+                ContextlibFunctions::ContextManagerEnter,
+            ))),
+            (Self::AbstractContextManager, "__exit__") => Some(Value::ModuleFunction(ModuleFunctions::Contextlib(
+                ContextlibFunctions::ContextManagerExit,
+            ))),
             _ => None,
         }
     }
@@ -264,6 +281,7 @@ impl NativeClass {
             Self::ItemsView => &[Type::DictItems],
             Self::ValuesView => &[Type::DictValues],
             Self::Awaitable | Self::Coroutine => &[Type::Coroutine],
+            Self::AbstractContextManager => &[Type::Suppress],
             Self::Callable => CALLABLE,
             // Monty has no generator, async iterator or buffer object, so
             // nothing builtin can match; a sandbox class still can, through the
@@ -279,9 +297,6 @@ impl NativeClass {
             | Self::Buffer
             | Self::Protocol
             | Self::Generic
-            // Answered by the `__enter__`/`__exit__` pair above, as CPython's
-            // `__subclasshook__` does: it registers no builtin type either.
-            | Self::AbstractContextManager
             // `object` matches everything, which the two callers answer before
             // consulting a table.
             | Self::Object => &[],

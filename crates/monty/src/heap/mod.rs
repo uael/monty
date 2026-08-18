@@ -38,7 +38,7 @@ use crate::{
         FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module,
         NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, Range, RangeIterator, ReMatch, RePattern, Set,
         SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator,
-        TypeAliasType, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
+        TypeAliasType, TypeVar, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
         deque::DequeIterator, list::ListIterator, timedelta, timezone,
     },
     value::Value,
@@ -287,6 +287,7 @@ pub enum HeapReadOutput<'a> {
     PartialMethod(HeapRead<'a, PartialMethod>),
     GenericAlias(HeapRead<'a, GenericAlias>),
     UnionType(HeapRead<'a, UnionType>),
+    TypeVar(HeapRead<'a, TypeVar>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -732,6 +733,7 @@ impl<'a> HeapPtr<'a> {
             HeapData::PartialMethod(partial) => HeapReadOutput::PartialMethod(heap_read_boxed(base, partial, readers)),
             HeapData::GenericAlias(alias) => HeapReadOutput::GenericAlias(heap_read(base, alias, readers)),
             HeapData::UnionType(union) => HeapReadOutput::UnionType(heap_read(base, union, readers)),
+            HeapData::TypeVar(var) => HeapReadOutput::TypeVar(heap_read(base, var, readers)),
         }
     }
 }

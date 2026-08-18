@@ -191,7 +191,7 @@ mod tests {
     fn serialized_components_match_dump_version() {
         assert_eq!(
             opcode_fingerprint(),
-            0xb7f8_edd4_fc16_1235,
+            0x10bd_a93c_b47e_3a69,
             "opcodes changed for dump version {DUMP_VERSION}"
         );
         assert_eq!(

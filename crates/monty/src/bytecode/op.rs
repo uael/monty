@@ -601,6 +601,10 @@ pub enum Opcode {
     /// out of statements, since the value of a trailing expression is returned
     /// through `ReturnValue` by the same frame.
     ReturnModule = 141,
+    /// Push a fresh PEP 695 `typing.TypeVar`. Operand: u16 name_id (its
+    /// `__name__`). Emitted once per execution of the `class C[T]` statement
+    /// that declares it, so `T is T` holds inside the class.
+    MakeTypeVar = 131,
 }
 
 /// [`Opcode::Yield`] flag: the `yield` belongs to a `yield from` loop.
@@ -746,6 +750,7 @@ impl Opcode {
             | Self::RaiseUnboundLocal
             | Self::DeleteAttr
             | Self::MakeTypeAlias
+            | Self::MakeTypeVar
             | Self::MethodDictMerge => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
@@ -1006,6 +1011,7 @@ impl Opcode {
             (DeleteAttr, Operand::U16(_)) => -1,
             // The thunk is replaced in place by the alias object.
             (MakeTypeAlias, Operand::U16(_)) => 0,
+            (MakeTypeVar, Operand::U16(_)) => 1,
             // `DictMerge` takes a u16 operand carrying the func_name_id for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under

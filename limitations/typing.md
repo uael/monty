@@ -165,21 +165,48 @@ apart what CPython tells apart.
 
 ## PEP 695 type parameters
 
-`def f[T](x: T) -> T:`, `class C[T]:` and `type X[T] = ...` all parse, but the
-type parameters bind **nothing**. CPython puts each one in an implicit scope
-around the construct, holding a `TypeVar` / `TypeVarTuple` / `ParamSpec`; Monty
-drops them. Consequences:
+**A class's type parameters bind.** `class C[T]` builds a real
+`typing.TypeVar` per parameter when the class statement runs — one object, so
+`T is T` inside the class — readable by the bases and by the class body, and
+invisible outside them. That is what makes `class Held[T](Spawned[T])` work:
+`Spawned[T]` is an ordinary subscript, and a generic class is subscriptable
+because it gets the implicit `typing.Generic` base CPython gives it.
 
-- Reading a type parameter in a body raises `NameError`, where CPython returns
-  the `TypeVar`: `def f[T](x): return T` fails.
-- **A same-named outer binding shadows through instead.** If a module-level
-  `T` exists, `def f[T](x): return T` returns *that* value in Monty and the
-  `TypeVar` in CPython. This is the one case that gives a wrong answer rather
-  than an error.
-- Bounds and defaults (`def f[T: int, U = str]`) are parsed and discarded; the
-  expressions are never evaluated, so an error in one is never raised.
+`repr(T)` is `T` and `T.__name__` is `'T'`, matching CPython, whose PEP 695
+parameters infer their variance and so print without the `~` an explicitly
+variant `TypeVar` carries.
+
+The rest still bind **nothing**:
+
+- **A function's and an alias's parameters are dropped.** `def f[T](x): return
+  T` raises `NameError` where CPython returns the `TypeVar`, and so does
+  `type X[T] = ...`. A class body runs exactly once, so a `TypeVar` created
+  there has the identity CPython gives it; a function body runs many times, and
+  binding one per call would not.
+- **A same-named outer binding shadows through instead**, for those two
+  constructs: if a module-level `T` exists, `def f[T](x): return T` returns
+  *that* value in Monty and the `TypeVar` in CPython. This is the one case that
+  gives a wrong answer rather than an error. A *class* is not affected — its
+  parameter shadows the outer binding, as CPython's does.
+- **`*Ts` and `**P` are dropped even on a class**: they would need a
+  `TypeVarTuple` or a `ParamSpec`, which Monty has neither of, so reading one
+  raises `NameError`.
+- Bounds and defaults (`class C[T: int, U = str]`) are parsed and discarded;
+  the expressions are never evaluated, so an error in one is never raised.
 - `__type_params__` is not exposed on functions, classes, or aliases; reading
   it raises `AttributeError` where CPython returns a (possibly empty) tuple.
+- A `TypeVar` is not constructible: `typing.TypeVar` is an inert marker, and
+  only a `class C[T]` statement makes one.
+- A method of a generic class cannot read the parameter. Monty's class-body
+  locals are never cells, so a nested scope inside the body captures nothing
+  from it; CPython resolves `T` there through the implicit type-parameter
+  scope.
+- A generic class evaluates its **bases inside the class body** rather than in
+  the enclosing scope, since that is where its parameters live. Order is
+  unchanged (parameters, then bases, then the body), but a base named the same
+  as one of the class's own members now resolves to the member — an
+  `UnboundLocalError`, where CPython reads the enclosing binding. A
+  non-generic class is unaffected.
 
 None of this affects annotations, which are stringized and never evaluated.
 

@@ -43,7 +43,7 @@ use crate::{
     os_dispatch::{PendingOsEffect, listdir_names, release_pending_effect},
     parse::CodeRange,
     types::{
-        Dict, LongInt, PyTrait, allocate_interpolation, allocate_template, allocate_type_alias,
+        Dict, LongInt, PyTrait, allocate_interpolation, allocate_template, allocate_type_alias, allocate_type_var,
         file::{apply_buffer_store, apply_write_position},
     },
     value::{EitherStr, Value},
@@ -1497,6 +1497,11 @@ impl<'h> VM<'h> {
                     let thunk = self.pop();
                     let alias = allocate_type_alias(name_id, thunk, self);
                     self.push(alias);
+                }
+                Opcode::MakeTypeVar => {
+                    let name_idx = cached_frame.fetch_u16();
+                    let type_var = allocate_type_var(StringId::from_index(name_idx), self);
+                    self.push(type_var);
                 }
                 Opcode::BuildInterpolation => {
                     // Stack order: value, expression, conversion, format_spec (TOS)

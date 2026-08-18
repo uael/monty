@@ -36,6 +36,7 @@ use crate::{
     run::CompileOptions,
     source_map::{SourceMap, StackFrameExt},
     tstring::ParsedTemplate,
+    types::{NativeClass, Type},
     value::{EitherStr, Value},
 };
 
@@ -851,8 +852,9 @@ impl<'a> Compiler<'a> {
                 body,
                 members,
                 decorators,
+                type_params,
                 position,
-            } => self.compile_class_def(name, bases, body, members, decorators, *position)?,
+            } => self.compile_class_def(name, bases, body, members, decorators, type_params, *position)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
             Node::With {
                 context,
@@ -1055,6 +1057,7 @@ impl<'a> Compiler<'a> {
     /// statements in its own scope and returns the assembled `Class`. We emit
     /// that function value, call it with zero args, and bind the result to the
     /// class name.
+    #[expect(clippy::too_many_arguments, reason = "the fields of a `class` statement, one each")]
     fn compile_class_def(
         &mut self,
         name: &Identifier,
@@ -1062,6 +1065,7 @@ impl<'a> Compiler<'a> {
         body: &PreparedFunctionDef,
         members: &[Identifier],
         decorators: &[ExprLoc],
+        type_params: &[Identifier],
         position: CodeRange,
     ) -> Result<(), CompileError> {
         // Pushed in source order so they sit below the class value: the applying
@@ -1069,28 +1073,38 @@ impl<'a> Compiler<'a> {
         for decorator in decorators {
             self.compile_expr(decorator)?;
         }
-        // `type(name, bases, namespace)`: the first two arguments are built
-        // here, in the enclosing scope, because that is where CPython evaluates
-        // base expressions: a base name shadowed by a class variable must
-        // still resolve to the enclosing binding.
-        let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
-        self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
-        for base in bases {
-            self.compile_expr(base)?;
+        if type_params.is_empty() {
+            // `type(name, bases, namespace)`: the first two arguments are built
+            // here, in the enclosing scope, because that is where CPython evaluates
+            // base expressions: a base name shadowed by a class variable must
+            // still resolve to the enclosing binding.
+            let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
+            self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
+            for base in bases {
+                self.compile_expr(base)?;
+            }
+            let base_count = check_collection_size_u16(bases.len(), position)?;
+            self.code.set_location(position, None);
+            self.code.emit_u16(Opcode::BuildTuple, base_count)?;
+            // Build the class-body function/closure value on the stack...
+            self.emit_make_class_body(body, members, &[], &[], name.name_id, position)?;
+            // ...call it with zero args, which runs the body and returns the namespace
+            // dict. Record the class statement as the call site so a traceback from
+            // inside the class body attributes this frame to the `class` statement
+            // (like CPython) rather than falling back to `CodeRange::default()`.
+            self.code.set_location(position, None);
+            self.code.emit_u8(Opcode::CallFunction, 0)?;
+            // ...and call the 3-arg type() builtin, which builds the class object.
+            self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
+        } else {
+            // A generic class binds its type parameters as body locals, so the
+            // whole `type(name, bases, namespace)` call moves into the body:
+            // the bases are read there, after the parameters and before the
+            // statements, and the body returns the finished class.
+            self.emit_make_class_body(body, members, bases, type_params, name.name_id, position)?;
+            self.code.set_location(position, None);
+            self.code.emit_u8(Opcode::CallFunction, 0)?;
         }
-        let base_count = check_collection_size_u16(bases.len(), position)?;
-        self.code.set_location(position, None);
-        self.code.emit_u16(Opcode::BuildTuple, base_count)?;
-        // Build the class-body function/closure value on the stack...
-        self.emit_make_class_body(body, members, position)?;
-        // ...call it with zero args, which runs the body and returns the namespace
-        // dict. Record the class statement as the call site so a traceback from
-        // inside the class body attributes this frame to the `class` statement
-        // (like CPython) rather than falling back to `CodeRange::default()`.
-        self.code.set_location(position, None);
-        self.code.emit_u8(Opcode::CallFunction, 0)?;
-        // ...and call the 3-arg type() builtin, which builds the class object.
-        self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         // Each call consumes the callable below the current value: `deco(value)`.
         // Reversed so the bottom-most (last pushed) applies first, and located at
         // its own decorator so a traceback pins the one that raised, like CPython.
@@ -1114,6 +1128,9 @@ impl<'a> Compiler<'a> {
         &mut self,
         body: &PreparedFunctionDef,
         members: &[Identifier],
+        bases: &[ExprLoc],
+        type_params: &[Identifier],
+        class_name: StringId,
         position: CodeRange,
     ) -> Result<(), CompileError> {
         let assert_message_annotations = self.assert_message_annotations;
@@ -1121,6 +1138,9 @@ impl<'a> Compiler<'a> {
             Self::compile_class_body(
                 &body.body,
                 members,
+                bases,
+                type_params,
+                class_name,
                 position,
                 interns,
                 functions,
@@ -1143,9 +1163,16 @@ impl<'a> Compiler<'a> {
     /// never be cells — see `prepare_class_def`), so [`compile_name`](Self::compile_name)
     /// emits `LoadLocal`; it would transparently emit `LoadCell` if that ever
     /// changed, so no assumption is hard-coded here.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of a `class` statement plus the compiler state a nested body is built from"
+    )]
     fn compile_class_body(
         body: &[PreparedNode],
         members: &[Identifier],
+        bases: &[ExprLoc],
+        type_params: &[Identifier],
+        class_name: StringId,
         position: CodeRange,
         interns: &Interns,
         functions: Vec<Function>,
@@ -1153,6 +1180,34 @@ impl<'a> Compiler<'a> {
         assert_message_annotations: bool,
     ) -> Result<(Code, Vec<Function>), CompileError> {
         let mut compiler = Compiler::new(interns, functions, false, num_locals, assert_message_annotations);
+        let generic = !type_params.is_empty();
+        if generic {
+            // `type(name, bases, ...)`'s first two arguments are built here and
+            // wait on the stack under the body's own work: the class name, then
+            // the type parameters (bound before anything can read one), then the
+            // bases.
+            compiler.code.set_location(position, None);
+            let class_name_const = compiler.code.add_const(Value::InternString(class_name))?;
+            compiler.code.emit_u16(Opcode::LoadConst, class_name_const)?;
+            for param in type_params {
+                let name_idx = check_name_index_u16(param.name_id, param.position)?;
+                compiler.code.emit_u16(Opcode::MakeTypeVar, name_idx)?;
+                compiler.compile_store(param)?;
+            }
+            for base in bases {
+                compiler.compile_expr(base)?;
+            }
+            // The implicit `typing.Generic` base CPython gives every PEP 695
+            // generic class: it adds no link to the inheritance chain, and is
+            // what supplies `__class_getitem__` so `C[int]` is an alias.
+            let generic_base = compiler
+                .code
+                .add_const(Value::Builtin(Builtins::Type(Type::Native(NativeClass::Generic))))?;
+            compiler.code.emit_u16(Opcode::LoadConst, generic_base)?;
+            let base_count = check_collection_size_u16(bases.len() + 1, position)?;
+            compiler.code.set_location(position, None);
+            compiler.code.emit_u16(Opcode::BuildTuple, base_count)?;
+        }
         compiler.compile_block(body)?;
 
         // Assembly errors (e.g. resource limits while building the dict)
@@ -1167,6 +1222,13 @@ impl<'a> Compiler<'a> {
         }
         let member_count = check_collection_size_u16(members.len(), position)?;
         compiler.code.emit_u16(Opcode::BuildDict, member_count)?;
+        if generic {
+            // The name and bases are already waiting underneath, so the class
+            // itself is what this body returns.
+            compiler
+                .code
+                .emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
+        }
         compiler.code.emit(Opcode::ReturnValue)?;
 
         Ok((compiler.code.build(num_locals), compiler.functions))

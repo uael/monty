@@ -898,9 +898,18 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     body,
                     members,
                     decorators,
+                    type_params,
                     position,
                 } => {
-                    new_nodes.push(self.prepare_class_def(name, bases, body, members, decorators, position)?);
+                    new_nodes.push(self.prepare_class_def(
+                        name,
+                        bases,
+                        body,
+                        members,
+                        decorators,
+                        type_params,
+                        position,
+                    )?);
                 }
                 Node::Global { names, position } => {
                     // At module level, `global` is a no-op since all variables are already global.
@@ -1793,6 +1802,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
     ///   assembly) from the inner preparer's locals.
     ///
     /// The class name itself binds in the **enclosing** scope, exactly like a `def`.
+    #[expect(clippy::too_many_arguments, reason = "the fields of a `class` statement, one each")]
     fn prepare_class_def(
         &mut self,
         name: Identifier,
@@ -1800,18 +1810,27 @@ impl<'i, 'g> Prepare<'i, 'g> {
         body: RawFunctionDef,
         members: Vec<Identifier>,
         decorators: Vec<ExprLoc>,
+        type_params: Vec<Identifier>,
         position: CodeRange,
     ) -> Result<PreparedNode, ParseError> {
         // The class name binds in the enclosing scope, exactly like a `def`.
         self.names_assigned_in_order.insert(name.name_id);
         let name = self.get_id(name)?;
 
-        // Bases and decorators both evaluate in the enclosing scope, not the
-        // class body; bases first, matching CPython's evaluation order.
-        let bases = bases
-            .into_iter()
-            .map(|b| self.prepare_expression(b))
-            .collect::<Result<Vec<_>, ParseError>>()?;
+        // A PEP 695 type parameter is a class-body local, and the bases have to
+        // see it, so a generic class evaluates its bases inside the body rather
+        // than here. Everything else about the two paths is identical.
+        let generic = !type_params.is_empty();
+        let bases = if generic {
+            bases
+        } else {
+            bases
+                .into_iter()
+                .map(|b| self.prepare_expression(b))
+                .collect::<Result<Vec<_>, ParseError>>()?
+        };
+        // Decorators always evaluate in the enclosing scope: they apply to the
+        // finished class, outside anything the type parameters scope over.
         let decorators = decorators
             .into_iter()
             .map(|d| self.prepare_expression(d))
@@ -1831,12 +1850,27 @@ impl<'i, 'g> Prepare<'i, 'g> {
         // pre-pass flagged: keeping every member a plain local.
         let mut scope_info = collect_function_scope_info(&body_nodes, &param_names, self.interner);
         scope_info.cell_var_names.clear();
+        if generic {
+            // The type parameters are locals of the body, bound before anything
+            // else runs in it, and the bases are read there too.
+            for param in &type_params {
+                scope_info.assigned_names.insert(param.name_id);
+                scope_info.potential_captures.remove(&param.name_id);
+            }
+            for base in &bases {
+                collect_referenced_names_from_expr(base, &mut scope_info.potential_captures, self.interner);
+            }
+            scope_info
+                .potential_captures
+                .retain(|n| !scope_info.assigned_names.contains(n) && !scope_info.global_names.contains(n));
+        }
 
         // Names the class body may capture from scopes enclosing the class.
         let enclosing_locals = self.child_enclosing_locals();
         let implicit_captures: AHashSet<StringId> = scope_info
             .potential_captures
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|n| enclosing_locals.contains(n))
             .collect();
 
@@ -1857,7 +1891,28 @@ impl<'i, 'g> Prepare<'i, 'g> {
             self.interner,
         )?;
         inner_prepare.is_class_scope = true;
+        // Bind the type parameters before anything is prepared in the body: a
+        // body that never mentions one would otherwise leave it slotless, and
+        // the compiler still has to store the `TypeVar` somewhere.
+        for param in &type_params {
+            inner_prepare.get_id(*param)?;
+            // Bound by the compiler at the top of the body rather than by a
+            // statement, so record it as already bound: a read must reach the
+            // local slot, not fall back to the module globals.
+            inner_prepare.bound_class_members.insert(param.name_id);
+        }
 
+        // A generic class's bases are part of the body's code, evaluated first
+        // so a type parameter is already bound and CPython's base-before-body
+        // order still holds.
+        let bases = if generic {
+            bases
+                .into_iter()
+                .map(|b| inner_prepare.prepare_expression(b))
+                .collect::<Result<Vec<_>, ParseError>>()?
+        } else {
+            bases
+        };
         let prepared_body = inner_prepare.prepare_nodes(body_nodes)?;
 
         // Take the per-function state out of the child and drop it so its
@@ -1873,6 +1928,20 @@ impl<'i, 'g> Prepare<'i, 'g> {
         } = *inner_state;
         let namespace_size = inner_locals.len();
         drop(inner_prepare);
+
+        // Type parameters are class-body locals like the members, but never
+        // members: CPython's class dict holds no `T`, so they are resolved to
+        // their slots and left out of the namespace the compiler assembles.
+        let type_params = type_params
+            .into_iter()
+            .map(|param| {
+                let slot = inner_locals.get(param.name_id).unwrap_or_else(|| {
+                    let param_name = self.interner.get_str(param.name_id);
+                    panic!("type parameter '{param_name}' missing from class-body locals")
+                });
+                Identifier::new_with_scope(param.name_id, param.position, slot, NameScope::Local)
+            })
+            .collect::<Vec<_>>();
 
         // Resolve each member to its class-body-local slot. Every member is
         // assigned in the class body (a method `def` or a class-var `Assign`),
@@ -1940,6 +2009,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             body: body_def,
             members,
             decorators,
+            type_params,
             position,
         })
     }
@@ -2951,8 +3021,19 @@ fn collect_cell_vars_from_node(
             body,
             bases,
             decorators,
+            type_params,
             ..
         } => {
+            // A generic class evaluates its bases *inside* the body, so any of
+            // our locals they name is captured from a nested scope and must be
+            // a cell, exactly as a body reference would be.
+            if !type_params.is_empty() {
+                let mut referenced = AHashSet::new();
+                for base in bases {
+                    collect_referenced_names_from_expr(base, &mut referenced, interner);
+                }
+                cell_vars.extend(referenced.into_iter().filter(|name| our_locals.contains(name)));
+            }
             // The class body is a nested scope of *this* scope, like a `def`: any
             // of our locals referenced from the class-var values or (transitively)
             // the method bodies becomes a cell var. `collect_cell_vars_from_function`

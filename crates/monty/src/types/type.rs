@@ -276,6 +276,10 @@ pub enum Type {
     /// peels this variant off explicitly.
     #[strum(disabled)]
     Native(NativeClass),
+    /// PEP 695 `typing.TypeVar`, the value a `class C[T]` statement binds `T`
+    /// to.
+    #[strum(serialize = "typing.TypeVar")]
+    TypeVar,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

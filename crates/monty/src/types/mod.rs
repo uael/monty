@@ -47,6 +47,7 @@ pub mod timezone;
 pub mod tuple;
 pub mod r#type;
 pub mod type_alias;
+pub mod type_var;
 
 pub(crate) use attrgetter::AttrGetter;
 pub(crate) use bytes::{Bytes, BytesIterator};
@@ -88,3 +89,4 @@ pub(crate) use timezone::TimeZone;
 pub(crate) use tuple::{Tuple, TupleIterator, allocate_tuple};
 pub(crate) use r#type::Type;
 pub(crate) use type_alias::{TypeAliasType, allocate_type_alias};
+pub(crate) use type_var::{TypeVar, allocate_type_var};

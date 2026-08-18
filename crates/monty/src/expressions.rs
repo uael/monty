@@ -771,8 +771,10 @@ pub enum Node<F> {
         /// Base classes, in source order. Evaluated in the *enclosing* scope
         /// (like [`decorators`](Self::ClassDef::decorators)), never the class
         /// body, so a base name shadowed by a class variable still resolves to
-        /// the enclosing binding as CPython does. At most one is accepted at
-        /// runtime; see `limitations/classes.md`.
+        /// the enclosing binding as CPython does — unless the class declares
+        /// PEP 695 type parameters, which the bases must see (see
+        /// [`type_params`](Self::ClassDef::type_params)). At most one concrete
+        /// base is accepted at runtime; see `limitations/classes.md`.
         bases: Vec<ExprLoc>,
         /// The synthetic class-body function: its body is the class statements
         /// in source order. Prepared and compiled exactly like a function; its
@@ -786,6 +788,13 @@ pub enum Node<F> {
         /// In source order; evaluated in the enclosing scope and applied
         /// bottom-up (`cls = deco(cls)`), like CPython.
         decorators: Vec<ExprLoc>,
+        /// PEP 695 type parameters (`class Held[T]`), in source order.
+        ///
+        /// Empty for an ordinary class, and when non-empty it changes where the
+        /// bases are evaluated: a type parameter is a *class-body* local (bound
+        /// once, at the top of the body, before the bases), so the bases move
+        /// into the body with it. See `limitations/typing.md`.
+        type_params: Vec<Identifier>,
         /// Source position of the `class` statement (for error reporting).
         position: CodeRange,
     },

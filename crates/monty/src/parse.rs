@@ -846,6 +846,20 @@ impl<'a> Parser<'a> {
     fn parse_class_def(&mut self, class: ast::StmtClassDef) -> Result<ParseNode, ParseError> {
         let position = self.class_keyword_range(&class);
         let decorators = self.parse_decorators(class.decorator_list)?;
+        self.check_type_params(class.type_params.as_deref())?;
+        // PEP 695 type parameters bind in the class body; see `prepare_class_def`.
+        // Only plain `T` is bound: a `*Ts` or `**P` needs a `TypeVarTuple` or
+        // `ParamSpec` object, which Monty has no equivalent for, so those stay
+        // dropped (`limitations/typing.md`).
+        let type_params = class
+            .type_params
+            .iter()
+            .flat_map(|params| params.iter())
+            .filter_map(|param| match param {
+                ast::TypeParam::TypeVar(t) => Some(self.identifier(&t.name.id, t.name.range)),
+                ast::TypeParam::TypeVarTuple(_) | ast::TypeParam::ParamSpec(_) => None,
+            })
+            .collect::<Vec<_>>();
         // `class.arguments` carries base classes and metaclass keywords. Bases
         // are ordinary expressions evaluated in the enclosing scope; keywords
         // are all metaclass machinery, which Monty has none of.
@@ -1043,6 +1057,7 @@ impl<'a> Parser<'a> {
             body,
             members,
             decorators,
+            type_params,
             position,
         })
     }

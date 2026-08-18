@@ -79,10 +79,10 @@ walk it too. Divergences:
   matching CPython's wording for a missing `__class__` cell.
 - **A generic base resolves to the class it subscripts.** A base that is a
   `types.GenericAlias` goes through `__mro_entries__` and stands for its
-  `__origin__`, so `class Sub(Base[int])` inherits from `Base`. Subscripting
-  the base needs a `__class_getitem__` on it (see ./typing.md); `class
-  Held[T](Spawned[T])` additionally needs `T` to be bound, which PEP 695 type
-  parameters still are not.
+  `__origin__`, so `class Sub(Base[int])` inherits from `Base` and
+  `class Held[T](Spawned[T])` from `Spawned`. Subscripting the base needs a
+  `__class_getitem__` on it, which every PEP 695 generic class has; see
+  ./typing.md for what a type parameter binds to.
 - **The implicit root class is minimal.** `super().__init__()` falls back to
   `object.__init__` (zero arguments) or, in an exception class,
   `BaseException.__init__` (which stores `args`). No other `object` method

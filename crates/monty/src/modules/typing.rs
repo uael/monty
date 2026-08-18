@@ -19,7 +19,11 @@ use crate::{
     heap::{DropWithContext, HeapData, HeapId},
     intern::StaticStrings,
     modules::ModuleFunctions,
-    types::{Module, NativeClass, Type, allocate_tuple, generic_alias::origin_and_args, protocol::runtime_checkable},
+    types::{
+        Module, NativeClass, Type, allocate_tuple,
+        generic_alias::{origin_and_args, subscript_type_form},
+        protocol::runtime_checkable,
+    },
     value::{Marker, Value},
 };
 
@@ -42,6 +46,9 @@ pub(crate) enum TypingFunctions {
     Identity,
     /// `typing.runtime_checkable(cls)`.
     RuntimeCheckable,
+    /// `typing.Generic.__class_getitem__`, which every PEP 695 generic class
+    /// inherits: it is what makes `Spawned[T]` an alias rather than an error.
+    ClassGetitem,
 }
 
 impl fmt::Display for TypingFunctions {
@@ -54,6 +61,7 @@ impl fmt::Display for TypingFunctions {
             Self::DataclassTransform => "dataclass_transform",
             Self::Identity => "decorator",
             Self::RuntimeCheckable => "runtime_checkable",
+            Self::ClassGetitem => "__class_getitem__",
         })
     }
 }
@@ -179,6 +187,12 @@ pub(super) fn call(vm: &mut VM<'_>, func: TypingFunctions, args: ArgValues) -> R
         TypingFunctions::RuntimeCheckable => {
             let cls = args.get_one_arg("runtime_checkable", vm.heap)?;
             runtime_checkable(cls, vm)
+        }
+        // Reached as an implicit classmethod, so the class arrives first.
+        TypingFunctions::ClassGetitem => {
+            let (cls, key) = args.get_two_args("__class_getitem__", vm.heap)?;
+            defer_drop!(key, vm);
+            Ok(subscript_type_form(cls, key, vm))
         }
     }
 }

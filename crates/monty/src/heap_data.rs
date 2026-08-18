@@ -28,7 +28,7 @@ use crate::{
         FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor,
         Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range, RangeIterator, ReMatch,
         RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator,
-        Type, TypeAliasType, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
+        Type, TypeAliasType, TypeVar, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
         deque::DequeIterator, generic_alias::class_subscript, instance_subscript, list::ListIterator,
         str::allocate_string, timedelta, timezone,
     },
@@ -234,6 +234,8 @@ pub(crate) enum HeapData {
     /// `typing.Union` (CPython 3.14's `types.UnionType`): the value of
     /// `int | str`.
     UnionType(UnionType),
+    /// PEP 695 `typing.TypeVar`: the value a `class C[T]` statement binds `T` to.
+    TypeVar(TypeVar),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -324,6 +326,7 @@ impl HeapData {
             | Self::BytesIterator(_)
             | Self::RangeIterator(_)
             | Self::LongInt(_)
+            | Self::TypeVar(_)
             | Self::Path(_)
             | Self::OpenFile(_)
             | Self::RePattern(_)
@@ -430,6 +433,7 @@ impl HeapData {
             Self::PartialMethod(_) => Type::PartialMethod,
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::UnionType(_) => Type::Union,
+            Self::TypeVar(_) => Type::TypeVar,
         }
     }
 }
@@ -628,6 +632,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::PartialMethod($value) => $body,
             Self::GenericAlias($value) => $body,
             Self::UnionType($value) => $body,
+            Self::TypeVar($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -1176,6 +1181,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::PartialMethod(value) => value.py_iter(self_id, vm),
             Self::GenericAlias(value) => value.py_iter(self_id, vm),
             Self::UnionType(value) => value.py_iter(self_id, vm),
+            Self::TypeVar(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1247,6 +1253,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::PartialMethod(value) => value.py_next(self_id, vm),
             Self::GenericAlias(value) => value.py_next(self_id, vm),
             Self::UnionType(value) => value.py_next(self_id, vm),
+            Self::TypeVar(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),
