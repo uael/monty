@@ -176,9 +176,9 @@ pub enum Type {
     /// as "Field", the name CPython's `Field.__name__` reports.
     #[strum(serialize = "Field")]
     DataclassField,
-    /// `collections.deque` — qualified like `datetime.datetime`/`re.Pattern` so
-    /// the name matches CPython's `repr` and error messages; only `__name__`
-    /// diverges from CPython's bare `'deque'`. See `limitations/collections.md`.
+    /// `collections.deque`, qualified like `datetime.datetime`/`re.Pattern`, the
+    /// name CPython's `repr` and error messages use. `__name__` drops the module
+    /// from it, so the bare `'deque'` needs no separate spelling.
     #[strum(serialize = "collections.deque")]
     Deque,
     /// `iter(deque(...))` — CPython's `_collections._deque_iterator`.
@@ -207,8 +207,7 @@ pub enum Type {
     #[strum(serialize = "itertools.starmap")]
     ItertoolsStarMap,
     /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
-    /// Dotted like `re.Match`; only `__name__` diverges from CPython's bare
-    /// `'Template'`. See `limitations/string_templatelib.md`.
+    /// Dotted like `re.Match`, and `__name__` drops the module from it.
     #[strum(serialize = "string.templatelib.Template")]
     Template,
     /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.

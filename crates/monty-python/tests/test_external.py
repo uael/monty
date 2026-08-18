@@ -119,8 +119,8 @@ results
     }
     assert monty_run(code, external_lookup=fns) == snapshot(
         [
-            ('datetime.datetime', 'datetime.datetime(2021, 1, 2, 3, 4, 5)'),
-            ('datetime.datetime', 'datetime.datetime(2021, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)'),
+            ('datetime', 'datetime.datetime(2021, 1, 2, 3, 4, 5)'),
+            ('datetime', 'datetime.datetime(2021, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)'),
             ('date', 'datetime.date(2021, 1, 2)'),
             ('timedelta', 'datetime.timedelta(days=1, seconds=2)'),
             ('timezone', 'datetime.timezone(datetime.timedelta(seconds=18000))'),

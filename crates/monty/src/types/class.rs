@@ -359,7 +359,9 @@ pub(crate) fn class_getattr(class_id: HeapId, attr: &EitherStr, vm: &mut VM<'_>)
     // because in CPython `type.__name__` is a metaclass data descriptor that
     // shadows a same-named class-dict member (`class Foo: __name__ = 'bar'`
     // still reads `'Foo'`; only instances see the member).
-    if attr_str == "__name__" {
+    // `__qualname__` is the same string: Monty has no nested classes, so there
+    // is nothing for it to qualify the name with.
+    if matches!(attr_str, "__name__" | "__qualname__") {
         let name = class_name(class_id, vm.heap, vm.interns).into_owned();
         return Ok(CallResult::Value(allocate_string(name, vm.heap)));
     }

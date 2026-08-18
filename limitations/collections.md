@@ -91,14 +91,12 @@ spelling CPython uses in the most places:
 
 | type | Monty's name | what diverges |
 |---|---|---|
-| `deque` | `collections.deque` | only `__name__` (CPython: `'deque'`) |
-| `defaultdict` | `collections.defaultdict` | only `__name__` (CPython: `'defaultdict'`) |
+| `deque` | `collections.deque` | nothing |
+| `defaultdict` | `collections.defaultdict` | nothing |
 | `Counter` | `Counter` | only `repr(Counter)` and the `cannot use ...` clause of the unhashable message |
 
 `deque`/`defaultdict` are C types, so CPython qualifies them in `repr(T)` and in
 every type-naming error message (`unsupported operand type(s)`, `object is not
-callable`, `object has no attribute`); Monty matches all of those and pays only
-on `__name__`. `Counter` is a Python-level class, so those messages give the
-bare name, which Monty matches. Code that matches on a type name (parsing an
-error message or comparing `__name__`) may need to accept either spelling, as
-with `datetime.datetime`, `re.Pattern`, and `_io.TextIOWrapper`.
+callable`, `object has no attribute`), and gives the bare name for `__name__`;
+Monty matches all of those. `Counter` is a Python-level class, so those messages
+give the bare name, which Monty matches.

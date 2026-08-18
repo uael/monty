@@ -52,10 +52,6 @@ storage do not exist. A variable's value lives on the variable itself, so:
   `Token.MISSING` sentinel there and `None` only when `None` was genuinely the
   previous value; Monty cannot tell the two apart through this attribute.
   `reset()` itself is unaffected — it restores *unset*, not `None`.
-- **`type(v).__name__` is `'_contextvars.ContextVar'`**, where CPython says
-  `'ContextVar'`. The qualified form is CPython's `tp_name`, so every error
-  message matches; only `__name__` differs, as for `collections.deque`
-  (see ./collections.md).
 - **Two arity messages differ in wording.** `ContextVar()` reports
   `takes at least 1 positional argument (0 given)` where CPython says
   `exactly`, and `ContextVar('a', 'b')` reports

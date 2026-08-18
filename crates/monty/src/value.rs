@@ -1594,22 +1594,21 @@ impl Value {
                     return Ok(call_result);
                 }
             }
-            // An exception class is a type object too, and `type(exc)` hands
-            // back this form, so it answers `__name__` like any other class.
-            Self::Builtin(Builtins::ExcType(exc_type)) => {
-                if is_dunder_name(attr, vm) {
-                    let name = Type::Exception(*exc_type).name(vm.heap, vm.interns);
-                    return Ok(CallResult::Value(allocate_string(name, vm.heap)));
-                }
-            }
             Self::Builtin(Builtins::Type(t)) => {
-                // Handle type object attributes like __name__
-                if is_dunder_name(attr, vm) {
-                    return Ok(CallResult::Value(allocate_string(t.name(vm.heap, vm.interns), vm.heap)));
+                if is_class_name_attr(attr, vm) {
+                    let qualified = t.name(vm.heap, vm.interns);
+                    let name = bare_type_name(&qualified).to_owned();
+                    return Ok(CallResult::Value(allocate_string(name, vm.heap)));
                 }
                 if *t == Type::TimeZone && attr.as_str(vm.interns) == "utc" {
                     return Ok(CallResult::Value(vm.heap.get_timezone_utc()));
                 }
+            }
+            // An exception class is a type object too, and `type(exc)` hands
+            // back this form, so it answers the same names any other class does.
+            Self::Builtin(Builtins::ExcType(exc)) if is_class_name_attr(attr, vm) => {
+                let name = bare_type_name(<&str>::from(*exc)).to_owned();
+                return Ok(CallResult::Value(allocate_string(name, vm.heap)));
             }
             _ => {}
         }
@@ -2240,6 +2239,26 @@ impl Marker {
     }
 }
 
+/// Whether `attr` is one of the two names a class object answers with its own
+/// name: `__name__`, and `__qualname__`, which is the same string here because
+/// Monty has no nested classes to qualify one with.
+fn is_class_name_attr(attr: &EitherStr, vm: &VM<'_>) -> bool {
+    match attr.static_string() {
+        Some(ss) => ss == StaticStrings::DunderName || ss == StaticStrings::DunderQualname,
+        None => matches!(attr.as_str(vm.interns), "__name__" | "__qualname__"),
+    }
+}
+
+/// The name a type answers to, given the one it displays.
+///
+/// A type's displayed name carries the module that defines it wherever CPython's
+/// `tp_name` does (`collections.deque`, `re.Pattern`, `datetime.datetime`), and
+/// `type.__name__` is that name after its last dot. So the two differ for
+/// exactly the types whose display is qualified, and agree for the rest.
+fn bare_type_name(qualified: &str) -> &str {
+    qualified.rsplit_once('.').map_or(qualified, |(_, bare)| bare)
+}
+
 /// Extracts an immediate integer without promoting it to `BigInt`.
 ///
 /// Python's `bool` is a subclass of `int`, so `True` and `False` *are* the ints
@@ -2385,15 +2404,6 @@ fn bigint_pow(base: BigInt, exp: u64) -> BigInt {
     }
 
     result
-}
-
-/// Whether `attr` names `__name__`, the one attribute the builtin class values
-/// answer.
-fn is_dunder_name(attr: &EitherStr, vm: &VM<'_>) -> bool {
-    attr.static_string().map_or_else(
-        || attr.as_str(vm.interns) == "__name__",
-        |ss| ss == StaticStrings::DunderName,
-    )
 }
 
 #[cfg(test)]

@@ -31,9 +31,8 @@ use crate::{
 /// abstract class.
 ///
 /// The strum name is the fully qualified one, so `repr` and a type expression
-/// (`collections.abc.Mapping[str, int]`) both read as they do in CPython. The
-/// cost is that `__name__` is qualified too, the same divergence `deque`
-/// documents in ./collections.md.
+/// (`collections.abc.Mapping[str, int]`) both read as they do in CPython;
+/// `__name__` drops the module from it.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, strum::IntoStaticStr, strum::EnumIter,
 )]

@@ -117,10 +117,6 @@ every object.
 
 Divergences:
 
-- **`__name__` is the qualified name.** `Mapping.__name__` is
-  `'collections.abc.Mapping'` where CPython says `'Mapping'`, the same choice
-  `deque` documents in ./collections.md; `repr` and error messages match
-  CPython exactly.
 - **`type(Mapping)` is `type`**, where CPython reports `abc.ABCMeta`; likewise
   `type(Protocol)` rather than `typing._ProtocolMeta`.
 - **`register()` is not implemented**: the registration table is fixed, so a
@@ -219,10 +215,6 @@ and then memoized, so an alias may mention itself
 (`type Wire = str | list[Wire]` is only an error if `__value__` is read and the
 operators involved are unsupported). Divergences:
 
-- `type(X).__name__` is `'typing.TypeAliasType'`, not CPython's bare
-  `'TypeAliasType'`. Monty names every non-builtin type by its
-  module-qualified path (the same choice documented for `deque` in
-  ./collections.md); `repr(type(X))` and error messages match CPython exactly.
 - `X.__type_params__` and `X.__module__` raise `AttributeError`.
 - Every attribute is read-only: `X.__name__ = ...` raises `AttributeError:
   'typing.TypeAliasType' object has no attribute '__name__' and no __dict__ for

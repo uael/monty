@@ -47,11 +47,6 @@ from a `t"..."` literal.
 - **The type objects are not subscriptable.** CPython's `__class_getitem__`
   makes `Template[Any]` a `types.GenericAlias`; in Monty it raises
   `TypeError: 'type' object is not subscriptable`.
-- **`type(...).__name__` is the dotted name.** `type(t).__name__` is
-  `'string.templatelib.Template'` where CPython reports the bare `'Template'`.
-  This is Monty's general treatment of types whose CPython `tp_name` is dotted
-  (`re.Pattern`, `collections.deque` behave the same way); `repr()` of the type
-  and error messages naming it match CPython.
 - **Crossing the host boundary loses the object.** A `Template` or
   `Interpolation` returned to the host arrives as its `repr()` text
   (`Template(strings=('a',), interpolations=())`), not as a host

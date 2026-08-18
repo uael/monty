@@ -77,6 +77,14 @@ assert not isinstance(len, type), 'a builtin function is not a class'
 assert not isinstance(1, type), 'a value is not a class'
 assert not isinstance(iter, type), 'iter is a function, not the iterator class'
 
+# === A class object answers to both of its name attributes ===
+assert Point.__name__ == 'Point'
+assert Point.__qualname__ == 'Point'
+assert int.__name__ == 'int'
+assert int.__qualname__ == 'int'
+assert ValueError.__name__ == 'ValueError'
+assert ValueError.__qualname__ == 'ValueError'
+
 
 class Other:
     def __init__(self) -> None:

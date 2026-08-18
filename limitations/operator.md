@@ -27,10 +27,6 @@ eagerly:
 
 ### Divergences
 
-- **`type(g).__name__` is `'operator.attrgetter'`**, where CPython says
-  `'attrgetter'`. The qualified form is CPython's `tp_name`, so error messages
-  match; only `__name__` differs, as for `collections.deque`
-  (see ./collections.md).
 - **An attribute that would need to reach the host raises.** A getter can only
   return a plain value, so an attribute backed by an external or OS call raises
   `TypeError: attrgetter(): attribute is not a simple value` rather than

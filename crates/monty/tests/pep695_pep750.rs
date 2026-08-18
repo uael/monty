@@ -6,7 +6,7 @@
 //! lives here is everything that *diverges*, and so cannot be asserted against
 //! both engines:
 //!
-//! - `type(x).__name__` is Monty's module-qualified name, not CPython's bare one
+//! - a type displays by its module-qualified path, where `__name__` is bare
 //! - the type objects are not constructible, and the aliases are read-only
 //! - PEP 695 type parameters parse but bind nothing
 //! - `import string.templatelib` without an alias is rejected
@@ -40,22 +40,21 @@ fn assert_raises(code: &str, exc_type: ExcType, message: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Type names are module-qualified
+// Type names
 // ---------------------------------------------------------------------------
 
-/// Monty names every non-builtin type by its module-qualified path (as it
-/// already does for `re.Match` and `collections.deque`), so `__name__` on the
-/// *type* diverges from CPython's bare name while `repr()` of the type and
-/// every error message that names it agree with CPython.
+/// Monty displays every non-builtin type by its module-qualified path, as
+/// CPython's `tp_name` does, and `__name__` is that path after its last dot.
+/// Kept Rust-side because these types have no `repr()` the comparative suite
+/// could reach them through.
 #[test]
-fn type_names_are_module_qualified() {
+fn type_names_drop_the_module_they_display() {
     for (code, expected) in [
-        ("type X = int\ntype(X).__name__", "typing.TypeAliasType"),
-        ("type(t'').__name__", "string.templatelib.Template"),
-        (
-            "type(t'{1}'.interpolations[0]).__name__",
-            "string.templatelib.Interpolation",
-        ),
+        ("type X = int\ntype(X).__name__", "TypeAliasType"),
+        ("type X = int\nstr(type(X))", "<class 'typing.TypeAliasType'>"),
+        ("type(t'').__name__", "Template"),
+        ("str(type(t''))", "<class 'string.templatelib.Template'>"),
+        ("type(t'{1}'.interpolations[0]).__name__", "Interpolation"),
     ] {
         assert_eq!(eval(code), MontyObject::String(expected.to_owned()), "for {code:?}");
     }

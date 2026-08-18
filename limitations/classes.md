@@ -140,9 +140,10 @@ order and error wording, but with these divergences:
   message matches what `object.__init_subclass__` produces
   (`A.__init_subclass__() takes no keyword arguments`).
 - Only `__doc__` is synthesized into the namespace when absent (as `None`,
-  matching CPython). CPython also sets `__module__`, `__qualname__`,
-  `__dict__`, `__weakref__`, etc.; those attributes raise `AttributeError`
-  in Monty, as for compiled classes.
+  matching CPython). CPython also sets `__module__`, `__dict__`,
+  `__weakref__`, etc.; those attributes raise `AttributeError` in Monty, as for
+  compiled classes. `__qualname__` is answered, but from the class name rather
+  than the namespace.
 - **Non-string namespace keys raise `TypeError`**
   (`non-string key (int) in the namespace of class 'A'`). CPython accepts
   them with only a `RuntimeWarning`; Monty has no warnings machinery, so it
@@ -321,11 +322,13 @@ host that wants to construct instances asks the sandbox to.
   attribute always raises the default `AttributeError` even when the class
   defines `__getattr__`, and attribute writes go straight to the instance
   `__dict__` unless the class binds the name to a `property`.
-- Introspection attributes other than `__name__`, `__doc__`, `__annotations__`
-  and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`, `Foo.__bases__`,
-  `Foo.__mro__`, `Foo.__qualname__`, `Foo.__module__`, and explicit
+- Introspection attributes other than `__name__`, `__qualname__`, `__doc__`,
+  `__annotations__` and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`,
+  `Foo.__bases__`, `Foo.__mro__`, `Foo.__module__`, and explicit
   `obj.__repr__()` / `obj.__str__()` calls when the class defines none, all
-  raise `AttributeError`.
+  raise `AttributeError`. `__qualname__` is always the same string as
+  `__name__`: a class body may not contain a class, so nothing here is nested
+  and there is nothing to qualify.
 - Class-body statements other than a `def`, a simple `name [: T] = <expr>`
   variable assignment, `pass`, `...`, or a docstring, e.g. `if`/`for`/`while`
   in the class body, or tuple/multiple assignment targets (rejected at parse
