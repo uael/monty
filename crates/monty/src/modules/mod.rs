@@ -17,6 +17,7 @@ use crate::{
 
 pub(crate) mod asyncio;
 pub(crate) mod collections;
+pub(crate) mod contextlib;
 pub(crate) mod contextvars;
 pub(crate) mod dataclasses;
 pub(crate) mod datetime;
@@ -74,6 +75,9 @@ pub(crate) enum StandardLib {
     OsPath,
     /// The `contextvars` module providing `ContextVar` (one context only).
     Contextvars,
+    /// The `contextlib` module providing `suppress` and
+    /// `AbstractContextManager`.
+    Contextlib,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -105,6 +109,7 @@ impl StandardLib {
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::OsPath => Some(Self::OsPath),
             StaticStrings::Contextvars => Some(Self::Contextvars),
+            StaticStrings::Contextlib => Some(Self::Contextlib),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -134,6 +139,7 @@ impl StandardLib {
             Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::OsPath => os_path::create_module(vm),
             Self::Contextvars => contextvars::create_module(vm),
+            Self::Contextlib => contextlib::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

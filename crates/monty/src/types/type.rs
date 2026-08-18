@@ -20,7 +20,7 @@ use crate::{
         long_int::INT_MAX_STR_DIGITS,
         property,
         str::StringRepr,
-        timedelta,
+        suppress, timedelta,
     },
     value::Value,
 };
@@ -243,6 +243,11 @@ pub enum Type {
     /// The `contextvars.Token` a `ContextVar.set()` returns.
     #[strum(serialize = "_contextvars.Token")]
     ContextToken,
+    /// `contextlib.suppress`. Bare rather than dotted because CPython's is a
+    /// pure-Python class, whose `tp_name` carries no module: its error messages
+    /// say `'suppress' object`, and only `repr(contextlib.suppress)` qualifies.
+    #[strum(serialize = "suppress")]
+    Suppress,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -534,6 +539,7 @@ impl Type {
             Self::Path => Path::init(vm, args),
             Self::Property => property::property_init(vm, args),
             Self::ContextVar => contextvars::init(vm, args),
+            Self::Suppress => suppress::init(vm, args),
 
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),

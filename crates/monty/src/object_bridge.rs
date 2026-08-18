@@ -612,6 +612,7 @@ impl MontyTypeExt for MontyType {
             Self::TypeAliasType => Some(Type::TypeAliasType),
             Self::ContextVar => Some(Type::ContextVar),
             Self::ContextToken => Some(Type::ContextToken),
+            Self::Suppress => Some(Type::Suppress),
         }
     }
 
@@ -711,6 +712,7 @@ impl MontyTypeExt for MontyType {
             Type::MissingType => Self::SpecialForm,
             Type::ContextVar => Self::ContextVar,
             Type::ContextToken => Self::ContextToken,
+            Type::Suppress => Self::Suppress,
         }
     }
 

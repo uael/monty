@@ -39,6 +39,7 @@ use crate::{
             allocate_char, allocate_string, concat_allocate_str, get_char_at_index, repeat_str, str_contains,
             string_repr_fmt,
         },
+        suppress,
     },
 };
 
@@ -519,6 +520,10 @@ impl<'h> PyTrait<'h> for Value {
                         // Other types don't typically have cycles, but handle gracefully
                         _ => Ok(f.write_str("...")?),
                     }
+                } else if matches!(vm.heap.get(*id), HeapData::Suppress(_)) {
+                    // Same reason as the branch below: the repr carries the
+                    // object's address.
+                    suppress::repr_fmt(*id, f)
                 } else if matches!(vm.heap.get(*id), HeapData::ContextVar(_) | HeapData::ContextToken(_)) {
                     // Same reason as the instance branch below: both reprs end in
                     // the object's address, which `PyTrait::py_repr_fmt` has no
@@ -1324,6 +1329,11 @@ impl<'h> PyTrait<'h> for Value {
                 let byte = get_byte_at_index(bytes, index).ok_or_else(ExcType::bytes_index_error)?;
                 Ok(Self::Int(i64::from(byte)))
             }
+            // `AbstractContextManager[T]` is a generic alias in CPython, which
+            // exists to be named as a base class. Monty has no alias object, so
+            // the subscript yields the base itself — the parameter is dropped
+            // rather than recorded (see `limitations/contextlib.md`).
+            Self::Marker(marker) if marker.0 == StaticStrings::AbstractContextManager => Ok(Self::Marker(*marker)),
             _ => Err(ExcType::type_error_not_sub(&self.py_type_name(vm))),
         }
     }
@@ -2424,7 +2434,8 @@ impl Marker {
     pub(crate) fn py_type(self) -> Type {
         match self.0 {
             StaticStrings::Stdout | StaticStrings::Stderr => Type::TextIOWrapper,
-            StaticStrings::UnionType => Type::Type,
+            // Both are classes rather than typing special forms.
+            StaticStrings::UnionType | StaticStrings::AbstractContextManager => Type::Type,
             StaticStrings::Missing => Type::MissingType,
             _ => Type::SpecialForm,
         }
@@ -2443,6 +2454,7 @@ impl Marker {
             StaticStrings::UnionType => f.write_str("<class 'typing.Union'>")?,
             // CPython appends the singleton's address; Monty never reveals one.
             StaticStrings::Missing => f.write_str("<dataclasses._MISSING_TYPE object>")?,
+            StaticStrings::AbstractContextManager => f.write_str("<class 'contextlib.AbstractContextManager'>")?,
             _ => write!(f, "typing.{s}")?,
         }
         Ok(())

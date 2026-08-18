@@ -10,6 +10,7 @@ and no way for sandboxed code to load additional modules.
 | -------------- | ---------------- |
 | `asyncio`      | ./asyncio.md     |
 | `collections`  | ./collections.md |
+| `contextlib`   | ./contextlib.md  |
 | `contextvars`  | ./contextvars.md |
 | `dataclasses`  | ./dataclasses.md |
 | `datetime`     | ./datetime.md    |
@@ -53,7 +54,7 @@ production sandboxes never see it.
 ## Notable modules NOT available
 
 Common modules that are *not* importable in Monty (non-exhaustive):
-`abc`, `argparse`, `array`, `base64`, `bisect`, `contextlib`, `copy`, `csv`,
+`abc`, `argparse`, `array`, `base64`, `bisect`, `copy`, `csv`,
 `ctypes`, `decimal`, `enum`, `fractions`, `functools`,
 `hashlib`, `heapq`, `hmac`, `http`, `inspect`, `io`,
 `logging`, `multiprocessing`, `operator`, `pickle`, `queue`, `random`,

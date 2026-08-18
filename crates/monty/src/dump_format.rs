@@ -196,7 +196,7 @@ mod tests {
         );
         assert_eq!(
             static_strings_fingerprint(),
-            0x27db_c6ca_580e_618f,
+            0xd3d2_94f1_682d_f079,
             "static strings changed for dump version {DUMP_VERSION}"
         );
         assert_eq!(

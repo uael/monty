@@ -27,7 +27,7 @@ use crate::{
         DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet,
         Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor, Module, NamedTuple,
         NamedTupleClass, OpenFile, Path, PyTrait, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice,
-        Str, StringIterator, SuperObject, Template, Tuple, TupleIterator, Type, TypeAliasType, UserProperty,
+        Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator, Type, TypeAliasType, UserProperty,
         callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, instance_subscript,
         list::ListIterator, str::allocate_string, timedelta, timezone,
     },
@@ -221,6 +221,8 @@ pub(crate) enum HeapData {
     ContextVar(ContextVar),
     /// The `contextvars.Token` a `ContextVar.set()` returns.
     ContextToken(ContextToken),
+    /// `contextlib.suppress`, holding the exception classes it swallows.
+    Suppress(Suppress),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -292,7 +294,9 @@ impl HeapData {
             // A context variable holds arbitrary values, and its token holds the
             // variable, so either can close a cycle.
             | Self::ContextVar(_)
-            | Self::ContextToken(_) => true,
+            | Self::ContextToken(_)
+            // Holds whatever it was constructed with, which may reach back.
+            | Self::Suppress(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -401,6 +405,7 @@ impl HeapData {
             Self::TypeAliasType(_) => Type::TypeAliasType,
             Self::ContextVar(_) => Type::ContextVar,
             Self::ContextToken(_) => Type::ContextToken,
+            Self::Suppress(_) => Type::Suppress,
         }
     }
 }
@@ -594,6 +599,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Generator($value) => $body,
             Self::ContextVar($value) => $body,
             Self::ContextToken($value) => $body,
+            Self::Suppress($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -1132,6 +1138,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Generator(value) => value.py_iter(self_id, vm),
             Self::ContextVar(value) => value.py_iter(self_id, vm),
             Self::ContextToken(value) => value.py_iter(self_id, vm),
+            Self::Suppress(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1198,6 +1205,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Generator(value) => value.py_next(self_id, vm),
             Self::ContextVar(value) => value.py_next(self_id, vm),
             Self::ContextToken(value) => value.py_next(self_id, vm),
+            Self::Suppress(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),

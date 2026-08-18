@@ -1086,6 +1086,16 @@ pub enum StaticStrings {
     /// The `contextvars.ContextVar` type.
     #[strum(serialize = "ContextVar")]
     ContextVarClass,
+
+    // ==========================
+    // `contextlib` module strings.
+    /// The `contextlib` module name.
+    Contextlib,
+    /// The `contextlib.suppress` context manager.
+    Suppress,
+    /// The `contextlib.AbstractContextManager` base.
+    #[strum(serialize = "AbstractContextManager")]
+    AbstractContextManager,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

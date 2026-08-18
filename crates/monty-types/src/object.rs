@@ -864,6 +864,10 @@ pub enum MontyType {
     /// The `contextvars.Token` a `ContextVar.set()` returns.
     #[strum(serialize = "_contextvars.Token")]
     ContextToken,
+    /// `contextlib.suppress`. Bare, like CPython's `tp_name` for a
+    /// pure-Python class.
+    #[strum(serialize = "suppress")]
+    Suppress,
 }
 
 impl fmt::Display for MontyType {

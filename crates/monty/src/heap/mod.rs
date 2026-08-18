@@ -37,7 +37,7 @@ use crate::{
         DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet,
         Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module, NamedTuple, NamedTupleClass,
         OpenFile, Path, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator,
-        SuperObject, Template, TimeZone, Tuple, TupleIterator, TypeAliasType, UserProperty,
+        SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator, TypeAliasType, UserProperty,
         callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator, timedelta,
         timezone,
     },
@@ -282,6 +282,7 @@ pub enum HeapReadOutput<'a> {
     Super(HeapRead<'a, SuperObject>),
     ContextVar(HeapRead<'a, ContextVar>),
     ContextToken(HeapRead<'a, ContextToken>),
+    Suppress(HeapRead<'a, Suppress>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -722,6 +723,7 @@ impl<'a> HeapPtr<'a> {
             HeapData::TypeAliasType(alias) => HeapReadOutput::TypeAliasType(heap_read(base, alias, readers)),
             HeapData::ContextVar(var) => HeapReadOutput::ContextVar(heap_read(base, var, readers)),
             HeapData::ContextToken(token) => HeapReadOutput::ContextToken(heap_read(base, token, readers)),
+            HeapData::Suppress(suppress) => HeapReadOutput::Suppress(heap_read(base, suppress, readers)),
         }
     }
 }
@@ -1904,6 +1906,11 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(*id);
             }
         }),
+        HeapData::Suppress(suppress) => suppress.for_each_owned_value(|value| {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }),
         // Leaf types with no heap references
         _ => {}
     }
@@ -2022,6 +2029,7 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::TypeAliasType(alias) => alias.py_dec_ref_ids(stack),
         HeapData::ContextVar(var) => var.py_dec_ref_ids(stack),
         HeapData::ContextToken(token) => token.py_dec_ref_ids(stack),
+        HeapData::Suppress(suppress) => suppress.py_dec_ref_ids(stack),
         // other types have no nested heap references
         _ => {}
     }

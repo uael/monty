@@ -1,6 +1,9 @@
 //! Exception handling helpers for the VM.
 
-use std::fmt::{self, Write};
+use std::{
+    fmt::{self, Write},
+    mem::ManuallyDrop,
+};
 
 use super::VM;
 use crate::{
@@ -746,6 +749,19 @@ impl VM<'_> {
                 .exc_matches_handler(exception, single)
                 .ok_or_else(ExcType::except_invalid_type_error),
         }
+    }
+
+    /// Whether the exception object at `exc` is caught by the class `handler`,
+    /// the same rule an `except` clause applies, so a `contextlib.suppress`
+    /// swallows what the equivalent handler would catch, sandbox-defined
+    /// exception classes included.
+    ///
+    /// Takes the raised object by id because the unwinding machinery owns it:
+    /// the `Value` built here never reaches a drop, so it takes no reference of
+    /// its own.
+    pub(crate) fn exc_id_matches_class(&self, exc: HeapId, handler: &Value) -> Option<bool> {
+        let exception = ManuallyDrop::new(Value::Ref(exc));
+        self.exc_matches_handler(&exception, handler)
     }
 
     /// Returns whether the raised `exception` is caught by the single class
