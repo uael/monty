@@ -11,6 +11,7 @@ and no way for sandboxed code to load additional modules.
 | `asyncio`      | ./asyncio.md     |
 | `builtins`     | ./builtins.md    |
 | `collections`  | ./collections.md |
+| `collections.abc` | ./typing.md   |
 | `contextlib`   | ./contextlib.md  |
 | `contextvars`  | ./contextvars.md |
 | `dataclasses`  | ./dataclasses.md |
@@ -26,6 +27,7 @@ and no way for sandboxed code to load additional modules.
 | `re`           | ./re.md          |
 | `string.templatelib` | ./string_templatelib.md |
 | `sys`          | ./sys.md         |
+| `types`        | ./typing.md      |
 | `typing`       | ./typing.md      |
 | `unicodedata`  | ./unicodedata.md |
 
@@ -41,14 +43,9 @@ is rejected at compile time because `string` itself is not importable here, and
 points at `import string.templatelib as tl` or
 `from string.templatelib import Template`, which name the submodule directly.
 The `string` package has no other importable submodule (see
-./string_templatelib.md).
-
-**Each import builds a fresh module object.** There is no `sys.modules` cache,
-so `import sys` twice, or `import os.path` alongside `import os.path as p`,
-yields distinct objects: `sys is s` and `os.path is p` are `False` where
-CPython says `True`. Module attributes are all read-only builtins, so the
-copies never disagree about a value; only identity and `is` comparisons
-diverge.
+./string_templatelib.md). `collections.abc` is registered the same way, so
+`from collections.abc import Mapping` and `import collections.abc as abc` work
+while the unaliased `import collections.abc` is rejected.
 
 Each module is built once and cached, as CPython's `sys.modules` does, so every
 import of a name hands back that one object: `import sys` twice, or
@@ -88,7 +85,8 @@ runtime; see each module's page for the specifics.
 
 ## Modules the type checker resolves but the runtime does not
 
-`abc`, `types`, `typing_extensions`, `_collections_abc` and `_typeshed` back
+`abc`, `typing_extensions`, `_collections_abc`, `builtins` and `_typeshed` back
 the vendored stubs (e.g. `@abstractmethod` on protocol members), so they have
 to resolve during type checking. Importing them therefore type-checks clean but
-still raises `ModuleNotFoundError` at runtime.
+still raises `ModuleNotFoundError` at runtime — which for `builtins` also means
+`vars(builtins)` has no way to be written.
