@@ -1,24 +1,98 @@
-# `typing` module
+# `typing` module and runtime type forms
 
-`typing` exists so type-annotated code can `import` it without
-`ModuleNotFoundError`. **No runtime type checking happens.** The forms are
-inert marker objects; subscripting them (`list[int]`, `Optional[str]`,
-`Union[int, str]`) returns a placeholder value and validates nothing.
+**No runtime type checking happens.** What does exist is the object an
+annotation *evaluates to*: `list[int]` builds a real `types.GenericAlias`,
+`int | str` a real `typing.Union`, and `typing.get_origin`/`get_args` take
+either apart. Everything else in `typing` is an inert marker that exists so
+annotated code can `import` it.
+
+## Runtime type forms
+
+`types.GenericAlias` — subscripting a class builds one, and it behaves as in
+CPython: `__origin__`, `__args__`, `repr`, equality, hashing, calling through
+to the origin (`list[int]() == []`), attribute fall-through to the origin
+(`list[int].__name__ == 'list'`), and use as a base class (`class B(list[int])`
+inherits from `list`). Only the classes CPython parameterizes are
+subscriptable: `list`, `dict`, `tuple`, `set`, `frozenset`, `type`,
+`enumerate`, `staticmethod`, `classmethod`, `collections.deque`,
+`collections.defaultdict`, `collections.Counter`, `re.Pattern`, `re.Match`,
+plus every `collections.abc` class. Anything else raises `TypeError: type 'X'
+is not subscriptable`, as CPython does.
+
+A class defines `__class_getitem__` to be subscriptable, and Monty treats it
+as the implicit classmethod CPython does: a plain function in the body
+receives the class before the subscript.
+
+`typing.Union` — `int | str`. As in CPython 3.14, `types.UnionType` *is*
+`typing.Union`, so `type(int | str) is types.UnionType` holds. Members are
+flattened, deduplicated and order-preserving, `None` normalizes to `NoneType`,
+and a one-member union collapses to the member (`int | int is int`).
+`isinstance(x, int | str)` works, equality and hashing ignore member order,
+and `typing.Union[...]` / `typing.Optional[X]` spell out the same objects.
+
+`typing.get_origin` / `typing.get_args` read both forms and return `None` /
+`()` for anything else, matching CPython.
+
+Divergences:
+
+- A **sandbox-defined class inside a type form prints its bare name**
+  (`list[Foo]`), where CPython qualifies it with its module
+  (`list[__main__.Foo]`). Monty gives sandbox classes no `__module__`. The
+  same applies to a sandbox function used as an argument, which prints its
+  `repr` rather than a qualified name; a *builtin* function prints bare
+  (`list[len]`) exactly as CPython does.
+- `__mro_entries__` is applied by class creation but not exposed as a method,
+  so `list[int].__mro_entries__(())` raises `AttributeError` (CPython returns
+  `(list,)`).
+- `list[int][str]` (substituting into an alias) is not supported.
+- `types.GenericAlias(list, (int,))` — the constructor — is not supported;
+  build one by subscripting.
+- `type(typing.Union)` is `type`, where CPython reports its metaclass.
 
 ## Names defined
 
 `Any`, `Optional`, `Union`, `List`, `Dict`, `Tuple`, `Set`, `FrozenSet`,
 `Callable`, `Type`, `Sequence`, `Mapping`, `Iterable`, `Iterator`,
 `Generator`, `ClassVar`, `Final`, `Literal`, `TypeVar`, `Generic`,
-`Protocol`, `Annotated`, `Self`, `Never`, `NoReturn`, `TYPE_CHECKING`.
+`Protocol`, `Annotated`, `Self`, `Never`, `NoReturn`, `TYPE_CHECKING`,
+`get_origin`, `get_args`, `overload`, `dataclass_transform`.
 
 `TYPE_CHECKING` is `False`, as in CPython at runtime.
 
+`overload` returns the same refusing stub CPython's `_overload_dummy` is, so a
+series of `@overload` definitions followed by a plain one leaves the plain one
+bound and calling an unimplemented stub raises. `dataclass_transform` accepts
+and ignores every keyword, returning an identity decorator: only a type checker
+reads it.
+
+`Literal`, `ClassVar`, `Final` and `Annotated` are subscriptable, and answer
+`get_origin` with the form itself and `get_args` with the subscript, exactly as
+CPython does. Every remaining name in the first list is an inert marker:
+**subscripting one raises `TypeError`**. In particular the deprecated aliases
+`typing.List[int]`, `typing.Dict[str, int]` and `typing.Callable[[], bool]` do
+not work — CPython gives those the *class* as their origin while still printing
+the `typing.` name, and one alias object cannot do both — so use the builtin
+generics and `collections.abc` instead.
+
+## The `types` module
+
+`types` exports the runtime type objects Monty can name exactly: `UnionType`,
+`GenericAlias`, `NoneType`, `EllipsisType`, `NotImplementedType`, `ModuleType`
+and `CellType`. Each *is* the type a value of that shape reports, so
+`isinstance(None, types.NoneType)` holds.
+
+`FunctionType`, `MethodType`, `BuiltinFunctionType`, `CoroutineType`,
+`GeneratorType`, `SimpleNamespace`, `MappingProxyType`, `CodeType`,
+`TracebackType` and `FrameType` are **absent** rather than wrong: Monty reports
+one `function` type for plain functions, closures and bound methods alike, and
+one `coroutine` type for coroutines and futures, so those names could not tell
+apart what CPython tells apart.
+
 ## Not implemented
 
-- `get_type_hints`, `get_args`, `get_origin`, `cast`, `assert_type`,
-  `assert_never`, `overload`, `final`, `runtime_checkable`, `NewType`,
-  `NamedTuple`, `TypedDict`, `dataclass_transform`, `ParamSpec`,
+- `get_type_hints`, `cast`, `assert_type`,
+  `assert_never`, `final`, `NewType`,
+  `NamedTuple`, `TypedDict`, `ParamSpec`,
   `Concatenate`, `Unpack`, `TypeAlias`, `LiteralString`.
 - `typing.TypeAliasType` is **not** exported by this module even though the
   type exists: a PEP 695 `type X = ...` statement builds one (see below), but
@@ -90,12 +164,10 @@ This is a known temporary divergence; see `class__annotations.py`.
   Monty when the calling code uses `from __future__ import annotations`
   (PEP 563), which Monty's behaviour is otherwise equivalent to, except that
   Monty stringizes whether or not that import is present.
-- The blocker is that Monty has no generic types: `list[int]` and
-  `dict[str, int]` raise `TypeError: 'type' object is not subscriptable`, and
-  `int | None` raises `TypeError: unsupported operand type(s) for |: 'type'
-  and 'NoneType'`, so evaluated annotations would fail on the most common
-  forms. Runtime `types.GenericAlias` and `|` unions are the prerequisite for
-  matching PEP 649.
+- The prerequisite for matching PEP 649 — runtime `types.GenericAlias` and `|`
+  unions, so that `list[int]` and `int | None` have values — now exists; the
+  migration itself does not. Annotations are still stringized and never
+  evaluated.
 - **Treat the values as provisional.** Code reading `__annotations__` sees
   strings today and would see type objects after a PEP 649 migration; the
   *keys* and their order are stable either way.

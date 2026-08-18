@@ -73,6 +73,27 @@ impl Builtins {
         }
     }
 
+    /// Whether `X[...]` builds a [`types.GenericAlias`](Type::GenericAlias).
+    ///
+    /// CPython gives only some builtin classes a `__class_getitem__`, and four
+    /// of them (`type`, `classmethod`, `staticmethod`, `enumerate`) reach Monty
+    /// as builtin *functions* rather than [`Type`] values, so the two halves of
+    /// the answer live here together. An exception type is never generic.
+    #[must_use]
+    pub(crate) const fn is_subscriptable_class(self) -> bool {
+        match self {
+            Self::Type(t) => t.is_subscriptable_class(),
+            Self::Function(f) => matches!(
+                f,
+                BuiltinsFunctions::Type
+                    | BuiltinsFunctions::Classmethod
+                    | BuiltinsFunctions::Staticmethod
+                    | BuiltinsFunctions::Enumerate
+            ),
+            Self::ExcType(_) => false,
+        }
+    }
+
     /// Calls this builtin, allowing builtins that need host involvement to yield.
     ///
     /// Most builtins complete synchronously and produce a [`CallResult::Value`].

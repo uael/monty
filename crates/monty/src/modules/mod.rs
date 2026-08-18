@@ -35,6 +35,7 @@ pub(crate) mod pathlib;
 pub(crate) mod re;
 pub(crate) mod string_templatelib;
 pub(crate) mod sys;
+pub(crate) mod types_module;
 pub(crate) mod typing;
 pub(crate) mod unicodedata;
 
@@ -87,6 +88,9 @@ pub(crate) enum StandardLib {
     Builtins,
     /// The `functools` module providing `partialmethod`.
     Functools,
+    /// The `types` module exposing the runtime type objects Monty can name
+    /// exactly, `UnionType` and `GenericAlias` among them.
+    Types,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -122,6 +126,7 @@ impl StandardLib {
             StaticStrings::Operator => Some(Self::Operator),
             StaticStrings::Builtins => Some(Self::Builtins),
             StaticStrings::Functools => Some(Self::Functools),
+            StaticStrings::TypesModule => Some(Self::Types),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -155,6 +160,7 @@ impl StandardLib {
             Self::Operator => operator::create_module(vm),
             Self::Builtins => builtins::create_module(vm),
             Self::Functools => functools::create_module(vm),
+            Self::Types => types_module::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }
@@ -174,6 +180,7 @@ pub(crate) enum ModuleFunctions {
     Unicodedata(unicodedata::UnicodedataFunctions),
     Itertools(itertools::ItertoolsFunctions),
     Dataclasses(dataclasses::DataclassesFunctions),
+    Typing(typing::TypingFunctions),
     /// `gc` module functions — only present under the `test-hooks` feature.
     /// See [`gc`] for why it is gated; as in [`StandardLib`], the gated block
     /// goes last and new variants are appended ahead of it.
@@ -200,6 +207,7 @@ impl fmt::Display for ModuleFunctions {
             Self::Unicodedata(func) => write!(f, "{func}"),
             Self::Itertools(func) => write!(f, "{func}"),
             Self::Dataclasses(func) => write!(f, "{func}"),
+            Self::Typing(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
             Self::Gc(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
@@ -225,6 +233,7 @@ impl ModuleFunctions {
             Self::Unicodedata(functions) => unicodedata::call(vm, functions, args).map(CallResult::Value),
             Self::Itertools(functions) => itertools::call(vm, functions, args).map(CallResult::Value),
             Self::Dataclasses(functions) => dataclasses::call(vm, functions, args).map(CallResult::Value),
+            Self::Typing(functions) => typing::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]
             Self::Gc(functions) => gc::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]

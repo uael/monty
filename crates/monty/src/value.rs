@@ -27,6 +27,7 @@ use crate::{
         Bytes, BytesIterator, CmpOrder, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
         class_getattr, contextvars,
+        generic_alias::{is_type_form, subscript_type_form, union_from_members, union_of},
         instance::{instance_dataclass_eq, instance_getattr, instance_repr_fmt, instance_str, instance_user_eq},
         instance_bool, instance_delattr, instance_delitem, instance_setattr, instance_setitem,
         long_int::{
@@ -1179,6 +1180,11 @@ impl<'h> PyTrait<'h> for Value {
             Ok(Some(Self::Bool(*lhs || *rhs)))
         } else if let (Some(lhs), Some(rhs)) = (immediate_int(self), immediate_int(other)) {
             Ok(Some(Self::Int(lhs | rhs)))
+        } else if is_type_form(self, vm) && is_type_form(other, vm) {
+            // `int | str`, and every mix of class, alias, union and alias
+            // target. Checked before the heap dispatch below so a class (which
+            // has no `|` of its own) reaches it too.
+            union_of(self.clone_with_heap(vm.heap), other.clone_with_heap(vm.heap), vm).map(Some)
         } else if let Self::Ref(id) = self {
             vm.heap.read(*id).py_or_impl(other, vm, Some(*id))
         } else {
@@ -1334,6 +1340,40 @@ impl<'h> PyTrait<'h> for Value {
             // the subscript yields the base itself — the parameter is dropped
             // rather than recorded (see `limitations/contextlib.md`).
             Self::Marker(marker) if marker.0 == StaticStrings::AbstractContextManager => Ok(Self::Marker(*marker)),
+            // `typing.Optional[X]` is the spelled-out `X | None`.
+            Self::Marker(Marker(StaticStrings::Optional)) => {
+                union_from_members(vec![key.clone_with_heap(vm.heap), Self::None], vm)
+            }
+            // The special forms that take a subscript build an alias over the
+            // form itself, which is what `get_origin` reports for them. The
+            // deprecated aliases (`typing.List`, `typing.Dict`, ...) are not
+            // here: CPython gives those the *class* as their origin while still
+            // printing the `typing.` name, which one alias cannot do both of.
+            Self::Marker(Marker(
+                StaticStrings::Literal | StaticStrings::ClassVar | StaticStrings::FinalType | StaticStrings::Annotated,
+            )) => Ok(subscript_type_form(self.clone_with_heap(vm.heap), key, vm)),
+            // `typing.Union[int, str]` is the spelled-out form of `int | str`.
+            Self::Builtin(Builtins::Type(Type::Union)) => match key {
+                Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Tuple(_)) => {
+                    let members = {
+                        let HeapData::Tuple(t) = vm.heap.get(*id) else {
+                            unreachable!("checked above");
+                        };
+                        t.as_slice()
+                            .iter()
+                            .map(|v| v.clone_with_heap(vm.heap))
+                            .collect::<Vec<_>>()
+                    };
+                    union_from_members(members, vm)
+                }
+                single => union_from_members(vec![single.clone_with_heap(vm.heap)], vm),
+            },
+            Self::Builtin(b) if b.is_subscriptable_class() => {
+                Ok(subscript_type_form(self.clone_with_heap(vm.heap), key, vm))
+            }
+            // A builtin type or exception type names itself, not its metaclass.
+            Self::Builtin(Builtins::Type(t)) => Err(ExcType::type_error_not_sub_class(t.name(vm.heap, vm.interns))),
+            Self::Builtin(Builtins::ExcType(e)) => Err(ExcType::type_error_not_sub_class(<&str>::from(*e))),
             _ => Err(ExcType::type_error_not_sub(&self.py_type_name(vm))),
         }
     }

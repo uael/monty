@@ -6,8 +6,8 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
-    heap::{HeapData, HeapId, HeapRead, HeapReadOutput},
-    types::{PyTrait, Tuple, Type, class_is_subclass, instance::instance_exc_base},
+    heap::{HeapData, HeapId, HeapReadOutput},
+    types::{PyTrait, Type, class_is_subclass, generic_alias::union_arg_values, instance::instance_exc_base},
     value::Value,
 };
 
@@ -29,8 +29,9 @@ pub fn builtin_isinstance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> 
 /// - Exception types and their hierarchy: `isinstance(err, LookupError)`
 /// - User-defined classes: `isinstance(obj, Foo)`, walking the instance's base
 ///   chain, so a subclass instance matches its bases
+/// - `typing.Union` values: `isinstance(x, int | str)`
 /// - Tuples (possibly nested) of the above
-fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
+pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match classinfo {
         // `type` asks whether the object *is* a class, not what class it is.
         Value::Builtin(Builtins::Function(BuiltinsFunctions::Type)) => Ok(is_class_object(obj, vm)),
@@ -50,11 +51,35 @@ fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResul
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::NamedTupleClass(_)) => {
             Ok(instance_of_namedtuple_class(obj, *id, vm))
         }
+        // A union matches when any member does; `int | str` is exactly the
+        // tuple `(int, str)` as far as `isinstance` is concerned.
+        Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::UnionType(_)) => {
+            let members = union_arg_values(*id, vm);
+            defer_drop!(members, vm);
+            any_entry_matches(obj, members, vm)
+        }
         Value::Ref(id) if let HeapReadOutput::Tuple(tuple) = vm.heap.read(*id) => {
-            isinstance_check_tuple(obj, &tuple, vm)
+            // Cloned out first: the recursive walk below must not run while a
+            // read handle on the tuple is live.
+            let entries = tuple.cloned_items(vm)?;
+            defer_drop!(entries, vm);
+            any_entry_matches(obj, entries, vm)
         }
         _ => Err(ExcType::isinstance_arg2_error()),
     }
+}
+
+/// Whether any entry of a tuple or union of classinfo matches, under one
+/// recursion level so a nested chain cannot overflow the stack.
+fn any_entry_matches(obj: &Value, entries: &[Value], vm: &mut VM<'_>) -> RunResult<bool> {
+    let mut guard = vm.recursion_guard()?;
+    let vm = &mut *guard;
+    for entry in entries {
+        if isinstance_check(obj, entry, vm)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `obj` is a class object, which is what `isinstance(x, type)` asks.
@@ -104,42 +129,4 @@ fn exception_instance_of(obj: &Value, handler_type: ExcType, vm: &VM<'_>) -> boo
 /// carry no `class_id`, so they never match a factory class.
 fn instance_of_namedtuple_class(obj: &Value, class_id: HeapId, vm: &VM<'_>) -> bool {
     matches!(obj, Value::Ref(obj_id) if matches!(vm.heap.get(*obj_id), HeapData::NamedTuple(nt) if nt.class_id() == Some(class_id)))
-}
-
-/// Recursively walks a tuple of classinfo entries.
-fn isinstance_check_tuple<'h>(obj: &Value, tuple: &HeapRead<'h, Tuple>, vm: &mut VM<'h>) -> RunResult<bool> {
-    let len = tuple.get(vm.heap).as_slice().len();
-    let mut guard = vm.recursion_guard()?;
-    let vm = &mut *guard;
-    for i in 0..len {
-        match &tuple.get(vm.heap).as_slice()[i] {
-            Value::Builtin(Builtins::Type(t)) => {
-                if obj.py_type(vm).is_instance_of(*t) {
-                    return Ok(true);
-                }
-            }
-            Value::Builtin(Builtins::ExcType(exc)) => {
-                if exception_instance_of(obj, *exc, vm) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => {
-                if instance_of_class(obj, *id, vm) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::NamedTupleClass(_)) => {
-                if instance_of_namedtuple_class(obj, *id, vm) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(nested_id) if let HeapReadOutput::Tuple(nested) = vm.heap.read(*nested_id) => {
-                if isinstance_check_tuple(obj, &nested, vm)? {
-                    return Ok(true);
-                }
-            }
-            _ => return Err(ExcType::isinstance_arg2_error()),
-        }
-    }
-    Ok(false)
 }

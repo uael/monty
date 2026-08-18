@@ -304,6 +304,14 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Class> {
         Ok(write!(f, "<class '{}'>", self.get(vm.heap).name.as_str(vm.interns))?)
     }
 
+    /// A class object is not a container: the trait default would name the
+    /// metaclass (`'type' object`), so raise CPython's class-shaped wording.
+    fn py_getitem(&self, _key: &Value, vm: &mut VM<'h>) -> RunResult<Value> {
+        Err(ExcType::type_error_not_sub_class(
+            self.get(vm.heap).name.as_str(vm.interns),
+        ))
+    }
+
     fn py_call_attr(
         &mut self,
         self_id: HeapId,

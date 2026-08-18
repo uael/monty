@@ -1125,6 +1125,64 @@ pub enum StaticStrings {
     Partialmethod,
     /// `partialmethod.keywords` attribute.
     Keywords,
+
+    // ==========================
+    // Runtime type forms: the `types` module, and the `typing` functions that
+    // read one. Appended at the enum end rather than beside the earlier typing
+    // block: discriminants are serialized `StringId`s, so mid-enum insertion
+    // would shift every later id.
+    /// Module name for `from types import ...`.
+    #[strum(serialize = "types")]
+    TypesModule,
+    /// `types.UnionType`. Distinct from [`Self::UnionType`], which is the
+    /// string `"Union"` the same object goes by in `typing`.
+    #[strum(serialize = "UnionType")]
+    UnionTypeClass,
+    /// `types.GenericAlias`, the type of `list[int]`. Distinct from
+    /// [`Self::TypeAliasType`]'s PEP 695 alias.
+    #[strum(serialize = "GenericAlias")]
+    GenericAliasClass,
+    /// `types.NoneType`.
+    #[strum(serialize = "NoneType")]
+    NoneTypeClass,
+    /// `types.EllipsisType`.
+    #[strum(serialize = "EllipsisType")]
+    EllipsisTypeClass,
+    /// `types.NotImplementedType`. Distinct from [`Self::NotImplementedRepr`],
+    /// which is the singleton's own name.
+    #[strum(serialize = "NotImplementedType")]
+    NotImplementedTypeClass,
+    /// `types.ModuleType`.
+    #[strum(serialize = "ModuleType")]
+    ModuleTypeClass,
+    /// `types.CellType`, the closure cell.
+    #[strum(serialize = "CellType")]
+    CellTypeClass,
+    /// `typing.get_origin()`.
+    #[strum(serialize = "get_origin")]
+    GetOrigin,
+    /// `typing.get_args()`.
+    #[strum(serialize = "get_args")]
+    GetArgs,
+    /// `typing.overload()`.
+    #[strum(serialize = "overload")]
+    Overload,
+    /// `typing.dataclass_transform()`.
+    #[strum(serialize = "dataclass_transform")]
+    DataclassTransform,
+    /// `typing.runtime_checkable()`.
+    #[strum(serialize = "runtime_checkable")]
+    RuntimeCheckable,
+    /// `__origin__`, the class a `types.GenericAlias` subscripted.
+    #[strum(serialize = "__origin__")]
+    DunderOrigin,
+    /// `__args__`, the subscript of a `types.GenericAlias` or the members of a
+    /// `typing.Union`.
+    #[strum(serialize = "__args__")]
+    DunderArgs,
+    /// `__class_getitem__`, the hook a class defines to be subscriptable.
+    #[strum(serialize = "__class_getitem__")]
+    DunderClassGetitem,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

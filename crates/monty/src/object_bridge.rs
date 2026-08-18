@@ -747,6 +747,10 @@ impl MontyTypeExt for MontyType {
             Type::AttrGetter => Self::AttrGetter,
             Type::ItertoolsAccumulate => Self::ItertoolsAccumulate,
             Type::PartialMethod => Self::PartialMethod,
+            // The runtime type forms have no host counterpart and degrade to
+            // `type`, the family they belong to: a value of one of them crosses
+            // as its `repr` (`list[int]`, `int | str`), like a class object.
+            Type::GenericAlias | Type::Union => Self::Type,
         }
     }
 

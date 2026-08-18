@@ -258,6 +258,16 @@ pub enum Type {
     /// `tp_name` carries no module and its error messages say `'partialmethod'`.
     #[strum(serialize = "partialmethod")]
     PartialMethod,
+    /// `types.GenericAlias`, the type of `list[int]` and of every subscripted
+    /// class.
+    #[strum(serialize = "types.GenericAlias")]
+    GenericAlias,
+    /// `typing.Union`, the type of `int | str`. CPython 3.14 merged
+    /// `types.UnionType` into it, so both names denote this one type; it is
+    /// also the value both module attributes hold, which is what makes
+    /// `get_origin(int | str) is UnionType` true.
+    #[strum(serialize = "typing.Union")]
+    Union,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -370,6 +380,32 @@ impl Type {
             "property" => Some(Self::Property),
             _ => None,
         }
+    }
+
+    /// Whether `T[...]` builds a [`types.GenericAlias`](Self::GenericAlias).
+    ///
+    /// CPython gives only some builtin classes a `__class_getitem__`; the rest
+    /// raise, which is why this is a list and not "every type". Keep it to the
+    /// types CPython actually parameterizes, so `str[int]` keeps failing here
+    /// as it does there.
+    #[must_use]
+    pub(crate) const fn is_subscriptable_class(self) -> bool {
+        matches!(
+            self,
+            Self::List
+                | Self::Dict
+                | Self::Tuple
+                | Self::Set
+                | Self::FrozenSet
+                | Self::Type
+                | Self::Deque
+                | Self::DefaultDict
+                | Self::Counter
+                | Self::RePattern
+                | Self::ReMatch
+                | Self::StaticMethod
+                | Self::ClassMethod
+        )
     }
 
     /// Returns whether this is one of Python's concrete iterator types.

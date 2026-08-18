@@ -129,6 +129,17 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::TypeError, format!("'{type_}' object is not subscriptable")).into()
     }
 
+    /// Creates the TypeError for subscripting a *class* that is not generic,
+    /// e.g. `int[1]` or `Foo[int]`.
+    ///
+    /// CPython words this one after the class rather than after its metaclass
+    /// (`type 'int' is not subscriptable`, never `'type' object is not
+    /// subscriptable`), so the reader sees the name they wrote.
+    #[must_use]
+    fn type_error_not_sub_class(name: impl Display) -> RunError {
+        SimpleException::new_msg(ExcType::TypeError, format!("type '{name}' is not subscriptable")).into()
+    }
+
     /// Creates the TypeError for an ordering comparison (`<`, `<=`, `>`, `>=`)
     /// between values whose types define no ordering, e.g. `1 < 'a'` or two
     /// instances of a user class without comparison dunders.

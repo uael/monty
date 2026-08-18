@@ -25,11 +25,12 @@ use crate::{
     types::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
-        FrozenSet, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor, Module,
-        NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range, RangeIterator, ReMatch, RePattern,
-        Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator, Type,
-        TypeAliasType, UserProperty, callable_iterator::CallableIterator, date, datetime, deque::DequeIterator,
-        instance_subscript, list::ListIterator, str::allocate_string, timedelta, timezone,
+        FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, MethodDescriptor,
+        Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range, RangeIterator, ReMatch,
+        RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator,
+        Type, TypeAliasType, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
+        deque::DequeIterator, generic_alias::class_subscript, instance_subscript, list::ListIterator,
+        str::allocate_string, timedelta, timezone,
     },
     value::{EitherStr, Value},
 };
@@ -227,6 +228,12 @@ pub(crate) enum HeapData {
     AttrGetter(AttrGetter),
     /// `functools.partialmethod`, holding the arguments it supplies.
     PartialMethod(Box<PartialMethod>),
+    /// `types.GenericAlias`: the value of `list[int]` and of any subscripted
+    /// class.
+    GenericAlias(GenericAlias),
+    /// `typing.Union` (CPython 3.14's `types.UnionType`): the value of
+    /// `int | str`.
+    UnionType(UnionType),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -302,6 +309,10 @@ impl HeapData {
             // Both hold whatever they were constructed with, which may reach back.
             | Self::Suppress(_)
             | Self::PartialMethod(_) => true,
+            // A type form owns its origin and its argument tuple, either of
+            // which can reach back through an alias's memoized value.
+            | Self::GenericAlias(_)
+            | Self::UnionType(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -417,6 +428,8 @@ impl HeapData {
             Self::Suppress(_) => Type::Suppress,
             Self::AttrGetter(_) => Type::AttrGetter,
             Self::PartialMethod(_) => Type::PartialMethod,
+            Self::GenericAlias(_) => Type::GenericAlias,
+            Self::UnionType(_) => Type::Union,
         }
     }
 }
@@ -613,6 +626,8 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Suppress($value) => $body,
             Self::AttrGetter($value) => $body,
             Self::PartialMethod($value) => $body,
+            Self::GenericAlias($value) => $body,
+            Self::UnionType($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -640,6 +655,11 @@ pub(crate) fn heap_subscript(id: HeapId, key: &Value, vm: &mut VM<'_>) -> RunRes
     // same HeapId route around the read-only trait.
     if matches!(vm.heap.get(id), HeapData::Instance(_)) {
         return instance_subscript(id, key, vm);
+    }
+    // `Foo[int]` dispatches a class-defined `__class_getitem__`, which re-enters
+    // the VM for the same reason.
+    if matches!(vm.heap.get(id), HeapData::Class(_)) {
+        return class_subscript(id, key, vm);
     }
     if matches!(vm.heap.get(id), HeapData::Dict(d) if d.is_defaultdict()) {
         // The read handle is scoped to the lookup: `defaultdict_missing` runs the
@@ -1154,6 +1174,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Suppress(value) => value.py_iter(self_id, vm),
             Self::AttrGetter(value) => value.py_iter(self_id, vm),
             Self::PartialMethod(value) => value.py_iter(self_id, vm),
+            Self::GenericAlias(value) => value.py_iter(self_id, vm),
+            Self::UnionType(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1223,6 +1245,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Suppress(value) => value.py_next(self_id, vm),
             Self::AttrGetter(value) => value.py_next(self_id, vm),
             Self::PartialMethod(value) => value.py_next(self_id, vm),
+            Self::GenericAlias(value) => value.py_next(self_id, vm),
+            Self::UnionType(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),

@@ -19,6 +19,7 @@ pub mod dict_view;
 pub mod ext_function;
 pub mod file;
 pub mod generator;
+pub mod generic_alias;
 pub mod instance;
 pub mod iter;
 pub mod itertools;
@@ -55,6 +56,7 @@ pub(crate) use dict::{Dict, DictItemIterator, DictKeyIterator, DictValueIterator
 pub(crate) use dict_view::{DictItemsView, DictKeysView, DictValuesView};
 pub(crate) use ext_function::ExtFunction;
 pub(crate) use file::OpenFile;
+pub(crate) use generic_alias::{GenericAlias, UnionType};
 pub(crate) use instance::{
     BoundMethod, Instance, instance_bool, instance_call, instance_delattr, instance_delitem, instance_len,
     instance_setattr, instance_setitem, instance_subscript,

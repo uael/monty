@@ -545,6 +545,14 @@ impl VM<'_> {
             HeapData::AttrGetter(_) => return attrgetter::call(heap_id, self, args).map(CallResult::Value),
             // Likewise: applying a partialmethod calls the function it wraps.
             HeapData::PartialMethod(_) => return partialmethod::call(heap_id, self, args).map(CallResult::Value),
+            // A generic alias is a call-through wrapper: `list[int]()` builds a
+            // plain list, the parameter being for the type checker alone.
+            HeapData::GenericAlias(alias) => {
+                let origin = alias.origin().clone_with_heap(self);
+                let this = self;
+                defer_drop!(origin, this);
+                return this.call_function(origin, args);
+            }
             _ => {
                 // Coupling check: dispatch rejected this Ref, so the heap-side
                 // callability predicate must agree (see `HeapData::is_callable`).

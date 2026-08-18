@@ -53,6 +53,7 @@ extend-exclude = [
 "crates/monty/test_cases/tstring__all.py" = "py314"
 # PEP 695 `type X = ...` and type parameter lists.
 "crates/monty/test_cases/typealias__pep695.py" = "py312"
+"crates/monty/test_cases/typing__runtime_types.py" = "py312"
 
 [tool.uv]
 # this is a monorepo without a root package

@@ -109,6 +109,23 @@ try:
 except TypeError as exc:
     assert str(exc) == "'Foo' object does not support item assignment"
 
+# === subscripting a class object names the class, not its metaclass ===
+try:
+    Foo[0]
+    assert False, 'expected class subscript to fail'
+except TypeError as exc:
+    assert str(exc) == "type 'Foo' is not subscriptable"
+try:
+    int[0]
+    assert False, 'expected builtin-type subscript to fail'
+except TypeError as exc:
+    assert str(exc) == "type 'int' is not subscriptable"
+try:
+    ValueError[0]
+    assert False, 'expected exception-type subscript to fail'
+except TypeError as exc:
+    assert str(exc) == "type 'ValueError' is not subscriptable"
+
 # === calling an instance ===
 try:
     f()

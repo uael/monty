@@ -1,19 +1,59 @@
 //! Implementation of the `typing` module.
 //!
-//! Provides a minimal implementation of Python's `typing` module with:
-//! - `TYPE_CHECKING`: Always False (used for conditional imports)
-//! - Common type hints as `Marker` values (Any, Optional, List, Dict, etc.)
-//!
-//! These markers exist so code that imports typing constructs works correctly,
-//! though Monty doesn't perform static type checking.
+//! Most names here are inert `Marker` values: they exist so annotated code can
+//! import them, and nothing reads them at runtime. The exceptions are the forms
+//! a *runtime* type expression is built from — `Union`, and the functions that
+//! take one apart — which are real objects with real behaviour, because
+//! `int | str` and `get_origin(...)` have answers.
+
+use std::fmt;
+
+use smallvec::SmallVec;
 
 use crate::{
+    args::ArgValues,
+    builtins::Builtins,
     bytecode::VM,
-    heap::{HeapData, HeapId},
+    defer_drop,
+    exception_private::{ExcType, ExcTypeExt, RunResult},
+    heap::{DropWithContext, HeapData, HeapId},
     intern::StaticStrings,
-    types::Module,
+    modules::ModuleFunctions,
+    types::{Module, Type, allocate_tuple, generic_alias::origin_and_args},
     value::{Marker, Value},
 };
+
+/// The `typing` functions Monty implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) enum TypingFunctions {
+    /// `typing.get_origin(tp)`.
+    GetOrigin,
+    /// `typing.get_args(tp)`.
+    GetArgs,
+    /// `typing.overload(func)`.
+    Overload,
+    /// The function `overload` returns in place of the decorated stub. Calling
+    /// it is the mistake CPython's `_overload_dummy` exists to report.
+    OverloadDummy,
+    /// `typing.dataclass_transform(**kwargs)`.
+    DataclassTransform,
+    /// The decorator `dataclass_transform` returns: it hands back whatever it
+    /// is applied to, the whole point being that only a type checker reads it.
+    Identity,
+}
+
+impl fmt::Display for TypingFunctions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::GetOrigin => "get_origin",
+            Self::GetArgs => "get_args",
+            Self::Overload => "overload",
+            Self::OverloadDummy => "_overload_dummy",
+            Self::DataclassTransform => "dataclass_transform",
+            Self::Identity => "decorator",
+        })
+    }
+}
 
 /// Creates the `typing` module and allocates it on the heap.
 ///
@@ -26,10 +66,19 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     // typing.TYPE_CHECKING - always False
     module.set_attr(StaticStrings::TypeChecking, Value::Bool(false), vm);
 
-    // Export all typing markers as module attributes
     for ss in MARKER_ATTRS {
         module.set_attr(*ss, Value::Marker(Marker(*ss)), vm);
     }
+    for (name, func) in FUNCTION_ATTRS {
+        module.set_attr(*name, Value::ModuleFunction(ModuleFunctions::Typing(*func)), vm);
+    }
+    // `Union` is a real type object, not a marker: it is what `type(int | str)`
+    // reports and what `types.UnionType` names.
+    module.set_attr(
+        StaticStrings::UnionType,
+        Value::Builtin(Builtins::Type(Type::Union)),
+        vm,
+    );
 
     vm.heap.allocate(HeapData::Module(Box::new(module)))
 }
@@ -41,7 +90,6 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
 const MARKER_ATTRS: &[StaticStrings] = &[
     StaticStrings::Any,
     StaticStrings::Optional,
-    StaticStrings::UnionType,
     StaticStrings::ListType,
     StaticStrings::DictType,
     StaticStrings::TupleType,
@@ -65,3 +113,63 @@ const MARKER_ATTRS: &[StaticStrings] = &[
     StaticStrings::Never,
     StaticStrings::NoReturn,
 ];
+
+/// Callable attributes exported by this module.
+const FUNCTION_ATTRS: &[(StaticStrings, TypingFunctions)] = &[
+    (StaticStrings::GetOrigin, TypingFunctions::GetOrigin),
+    (StaticStrings::GetArgs, TypingFunctions::GetArgs),
+    (StaticStrings::Overload, TypingFunctions::Overload),
+    (StaticStrings::DataclassTransform, TypingFunctions::DataclassTransform),
+];
+
+/// Dispatches a `typing` module function call.
+pub(super) fn call(vm: &mut VM<'_>, func: TypingFunctions, args: ArgValues) -> RunResult<Value> {
+    match func {
+        TypingFunctions::GetOrigin => {
+            let tp = args.get_one_arg("get_origin", vm.heap)?;
+            defer_drop!(tp, vm);
+            Ok(match origin_and_args(tp, vm) {
+                Some((origin, alias_args)) => {
+                    alias_args.drop_with(vm);
+                    origin
+                }
+                None => Value::None,
+            })
+        }
+        TypingFunctions::GetArgs => {
+            let tp = args.get_one_arg("get_args", vm.heap)?;
+            defer_drop!(tp, vm);
+            Ok(match origin_and_args(tp, vm) {
+                Some((origin, alias_args)) => {
+                    origin.drop_with(vm);
+                    alias_args
+                }
+                None => allocate_tuple(SmallVec::new(), vm.heap),
+            })
+        }
+        // The decorated stub is discarded: a later plain `def` of the same name
+        // is the implementation, and CPython's rule is that it wins.
+        TypingFunctions::Overload => {
+            args.get_one_arg("overload", vm.heap)?.drop_with(vm);
+            Ok(Value::ModuleFunction(ModuleFunctions::Typing(
+                TypingFunctions::OverloadDummy,
+            )))
+        }
+        TypingFunctions::OverloadDummy => {
+            args.drop_with(vm);
+            Err(ExcType::not_implemented(
+                "You should not call an overloaded function. A series of @overload-decorated functions outside a stub module should always be followed by an implementation that is not @overload-ed.",
+            )
+            .into())
+        }
+        // Every keyword is a type-checker instruction, so they are accepted and
+        // dropped rather than validated.
+        TypingFunctions::DataclassTransform => {
+            args.drop_with(vm);
+            Ok(Value::ModuleFunction(ModuleFunctions::Typing(
+                TypingFunctions::Identity,
+            )))
+        }
+        TypingFunctions::Identity => args.get_one_arg("decorator", vm.heap),
+    }
+}

@@ -35,11 +35,11 @@ use crate::{
     types::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
-        FrozenSet, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module, NamedTuple,
-        NamedTupleClass, OpenFile, PartialMethod, Path, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator,
-        Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator, TypeAliasType,
-        UserProperty, callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator,
-        timedelta, timezone,
+        FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module,
+        NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, Range, RangeIterator, ReMatch, RePattern, Set,
+        SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator,
+        TypeAliasType, UnionType, UserProperty, callable_iterator::CallableIterator, date, datetime,
+        deque::DequeIterator, list::ListIterator, timedelta, timezone,
     },
     value::Value,
 };
@@ -285,6 +285,8 @@ pub enum HeapReadOutput<'a> {
     Suppress(HeapRead<'a, Suppress>),
     AttrGetter(HeapRead<'a, AttrGetter>),
     PartialMethod(HeapRead<'a, PartialMethod>),
+    GenericAlias(HeapRead<'a, GenericAlias>),
+    UnionType(HeapRead<'a, UnionType>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -728,6 +730,8 @@ impl<'a> HeapPtr<'a> {
             HeapData::Suppress(suppress) => HeapReadOutput::Suppress(heap_read(base, suppress, readers)),
             HeapData::AttrGetter(getter) => HeapReadOutput::AttrGetter(heap_read(base, getter, readers)),
             HeapData::PartialMethod(partial) => HeapReadOutput::PartialMethod(heap_read_boxed(base, partial, readers)),
+            HeapData::GenericAlias(alias) => HeapReadOutput::GenericAlias(heap_read(base, alias, readers)),
+            HeapData::UnionType(union) => HeapReadOutput::UnionType(heap_read(base, union, readers)),
         }
     }
 }
@@ -1952,6 +1956,11 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(*id);
             }
         }),
+        HeapData::GenericAlias(alias) => alias.for_each_owned_value(|value| {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }),
         HeapData::ContextToken(token) => token.for_each_owned_value(|value| {
             if let Value::Ref(id) = value {
                 on_child(*id);
@@ -1963,6 +1972,11 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
             }
         }),
         HeapData::PartialMethod(partial) => partial.for_each_owned_value(|value| {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }),
+        HeapData::UnionType(union) => union.for_each_owned_value(|value| {
             if let Value::Ref(id) = value {
                 on_child(*id);
             }
@@ -2087,6 +2101,8 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::ContextToken(token) => token.py_dec_ref_ids(stack),
         HeapData::Suppress(suppress) => suppress.py_dec_ref_ids(stack),
         HeapData::PartialMethod(partial) => partial.py_dec_ref_ids(stack),
+        HeapData::GenericAlias(alias) => alias.py_dec_ref_ids(stack),
+        HeapData::UnionType(union) => union.py_dec_ref_ids(stack),
         // other types have no nested heap references
         _ => {}
     }
