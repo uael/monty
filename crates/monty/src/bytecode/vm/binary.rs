@@ -6,7 +6,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::DropGuard,
     types::PyTrait,
-    value::Value,
+    value::{OpForm, Value},
 };
 
 impl VM<'_> {
@@ -21,65 +21,65 @@ impl VM<'_> {
         self.unary_op(|value, vm| value.py_pos_impl(vm, value.ref_id()), "+")
     }
 
-    /// Binary addition.
-    pub(super) fn binary_add(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_add(rhs, vm))
+    /// Binary or augmented addition, the form deciding only what a failure names.
+    pub(super) fn binary_add(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_add(rhs, vm, form))
     }
 
-    /// Binary subtraction.
-    pub(super) fn binary_sub(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_sub(rhs, vm))
+    /// Binary or augmented subtraction.
+    pub(super) fn binary_sub(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_sub(rhs, vm, form))
     }
 
-    /// Binary multiplication.
-    pub(super) fn binary_mult(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_mul(rhs, vm))
+    /// Binary or augmented multiplication.
+    pub(super) fn binary_mult(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_mul(rhs, vm, form))
     }
 
-    /// Binary division.
-    pub(super) fn binary_div(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_truediv(rhs, vm))
+    /// Binary or augmented division.
+    pub(super) fn binary_div(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_truediv(rhs, vm, form))
     }
 
-    /// Binary floor division.
-    pub(super) fn binary_floordiv(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_floordiv(rhs, vm))
+    /// Binary or augmented floor division.
+    pub(super) fn binary_floordiv(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_floordiv(rhs, vm, form))
     }
 
-    /// Binary modulo.
-    pub(super) fn binary_mod(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_mod(rhs, vm))
+    /// Binary or augmented modulo.
+    pub(super) fn binary_mod(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_mod(rhs, vm, form))
     }
 
-    /// Binary power.
+    /// Binary or augmented power.
     #[inline(never)]
-    pub(super) fn binary_pow(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_pow(rhs, None, vm))
+    pub(super) fn binary_pow(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_pow(rhs, None, vm, form))
     }
 
-    /// Binary `&`.
-    pub(super) fn binary_and(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_and(rhs, vm))
+    /// Binary or augmented `&`.
+    pub(super) fn binary_and(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_and(rhs, vm, form))
     }
 
-    /// Binary `|`.
-    pub(super) fn binary_or(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_or(rhs, vm))
+    /// Binary or augmented `|`.
+    pub(super) fn binary_or(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_or(rhs, vm, form))
     }
 
-    /// Binary `^`.
-    pub(super) fn binary_xor(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_xor(rhs, vm))
+    /// Binary or augmented `^`.
+    pub(super) fn binary_xor(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_xor(rhs, vm, form))
     }
 
-    /// Binary left shift.
-    pub(super) fn binary_lshift(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_lshift(rhs, vm))
+    /// Binary or augmented left shift.
+    pub(super) fn binary_lshift(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_lshift(rhs, vm, form))
     }
 
-    /// Binary right shift.
-    pub(super) fn binary_rshift(&mut self) -> Result<(), RunError> {
-        self.binary_op(|lhs, rhs, vm| lhs.py_rshift(rhs, vm))
+    /// Binary or augmented right shift.
+    pub(super) fn binary_rshift(&mut self, form: OpForm) -> Result<(), RunError> {
+        self.binary_op(|lhs, rhs, vm| lhs.py_rshift(rhs, vm, form))
     }
 
     /// In-place addition.
@@ -91,19 +91,7 @@ impl VM<'_> {
     pub(super) fn inplace_add(&mut self) -> Result<(), RunError> {
         self.inplace_op(
             |lhs, rhs, vm| lhs.py_iadd_impl(rhs, vm, lhs.ref_id()),
-            |lhs, rhs, vm| {
-                if let Some(value) = lhs.py_add_result(rhs, vm)? {
-                    Ok(value)
-                } else {
-                    let lhs_type = lhs.py_type(vm);
-                    Err(ExcType::binary_type_error(
-                        "+=",
-                        lhs_type,
-                        lhs.py_type_name(vm),
-                        rhs.py_type_name(vm),
-                    ))
-                }
-            },
+            |lhs, rhs, vm| lhs.py_add(rhs, vm, OpForm::Augmented),
         )
     }
 
@@ -111,7 +99,7 @@ impl VM<'_> {
     pub(super) fn inplace_sub(&mut self) -> Result<(), RunError> {
         self.inplace_op(
             |lhs, rhs, vm| lhs.py_isub_impl(rhs, vm, lhs.ref_id()),
-            |lhs, rhs, vm| lhs.py_sub(rhs, vm),
+            |lhs, rhs, vm| lhs.py_sub(rhs, vm, OpForm::Augmented),
         )
     }
 
@@ -119,7 +107,7 @@ impl VM<'_> {
     pub(super) fn inplace_and(&mut self) -> Result<(), RunError> {
         self.inplace_op(
             |lhs, rhs, vm| lhs.py_iand_impl(rhs, vm, lhs.ref_id()),
-            |lhs, rhs, vm| lhs.py_and(rhs, vm),
+            |lhs, rhs, vm| lhs.py_and(rhs, vm, OpForm::Augmented),
         )
     }
 
@@ -127,7 +115,7 @@ impl VM<'_> {
     pub(super) fn inplace_or(&mut self) -> Result<(), RunError> {
         self.inplace_op(
             |lhs, rhs, vm| lhs.py_ior_impl(rhs, vm, lhs.ref_id()),
-            |lhs, rhs, vm| lhs.py_or(rhs, vm),
+            |lhs, rhs, vm| lhs.py_or(rhs, vm, OpForm::Augmented),
         )
     }
 

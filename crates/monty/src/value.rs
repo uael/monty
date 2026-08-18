@@ -1705,48 +1705,35 @@ impl Value {
     }
 
     /// Performs Python `+` with reflected-operation fallback.
-    pub(crate) fn py_add(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
-        if let Some(result) = self.py_add_result(other, vm)? {
-            Ok(result)
-        } else {
-            let lhs_type = self.py_type(vm);
-            Err(ExcType::binary_type_error(
-                "+",
-                lhs_type,
-                self.py_type_name(vm),
-                other.py_type_name(vm),
-            ))
-        }
-    }
-
-    /// Tries direct and reflected addition without producing the final type error.
-    pub(crate) fn py_add_result(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        if let Some(result) = self.py_add_impl(other, vm, self.ref_id())? {
-            Ok(Some(result))
-        } else {
-            other.py_radd_impl(self, vm)
-        }
+    pub(crate) fn py_add(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
+        self.binary_op(
+            other,
+            vm,
+            |vm| self.py_add_impl(other, vm, self.ref_id()),
+            |vm| other.py_radd_impl(self, vm),
+            form.symbol("+", "+="),
+        )
     }
 
     /// Performs Python `-` with reflected-operation fallback.
-    pub(crate) fn py_sub(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_sub(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_sub_impl(other, vm, self.ref_id()),
             |vm| other.py_rsub_impl(self, vm),
-            "-",
+            form.symbol("-", "-="),
         )
     }
 
     /// Performs Python `*` with reflected-operation fallback.
-    pub(crate) fn py_mul(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_mul(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_mul_impl(other, vm),
             |vm| other.py_rmul_impl(self, vm),
-            "*",
+            form.symbol("*", "*="),
         )
     }
 
@@ -1762,105 +1749,109 @@ impl Value {
     }
 
     /// Performs Python `/` with reflected-operation fallback.
-    pub(crate) fn py_truediv(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_truediv(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_truediv_impl(other, vm),
             |vm| other.py_rtruediv_impl(self, vm),
-            "/",
+            form.symbol("/", "/="),
         )
     }
 
     /// Performs Python `//` with reflected-operation fallback.
-    pub(crate) fn py_floordiv(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_floordiv(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_floordiv_impl(other, vm),
             |vm| other.py_rfloordiv_impl(self, vm),
-            "//",
+            form.symbol("//", "//="),
         )
     }
 
     /// Performs Python `%` with reflected-operation fallback.
-    pub(crate) fn py_mod(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_mod(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_mod_impl(other, vm),
             |vm| other.py_rmod_impl(self, vm),
-            "%",
+            form.symbol("%", "%="),
         )
     }
 
     /// Performs Python `** or pow()` with reflected-operation fallback.
-    pub(crate) fn py_pow(&self, other: &Self, modulus: Option<&Self>, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_pow(&self, other: &Self, modulus: Option<&Self>, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_pow_impl(other, modulus, vm),
             |vm| other.py_rpow_impl(self, modulus, vm),
-            "** or pow()",
+            form.symbol("** or pow()", "**="),
         )
     }
 
     /// Performs Python `&` with reflected-operation fallback.
-    pub(crate) fn py_and(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_and(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_and_impl(other, vm, self.ref_id()),
             |vm| other.py_rand_impl(self, vm),
-            "&",
+            form.symbol("&", "&="),
         )
     }
 
     /// Performs Python `|` with reflected-operation fallback.
-    pub(crate) fn py_or(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_or(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_or_impl(other, vm, self.ref_id()),
             |vm| other.py_ror_impl(self, vm),
-            "|",
+            form.symbol("|", "|="),
         )
     }
 
     /// Performs Python `^` with reflected-operation fallback.
-    pub(crate) fn py_xor(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_xor(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_xor_impl(other, vm),
             |vm| other.py_rxor_impl(self, vm),
-            "^",
+            form.symbol("^", "^="),
         )
     }
 
     /// Performs Python `<<` with reflected-operation fallback.
-    pub(crate) fn py_lshift(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_lshift(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_lshift_impl(other, vm),
             |vm| other.py_rlshift_impl(self, vm),
-            "<<",
+            form.symbol("<<", "<<="),
         )
     }
 
     /// Performs Python `>>` with reflected-operation fallback.
-    pub(crate) fn py_rshift(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
+    pub(crate) fn py_rshift(&self, other: &Self, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
             |vm| self.py_rshift_impl(other, vm),
             |vm| other.py_rrshift_impl(self, vm),
-            ">>",
+            form.symbol(">>", ">>="),
         )
     }
 
     /// Applies the shared direct, reflected, then unsupported binary protocol.
+    ///
+    /// `operator` reaches only the failure, and is the caller's to choose because
+    /// the same dispatch serves `a - b` and `a -= b`, which name themselves
+    /// differently when they fail.
     fn binary_op(
         &self,
         other: &Self,
@@ -2258,6 +2249,27 @@ fn is_class_name_attr(attr: &EitherStr, vm: &VM<'_>) -> bool {
     match attr.static_string() {
         Some(ss) => ss == StaticStrings::DunderName || ss == StaticStrings::DunderQualname,
         None => matches!(attr.as_str(vm.interns), "__name__" | "__qualname__"),
+    }
+}
+
+/// Which of an operator's two spellings a failed operation names.
+///
+/// Augmented assignment reuses the binary operation whenever the left operand
+/// has no in-place form, and CPython's `PyNumber_InPlace*` differ from their
+/// plain counterparts in exactly this: `a -= 'x'` reports `-=`, not `-`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpForm {
+    Binary,
+    Augmented,
+}
+
+impl OpForm {
+    /// Picks the spelling this form names.
+    fn symbol(self, binary: &'static str, augmented: &'static str) -> &'static str {
+        match self {
+            Self::Binary => binary,
+            Self::Augmented => augmented,
+        }
     }
 }
 

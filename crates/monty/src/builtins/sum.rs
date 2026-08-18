@@ -9,7 +9,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::DropGuard,
     types::{PyTrait, Type},
-    value::Value,
+    value::{OpForm, Value},
 };
 
 /// Argument shape for `sum(iterable, /, start=0)` — Argument Clinic in
@@ -56,7 +56,7 @@ pub fn builtin_sum(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     while let Some(item) = iter.py_next(vm)? {
         defer_drop!(item, vm);
 
-        let new_value = accumulator.py_add(item, vm)?;
+        let new_value = accumulator.py_add(item, vm, OpForm::Binary)?;
         let old = mem::replace(accumulator, new_value);
         old.drop_with(vm);
     }

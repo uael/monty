@@ -35,8 +35,6 @@ The `collections.abc` submodule **is** implemented; see ./typing.md.
   `filter`/`reversed`**: those are eager (see ./builtins.md), so
   the deque is fully read before the loop body runs. `for x in d` and explicit
   `iter()`/`next()` detect it exactly as CPython does.
-- `d += <any iterable>` works (it is `extend`), even though `list`'s `+=` still
-  accepts only another list.
 - **Extending from an eager builtin loses the partial result when it raises.**
   `extend`/`extendleft`/`+=` append each item as the source yields it, so an
   iterator raising part-way leaves the earlier items in place, as in CPython.

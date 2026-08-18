@@ -19,7 +19,7 @@ use crate::{
     heap::{DropGuard, DropWithContext, HeapData, HeapId, HeapReadOutput},
     resource_checks::check_repeat_size,
     types::{Dict, List, PyTrait, allocate_tuple, iter::collect_owned_iterable, py_trait::CmpOrder},
-    value::{VALUE_SIZE, Value},
+    value::{OpForm, VALUE_SIZE, Value},
 };
 
 /// Adds (or subtracts) `delta` from two counts, with CPython's operator wording
@@ -32,9 +32,9 @@ fn count_arith(lhs: &Value, rhs: &Value, subtract: bool, vm: &mut VM<'_>) -> Run
     // `py_add`/`py_sub` already raise the exact `binary_type_error(op, ...)` this
     // needs when the counts aren't addable, so delegate rather than re-derive it.
     if subtract {
-        lhs.py_sub(rhs, vm)
+        lhs.py_sub(rhs, vm, OpForm::Binary)
     } else {
-        lhs.py_add(rhs, vm)
+        lhs.py_add(rhs, vm, OpForm::Binary)
     }
 }
 

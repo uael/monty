@@ -10,7 +10,7 @@ use crate::{
     exception_private::RunResult,
     heap::{DropGuard, HeapId, HeapRead},
     types::{LazyHeapSet, PyTrait, itertools::ItertoolsIter},
-    value::Value,
+    value::{OpForm, Value},
 };
 
 /// Yields `start`, `start + step`, `start + 2 * step`, … without ever stopping.
@@ -72,7 +72,7 @@ pub(super) fn next<'h>(iter: &mut HeapRead<'h, ItertoolsIter>, vm: &mut VM<'h>) 
     // release it, but the success path hands it back to the caller.
     let mut item_guard = DropGuard::new(item, vm);
     let (item, vm) = item_guard.as_parts();
-    let next = item.py_add(step, vm)?;
+    let next = item.py_add(step, vm, OpForm::Binary)?;
 
     let ItertoolsIter::Count(count) = iter.get_mut(vm.heap) else {
         unreachable!("dispatched on Kind::Count")

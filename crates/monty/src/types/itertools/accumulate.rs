@@ -9,7 +9,7 @@ use crate::{
     exception_private::RunResult,
     heap::{DropWithContext, HeapId, HeapRead},
     types::itertools::ItertoolsIter,
-    value::Value,
+    value::{OpForm, Value},
 };
 
 /// Yields `t0, f(t0, s1), f(f(t0, s1), s2), …` over a source iterator.
@@ -147,7 +147,7 @@ fn combine(func: Option<Value>, total: Value, element: &Value, vm: &mut VM<'_>) 
     let Some(func) = func else {
         // CPython's default is `operator.add`, so this is the same `+` any
         // Python expression would do, error messages included.
-        let combined = total.py_add(element, vm);
+        let combined = total.py_add(element, vm, OpForm::Binary);
         total.drop_with(vm);
         return combined;
     };

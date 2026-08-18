@@ -49,7 +49,7 @@ use crate::{
         file::{apply_buffer_store, apply_write_position},
         match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
     },
-    value::{EitherStr, Value},
+    value::{EitherStr, OpForm, Value},
 };
 
 /// Result of executing Await opcode.
@@ -1310,22 +1310,24 @@ impl<'h> VM<'h> {
                     self.delete_cell(&cached_frame, slot);
                 }
                 // Binary Operations - route through exception handling for tracebacks
-                Opcode::BinaryAdd => try_catch_sync!(self, cached_frame, self.binary_add()),
-                Opcode::BinarySub => try_catch_sync!(self, cached_frame, self.binary_sub()),
-                Opcode::BinaryMul => try_catch_sync!(self, cached_frame, self.binary_mult()),
-                Opcode::BinaryDiv => try_catch_sync!(self, cached_frame, self.binary_div()),
-                Opcode::BinaryFloorDiv => try_catch_sync!(self, cached_frame, self.binary_floordiv()),
-                Opcode::BinaryMod => try_catch_sync!(self, cached_frame, self.binary_mod()),
-                Opcode::BinaryPow => try_catch_sync!(self, cached_frame, self.binary_pow()),
+                Opcode::BinaryAdd => try_catch_sync!(self, cached_frame, self.binary_add(OpForm::Binary)),
+                Opcode::BinarySub => try_catch_sync!(self, cached_frame, self.binary_sub(OpForm::Binary)),
+                Opcode::BinaryMul => try_catch_sync!(self, cached_frame, self.binary_mult(OpForm::Binary)),
+                Opcode::BinaryDiv => try_catch_sync!(self, cached_frame, self.binary_div(OpForm::Binary)),
+                Opcode::BinaryFloorDiv => {
+                    try_catch_sync!(self, cached_frame, self.binary_floordiv(OpForm::Binary));
+                }
+                Opcode::BinaryMod => try_catch_sync!(self, cached_frame, self.binary_mod(OpForm::Binary)),
+                Opcode::BinaryPow => try_catch_sync!(self, cached_frame, self.binary_pow(OpForm::Binary)),
                 // Bitwise operations - only work on integers
-                Opcode::BinaryAnd => try_catch_sync!(self, cached_frame, self.binary_and()),
-                Opcode::BinaryOr => try_catch_sync!(self, cached_frame, self.binary_or()),
-                Opcode::BinaryXor => try_catch_sync!(self, cached_frame, self.binary_xor()),
+                Opcode::BinaryAnd => try_catch_sync!(self, cached_frame, self.binary_and(OpForm::Binary)),
+                Opcode::BinaryOr => try_catch_sync!(self, cached_frame, self.binary_or(OpForm::Binary)),
+                Opcode::BinaryXor => try_catch_sync!(self, cached_frame, self.binary_xor(OpForm::Binary)),
                 Opcode::BinaryLShift => {
-                    try_catch_sync!(self, cached_frame, self.binary_lshift());
+                    try_catch_sync!(self, cached_frame, self.binary_lshift(OpForm::Binary));
                 }
                 Opcode::BinaryRShift => {
-                    try_catch_sync!(self, cached_frame, self.binary_rshift());
+                    try_catch_sync!(self, cached_frame, self.binary_rshift(OpForm::Binary));
                 }
                 Opcode::BinaryMatMul => try_catch_sync!(self, cached_frame, self.binary_matmul()),
                 // Comparison Operations
@@ -1378,29 +1380,32 @@ impl<'h> VM<'h> {
                     }
                 }
                 // In-place Operations - route through exception handling.
-                // `+=`/`-=`/`&=`/`|=` first try a true in-place `Counter` op
-                // (mutating the left operand); everything else — and the
-                // non-Counter fallback — reuses the binary implementation, since
-                // Monty's other types have no distinct in-place form.
+                // `+=`/`-=`/`&=`/`|=` first try a true in-place op (a `Counter`,
+                // a `list` or a `deque` mutating the left operand); everything
+                // else, and the fallback when the left operand has no in-place
+                // form, reuses the binary implementation under the augmented
+                // spelling, which is the one a failure has to name.
                 Opcode::InplaceAdd => try_catch_sync!(self, cached_frame, self.inplace_add()),
                 Opcode::InplaceSub => try_catch_sync!(self, cached_frame, self.inplace_sub()),
-                Opcode::InplaceMul => try_catch_sync!(self, cached_frame, self.binary_mult()),
-                Opcode::InplaceDiv => try_catch_sync!(self, cached_frame, self.binary_div()),
-                Opcode::InplaceFloorDiv => try_catch_sync!(self, cached_frame, self.binary_floordiv()),
-                Opcode::InplaceMod => try_catch_sync!(self, cached_frame, self.binary_mod()),
-                Opcode::InplacePow => try_catch_sync!(self, cached_frame, self.binary_pow()),
+                Opcode::InplaceMul => try_catch_sync!(self, cached_frame, self.binary_mult(OpForm::Augmented)),
+                Opcode::InplaceDiv => try_catch_sync!(self, cached_frame, self.binary_div(OpForm::Augmented)),
+                Opcode::InplaceFloorDiv => {
+                    try_catch_sync!(self, cached_frame, self.binary_floordiv(OpForm::Augmented));
+                }
+                Opcode::InplaceMod => try_catch_sync!(self, cached_frame, self.binary_mod(OpForm::Augmented)),
+                Opcode::InplacePow => try_catch_sync!(self, cached_frame, self.binary_pow(OpForm::Augmented)),
                 Opcode::InplaceAnd => {
                     try_catch_sync!(self, cached_frame, self.inplace_and());
                 }
                 Opcode::InplaceOr => try_catch_sync!(self, cached_frame, self.inplace_or()),
                 Opcode::InplaceXor => {
-                    try_catch_sync!(self, cached_frame, self.binary_xor());
+                    try_catch_sync!(self, cached_frame, self.binary_xor(OpForm::Augmented));
                 }
                 Opcode::InplaceLShift => {
-                    try_catch_sync!(self, cached_frame, self.binary_lshift());
+                    try_catch_sync!(self, cached_frame, self.binary_lshift(OpForm::Augmented));
                 }
                 Opcode::InplaceRShift => {
-                    try_catch_sync!(self, cached_frame, self.binary_rshift());
+                    try_catch_sync!(self, cached_frame, self.binary_rshift(OpForm::Augmented));
                 }
                 // Collection Building - route through exception handling
                 Opcode::BuildList => {

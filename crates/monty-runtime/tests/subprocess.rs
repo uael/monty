@@ -490,9 +490,10 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
         ("2 ** 10_000_000", 10_030_982),
         ("1 << 10_000_000", 1_280_983),
         ("('a' * 1000).replace('a', 'b' * 2000)", 2_034_521),
-        // Bulk container clones: `+=` preflights the temp clone plus the target
-        // growth, `+` preflights each side's clone.
-        ("x = [None] * 40_000\nx += x", 1_951_587),
+        // Bulk container clones: `+=` extends in place, so it preflights the
+        // target growth alone, which is why it now costs what a `copy` does;
+        // `+` still preflights each side's clone.
+        ("x = [None] * 40_000\nx += x", 1_312_051),
         ("t = (None,) * 40_000\nt + t", 1_311_587),
         ("x = [None] * 40_000\nx.copy()", 1_311_337),
         // `deque.extend` preflights exact-hint iterators up front.

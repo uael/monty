@@ -535,39 +535,15 @@ impl<'h> PyTrait<'h> for HeapRead<'h, List> {
         self.py_mul_impl(other, vm)
     }
 
-    fn py_iadd_impl(&mut self, other: &Value, vm: &mut VM<'h>, self_id: Option<HeapId>) -> RunResult<bool> {
-        let Value::Ref(other_id) = other else {
-            return Ok(false);
-        };
-
-        if Some(*other_id) == self_id {
-            // Self-extend: clone our own items with proper refcounting. Checked
-            // at 2× — the temporary clone plus the equal-sized target growth —
-            // up front, while no owned values need releasing on failure.
-            let len = self.get(vm.heap).items.len();
-            vm.heap.tracker.check_allocation(len.saturating_mul(2 * VALUE_SIZE))?;
-            let items = self.clone_all_items(vm)?;
-            self.get_mut(vm.heap).items.extend(items);
-        } else {
-            // Read source list via HeapRead, clone items into a temporary Vec.
-            // Checked at 2× — the clone plus the target growth — see above.
-            let source = vm.heap.read(*other_id);
-            let HeapReadOutput::List(source_list) = source else {
-                return Ok(false);
-            };
-            let source_len = source_list.get(vm.heap).len();
-            vm.heap
-                .tracker
-                .check_allocation(source_len.saturating_mul(2 * VALUE_SIZE))?;
-            let source_items = source_list.clone_all_items(vm)?;
-            // Check if new items contain refs
-            let has_new_refs = source_items.iter().any(|v| matches!(v, Value::Ref(_)));
-            self.get_mut(vm.heap).items.extend(source_items);
-            if has_new_refs {
-                self.get_mut(vm.heap).contains_refs = true;
-            }
-        }
-
+    /// `list += <iterable>`: CPython's `list.__iadd__` *is* `list.extend`, so
+    /// any iterable works (`xs += 'ab'`, `xs += (1, 2)`) and a non-iterable
+    /// reports the iterator protocol's TypeError rather than falling back to
+    /// `+`, whose concatenation error names a restriction `+=` does not have.
+    /// The list keeps its identity, so an alias sees the update.
+    fn py_iadd_impl(&mut self, other: &Value, vm: &mut VM<'h>, _self_id: Option<HeapId>) -> RunResult<bool> {
+        // `extend_from_iterable` consumes the iterable, so hand it an owned clone.
+        let iterable = other.clone_with_heap(vm.heap);
+        extend_from_iterable(self, iterable, vm)?;
         Ok(true)
     }
 
@@ -783,6 +759,17 @@ fn list_copy(list: &List, heap: &Heap) -> RunResult<Value> {
 /// Extends the list by appending all items from the iterable.
 fn list_extend<'h>(list: &mut HeapRead<'h, List>, args: ArgValues, vm: &mut VM<'h>) -> RunResult<Value> {
     let iterable = args.get_one_arg("list.extend", vm.heap)?;
+    extend_from_iterable(list, iterable, vm)?;
+    Ok(Value::None)
+}
+
+/// Appends every item of `iterable` to `list`, consuming `iterable`.
+///
+/// Shared by `list.extend(...)` and `list += ...`, which Python defines as the
+/// same operation down to the error a non-iterable raises. Draining the
+/// iterable first is what makes `xs += xs` double rather than loop: the items
+/// are snapshotted before any of them is appended.
+fn extend_from_iterable<'h>(list: &mut HeapRead<'h, List>, iterable: Value, vm: &mut VM<'h>) -> RunResult<()> {
     let items: SmallVec<[_; 2]> = collect_owned_iterable(iterable, vm)?;
 
     let has_refs = items.iter().any(|v| matches!(v, Value::Ref(_)));
@@ -791,7 +778,7 @@ fn list_extend<'h>(list: &mut HeapRead<'h, List>, args: ArgValues, vm: &mut VM<'
     }
     list.get_mut(vm.heap).as_vec_mut().extend(items);
 
-    Ok(Value::None)
+    Ok(())
 }
 
 /// Implements Python's `list.index(value[, start[, end]])` method.

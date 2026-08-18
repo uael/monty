@@ -1469,19 +1469,19 @@ pub(crate) trait ExcTypeExt: Sized {
 
     /// Creates a TypeError for unsupported binary operations.
     ///
-    /// For `+` or `+=` with str/list on the left side, uses CPython's special format:
-    /// `can only concatenate {type} (not "{other}") to {type}`
-    ///
-    /// For other cases, uses the generic format:
-    /// `unsupported operand type(s) for {op}: '{left}' and '{right}'`
+    /// A sequence's `+` and `+=` say what they can concatenate rather than that
+    /// the operands are unsupported, and `bytes` words even that its own way.
+    /// Everything else uses the generic
+    /// `unsupported operand type(s) for {op}: '{left}' and '{right}'`.
     #[must_use]
     fn binary_type_error(op: &str, lhs_type: Type, lhs_name: impl Display, rhs_name: impl Display) -> RunError {
-        let message = if (op == "+" || op == "+=") && matches!(lhs_type, Type::Deque) {
-            // CPython hardcodes the bare "deque" here even though tp_name is the
-            // qualified "collections.deque", so this can't share the branch below.
-            format!("can only concatenate deque (not \"{rhs_name}\") to deque")
-        } else if (op == "+" || op == "+=") && matches!(lhs_type, Type::Str | Type::List) {
-            format!("can only concatenate {lhs_name} (not \"{rhs_name}\") to {lhs_name}")
+        let concatenation = op == "+" || op == "+=";
+        let message = if concatenation && lhs_type == Type::Bytes {
+            // CPython names the operands the other way round here, and quotes
+            // neither, so bytes cannot share the wording below.
+            format!("can't concat {rhs_name} to bytes")
+        } else if let Some(sequence) = concatenation.then(|| concat_sequence_name(lhs_type)).flatten() {
+            format!("can only concatenate {sequence} (not \"{rhs_name}\") to {sequence}")
         } else {
             format!("unsupported operand type(s) for {op}: '{lhs_name}' and '{rhs_name}'")
         };
@@ -2746,5 +2746,20 @@ fn format_param_names(names: &[&str]) -> String {
             let rest: Vec<_> = names[..names.len() - 1].iter().map(|n| format!("'{n}'")).collect();
             format!("{}, and '{last}'", rest.join(", "))
         }
+    }
+}
+
+/// The name a sequence's concatenation error gives itself, which is not always
+/// its `tp_name`: CPython hardcodes a literal on both sides of the message, so a
+/// deque says "deque" for a `tp_name` of "collections.deque" and a namedtuple
+/// says "tuple" for its own class name. `None` for a type whose `+` reports the
+/// generic unsupported-operand message instead.
+fn concat_sequence_name(lhs_type: Type) -> Option<&'static str> {
+    match lhs_type {
+        Type::Str => Some("str"),
+        Type::List => Some("list"),
+        Type::Tuple | Type::NamedTuple => Some("tuple"),
+        Type::Deque => Some("deque"),
+        _ => None,
     }
 }
