@@ -69,7 +69,7 @@ pub(crate) use instance::{
 pub(crate) use iter::{collect_iterable, collect_iterable_bounded};
 pub(crate) use itertools::ItertoolsIter;
 pub(crate) use list::List;
-pub(crate) use long_int::LongInt;
+pub(crate) use long_int::{LongInt, long_int_as_f64};
 pub(crate) use module::Module;
 pub(crate) use namedtuple::{NamedTuple, NamedTupleClass, construct_namedtuple};
 pub(crate) use native_class::NativeClass;

@@ -11,8 +11,8 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult, SimpleException},
     heap::HeapData,
     resource_checks::check_div_size,
-    types::{LongInt, allocate_tuple},
-    value::{Value, floor_divmod, immediate_int_value},
+    types::{LongInt, allocate_tuple, long_int_as_f64},
+    value::{Value, floor_divmod, immediate_int_value, py_float_floordiv, py_float_mod},
 };
 
 /// Implementation of the divmod() builtin function.
@@ -76,43 +76,17 @@ pub fn builtin_divmod(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
                 Ok(allocate_tuple(smallvec![quot_val, rem_val], vm.heap))
             }
         }
-        (Value::Float(x), Value::Float(y)) => {
-            if *y == 0.0 {
-                Err(ExcType::divmod_by_zero())
-            } else {
-                let quot = (x / y).floor();
-                let rem = x - quot * y;
-                Ok(allocate_tuple(
-                    smallvec![Value::Float(quot), Value::Float(rem)],
-                    vm.heap,
-                ))
-            }
+        (Value::Float(x), Value::Float(y)) => float_divmod(*x, *y, vm),
+        (Value::Int(x), Value::Float(y)) => float_divmod(*x as f64, *y, vm),
+        (Value::Float(x), Value::Int(y)) => float_divmod(*x, *y as f64, vm),
+        (Value::Ref(id), Value::Float(y)) if let HeapData::LongInt(li) = vm.heap.get(*id) => {
+            let x = long_int_as_f64(li)?;
+            float_divmod(x, *y, vm)
         }
-        (Value::Int(x), Value::Float(y)) => {
-            if *y == 0.0 {
-                Err(ExcType::divmod_by_zero())
-            } else {
-                let xf = *x as f64;
-                let quot = (xf / y).floor();
-                let rem = xf - quot * y;
-                Ok(allocate_tuple(
-                    smallvec![Value::Float(quot), Value::Float(rem)],
-                    vm.heap,
-                ))
-            }
-        }
-        (Value::Float(x), Value::Int(y)) => {
-            if *y == 0 {
-                Err(ExcType::divmod_by_zero())
-            } else {
-                let yf = *y as f64;
-                let quot = (x / yf).floor();
-                let rem = x - quot * yf;
-                Ok(allocate_tuple(
-                    smallvec![Value::Float(quot), Value::Float(rem)],
-                    vm.heap,
-                ))
-            }
+        (Value::Float(x), Value::Ref(id)) if let HeapData::LongInt(li) = vm.heap.get(*id) => {
+            let x = *x;
+            let y = long_int_as_f64(li)?;
+            float_divmod(x, y, vm)
         }
         _ => {
             let a_type = a.py_type_name(vm);
@@ -131,4 +105,21 @@ pub fn builtin_divmod(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// Uses `div_mod_floor` from num_integer for correct floor semantics.
 fn bigint_floor_divmod(a: &BigInt, b: &BigInt) -> (BigInt, BigInt) {
     a.div_mod_floor(b)
+}
+
+/// `divmod` over a pair already converted to floats, whichever operands it came
+/// from: an int mixed with a float is converted and then divided as floats.
+fn float_divmod(a: f64, b: f64, vm: &mut VM<'_>) -> RunResult<Value> {
+    if b == 0.0 {
+        return Err(ExcType::divmod_by_zero());
+    }
+    let quotient = py_float_floordiv(a, b);
+    // `a - quotient * b` cancels catastrophically once `a` is large: it answers
+    // `0.0` for `divmod(2**64, 1.5)` where the remainder is `1.0`. Taking it
+    // from `%` instead keeps `divmod(a, b)` equal to `(a // b, a % b)`.
+    let remainder = py_float_mod(a, b);
+    Ok(allocate_tuple(
+        smallvec![Value::Float(quotient), Value::Float(remainder)],
+        vm.heap,
+    ))
 }

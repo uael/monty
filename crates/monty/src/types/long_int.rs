@@ -16,7 +16,7 @@ use std::{
     sync::OnceLock,
 };
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
@@ -27,7 +27,7 @@ use crate::{
     heap::{Heap, HeapData, HeapId, HeapRead},
     resource_checks::{check_div_size, check_lshift_size, check_mult_size, check_pow_size},
     types::{LazyHeapSet, PyTrait, Type, str::allocate_string},
-    value::{Value, eq_bigint, immediate_int},
+    value::{Value, eq_bigint, immediate_int, py_float_floordiv, py_float_mod},
 };
 
 /// Maximum number of decimal digits allowed for integer-string conversion.
@@ -412,7 +412,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
         let lhs = self.get(vm.heap);
         let result = match other {
             _ if let Some(rhs) = immediate_int(other) => lhs.inner() + rhs,
-            Value::Float(rhs) => return Ok(Some(Value::Float(long_int_to_f64(lhs) + rhs))),
+            Value::Float(rhs) => return Ok(Some(Value::Float(long_int_as_f64(lhs)? + rhs))),
             Value::Ref(id) if let HeapData::LongInt(rhs) = vm.heap.get(*id) => lhs.inner() + rhs.inner(),
             _ => return Ok(None),
         };
@@ -444,7 +444,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
         let lhs = self.get(vm.heap);
         let result = match other {
             _ if let Some(rhs) = immediate_int(other) => lhs.inner() - rhs,
-            Value::Float(rhs) => return Ok(Some(Value::Float(long_int_to_f64(lhs) - rhs))),
+            Value::Float(rhs) => return Ok(Some(Value::Float(long_int_as_f64(lhs)? - rhs))),
             Value::Ref(id) if let HeapData::LongInt(rhs) = vm.heap.get(*id) => lhs.inner() - rhs.inner(),
             _ => return Ok(None),
         };
@@ -455,7 +455,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
         let rhs = self.get(vm.heap);
         let result = match other {
             _ if let Some(lhs) = immediate_int(other) => BigInt::from(lhs) - rhs.inner(),
-            Value::Float(lhs) => return Ok(Some(Value::Float(lhs - long_int_to_f64(rhs)))),
+            Value::Float(lhs) => return Ok(Some(Value::Float(lhs - long_int_as_f64(rhs)?))),
             Value::Ref(id) if let HeapData::LongInt(lhs) = vm.heap.get(*id) => lhs.inner() - rhs.inner(),
             _ => return Ok(None),
         };
@@ -465,6 +465,13 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
     fn py_mod_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         let lhs = self.get(vm.heap).inner();
         let result = match other {
+            Value::Float(rhs) => {
+                let lhs = bigint_as_f64(lhs)?;
+                if *rhs == 0.0 {
+                    return Err(ExcType::zero_division().into());
+                }
+                return Ok(Some(Value::Float(py_float_mod(lhs, *rhs))));
+            }
             _ if let Some(rhs) = immediate_int(other) => {
                 if rhs == 0 {
                     return Err(ExcType::zero_division().into());
@@ -488,6 +495,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
             return Err(ExcType::zero_division().into());
         }
         let result = match other {
+            Value::Float(lhs) => return Ok(Some(Value::Float(py_float_mod(*lhs, long_int_as_f64(rhs)?)))),
             _ if let Some(lhs) = immediate_int(other) => BigInt::from(lhs).mod_floor(rhs.inner()),
             Value::Ref(id) if let HeapData::LongInt(lhs) = vm.heap.get(*id) => lhs.inner().mod_floor(rhs.inner()),
             _ => return Ok(None),
@@ -502,7 +510,7 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
                 check_mult_size(lhs.bits(), i64_bits(rhs), &vm.heap.tracker)?;
                 Some(LongInt::new(lhs.inner() * rhs).into_value(vm.heap))
             }
-            Value::Float(rhs) => Some(Value::Float(long_int_to_f64(lhs) * rhs)),
+            Value::Float(rhs) => Some(Value::Float(long_int_as_f64(lhs)? * rhs)),
             Value::Ref(id) if let HeapData::LongInt(rhs) = vm.heap.get(*id) => {
                 check_mult_size(lhs.bits(), rhs.bits(), &vm.heap.tracker)?;
                 Some(LongInt::new(lhs.inner() * rhs.inner()).into_value(vm.heap))
@@ -523,19 +531,24 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
                 if rhs == 0 {
                     return Err(ExcType::zero_division().into());
                 }
-                rhs as f64
+                Cow::Owned(BigInt::from(rhs))
             }
-            Value::Float(0.0) => return Err(ExcType::zero_division().into()),
-            Value::Float(rhs) => *rhs,
+            Value::Float(rhs) => {
+                let lhs = long_int_as_f64(lhs)?;
+                if *rhs == 0.0 {
+                    return Err(ExcType::zero_division().into());
+                }
+                return Ok(Some(Value::Float(lhs / rhs)));
+            }
             Value::Ref(id) if let HeapData::LongInt(rhs) = vm.heap.get(*id) => {
                 if rhs.is_zero() {
                     return Err(ExcType::zero_division().into());
                 }
-                long_int_to_f64(rhs)
+                Cow::Borrowed(rhs.inner())
             }
             _ => return Ok(None),
         };
-        Ok(Some(Value::Float(long_int_to_f64(lhs) / rhs)))
+        Ok(Some(Value::Float(bigint_true_divide(lhs.inner(), rhs.as_ref())?)))
     }
 
     fn py_rtruediv_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
@@ -544,16 +557,23 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
             return Err(ExcType::zero_division().into());
         }
         let lhs = match other {
-            _ if let Some(lhs) = immediate_int(other) => lhs as f64,
-            Value::Float(lhs) => *lhs,
+            _ if let Some(lhs) = immediate_int(other) => BigInt::from(lhs),
+            Value::Float(lhs) => return Ok(Some(Value::Float(lhs / long_int_as_f64(rhs)?))),
             _ => return Ok(None),
         };
-        Ok(Some(Value::Float(lhs / long_int_to_f64(rhs))))
+        Ok(Some(Value::Float(bigint_true_divide(&lhs, rhs.inner())?)))
     }
 
     fn py_floordiv_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         let lhs = self.get(vm.heap);
         let result = match other {
+            Value::Float(rhs) => {
+                let lhs = long_int_as_f64(lhs)?;
+                if *rhs == 0.0 {
+                    return Err(ExcType::zero_division().into());
+                }
+                return Ok(Some(Value::Float(py_float_floordiv(lhs, *rhs))));
+            }
             _ if let Some(rhs) = immediate_int(other) => {
                 if rhs == 0 {
                     return Err(ExcType::zero_division().into());
@@ -578,8 +598,12 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
         if rhs.is_zero() {
             return Err(ExcType::zero_division().into());
         }
-        let Some(lhs) = immediate_int(other) else {
-            return Ok(None);
+        let lhs = match other {
+            Value::Float(lhs) => {
+                return Ok(Some(Value::Float(py_float_floordiv(*lhs, long_int_as_f64(rhs)?))));
+            }
+            _ if let Some(lhs) = immediate_int(other) => lhs,
+            _ => return Ok(None),
         };
         check_div_size(i64_bits(lhs), &vm.heap.tracker)?;
         let result = BigInt::from(lhs).div_floor(rhs.inner());
@@ -597,13 +621,20 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
 
     fn py_rpow_impl(&self, other: &Value, modulus: Option<&Value>, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         if modulus.is_some() {
-            Ok(None)
-        } else {
-            let Some(base) = integer_value(other, vm.heap) else {
-                return Ok(None);
-            };
-            long_int_pow_value(base.as_ref(), self.get(vm.heap).inner(), vm.heap)
+            return Ok(None);
         }
+        let exponent = self.get(vm.heap);
+        if let Value::Float(base) = other {
+            let exponent = long_int_as_f64(exponent)?;
+            if *base == 0.0 && exponent < 0.0 {
+                return Err(ExcType::zero_negative_power());
+            }
+            return Ok(Some(Value::Float(base.powf(exponent))));
+        }
+        let Some(base) = integer_value(other, vm.heap) else {
+            return Ok(None);
+        };
+        long_int_pow_value(base.as_ref(), exponent.inner(), vm.heap)
     }
 
     fn py_and_impl(&self, other: &Value, vm: &mut VM<'h>, _self_id: Option<HeapId>) -> RunResult<Option<Value>> {
@@ -635,36 +666,39 @@ impl<'h> PyTrait<'h> for HeapRead<'h, LongInt> {
             return Ok(None);
         };
         let value = self.get(vm.heap);
+        let shift = shift.for_left_shift(value.is_zero())?;
         check_lshift_size(value.bits(), shift, &vm.heap.tracker)?;
         Ok(Some(LongInt::new(value.inner() << shift).into_value(vm.heap)))
     }
 
     fn py_rlshift_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
-        let Some(lhs) = immediate_int(other) else {
-            return Ok(None);
+        let lhs = match other {
+            _ if let Some(lhs) = immediate_int(other) => lhs,
+            _ => return Ok(None),
         };
-        let shift = self.get(vm.heap);
-        if shift.is_negative() {
-            Err(ExcType::value_error_negative_shift_count())
-        } else if let Some(shift) = shift.inner().to_u64() {
-            Ok(Some(LongInt::left_shift_i64(lhs, shift, vm)?))
-        } else {
-            Err(ExcType::overflow_c_ssize_t())
+        let count = self.get(vm.heap);
+        if count.is_negative() {
+            return Err(ExcType::value_error_negative_shift_count());
         }
+        let shift = Shift::from_bigint(count.inner()).for_left_shift(lhs == 0)?;
+        Ok(Some(LongInt::left_shift_i64(lhs, shift, vm)?))
     }
 
     fn py_rshift_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         let Some(shift) = shift_amount(other, vm)? else {
             return Ok(None);
         };
-        Ok(Some(
-            LongInt::new(self.get(vm.heap).inner() >> shift).into_value(vm.heap),
-        ))
+        let value = self.get(vm.heap);
+        match shift {
+            Shift::By(shift) => Ok(Some(LongInt::new(value.inner() >> shift).into_value(vm.heap))),
+            Shift::TooLarge => Ok(Some(Value::Int(-i64::from(value.is_negative())))),
+        }
     }
 
     fn py_rrshift_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
-        let Some(lhs) = immediate_int(other) else {
-            return Ok(None);
+        let lhs = match other {
+            _ if let Some(lhs) = immediate_int(other) => lhs,
+            _ => return Ok(None),
         };
         let shift = self.get(vm.heap);
         if shift.is_negative() {
@@ -727,7 +761,7 @@ fn long_int_pow(base: &LongInt, exponent: &Value, heap: &Heap) -> RunResult<Opti
         if base.is_zero() && *exponent < 0.0 {
             return Err(ExcType::zero_negative_power());
         }
-        return Ok(Some(Value::Float(long_int_to_f64(base).powf(*exponent))));
+        return Ok(Some(Value::Float(long_int_as_f64(base)?.powf(*exponent))));
     }
     let Some(exponent) = integer_value(exponent, heap) else {
         return Ok(None);
@@ -744,7 +778,7 @@ fn long_int_pow_value(base: &BigInt, exponent: &BigInt, heap: &Heap) -> RunResul
             .to_f64()
             .filter(|exponent| exponent.is_finite())
             .ok_or_else(ExcType::overflow_int_to_float)?;
-        Ok(Some(Value::Float(bigint_to_f64(base).powf(exponent))))
+        Ok(Some(Value::Float(bigint_as_f64(base)?.powf(exponent))))
     } else if exponent.is_zero() || base.is_one() {
         Ok(Some(Value::Int(1)))
     } else if base.is_zero() {
@@ -768,20 +802,122 @@ fn integer_value<'a>(value: &'a Value, heap: &'a Heap) -> Option<Cow<'a, BigInt>
     }
 }
 
-/// Converts a long integer to float, preserving its sign on overflow.
-fn long_int_to_f64(value: &LongInt) -> f64 {
-    bigint_to_f64(value.inner())
+/// The `f64` a mixed int/float operation converts this integer through.
+///
+/// CPython promotes the int and then performs the float operation, so an integer
+/// past the float range fails the operation outright rather than saturating to
+/// an infinity the arithmetic would go on to carry: `10**400 + 1.5` raises where
+/// saturating would answer `inf`.
+pub(crate) fn long_int_as_f64(value: &LongInt) -> RunResult<f64> {
+    bigint_as_f64(value.inner())
 }
 
-/// Converts an arbitrary-precision integer to float, preserving its sign on overflow.
-fn bigint_to_f64(value: &BigInt) -> f64 {
-    value.to_f64().unwrap_or_else(|| {
-        if value.is_negative() {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        }
-    })
+/// [`long_int_as_f64`] for a bare `BigInt`.
+fn bigint_as_f64(value: &BigInt) -> RunResult<f64> {
+    value
+        .to_f64()
+        .filter(|converted| converted.is_finite())
+        .ok_or_else(ExcType::overflow_int_to_float)
+}
+
+/// The `f64` nearest to `a / b`, rounded once.
+///
+/// Dividing `a as f64` by `b as f64` rounds three times (each operand, then the
+/// quotient), so it answers `9.999999999999999e-31` where the nearest double to
+/// `1 / 10**30` is `1e-30`, and it answers `inf` where the quotient merely
+/// exceeds an intermediate rather than the float range. Instead the quotient is
+/// taken exactly, in integers scaled so it carries a 53-bit mantissa plus two
+/// guard bits, and only that one value is rounded.
+///
+/// `b` must be nonzero. A quotient past the float range raises, as CPython does;
+/// one below it returns a signed zero, which CPython also does.
+pub(crate) fn bigint_true_divide(a: &BigInt, b: &BigInt) -> RunResult<f64> {
+    /// Bits in an `f64` significand.
+    const MANT_DIG: i64 = 53;
+    /// Exponent of the smallest normal `f64`, `f64::MIN_EXP - 1`.
+    const MIN_EXP: i64 = -1022;
+    /// Exponent of the smallest subnormal `f64`, and so of the whole grid's ulp.
+    const MIN_SUB_EXP: i64 = MIN_EXP - MANT_DIG + 1;
+
+    let sign = if a.is_negative() == b.is_negative() { 1.0 } else { -1.0 };
+    let (a, b) = (a.magnitude(), b.magnitude());
+    if a.is_zero() {
+        return Ok(0.0 * sign);
+    }
+
+    // `a / b` lies in `[2**(diff - 1), 2**(diff + 1))`, so scaling by `2**-shift`
+    // lands it within a factor of two of `2**(MANT_DIG + 2)`: enough bits for the
+    // mantissa and two to round on. Clamping `shift` at the subnormal grid's ulp
+    // is what keeps a subnormal result from being rounded twice, once to 53 bits
+    // and again onto the coarser grid.
+    let diff = i64::try_from(a.bits()).unwrap_or(i64::MAX) - i64::try_from(b.bits()).unwrap_or(i64::MAX);
+    let shift = diff.max(MIN_EXP) - MANT_DIG - 2;
+    let (numerator, denominator) = if shift <= 0 {
+        (a << shift.unsigned_abs(), b.clone())
+    } else {
+        (a.clone(), b << shift.unsigned_abs())
+    };
+
+    let (quotient, remainder) = numerator.div_rem(&denominator);
+    // A truncated quotient cannot be distinguished from an exact one by its own
+    // bits, and an exact tie must round to even while a truncated one must round
+    // up. Setting the low bit, which the rounding below discards, makes the
+    // second case stop being a tie without disturbing any other.
+    let quotient = if remainder.is_zero() {
+        quotient
+    } else {
+        quotient | BigUint::one()
+    };
+
+    let drop = i64::try_from(quotient.bits())
+        .unwrap_or(i64::MAX)
+        .saturating_sub(MANT_DIG)
+        .max(MIN_SUB_EXP - shift)
+        .max(0);
+    let mantissa = if drop == 0 {
+        quotient
+    } else {
+        round_shifted_half_even(&quotient, drop.unsigned_abs())
+    };
+
+    let value = scale_pow2(mantissa.to_f64().unwrap_or(f64::INFINITY), shift + drop);
+    if value.is_finite() {
+        Ok(value * sign)
+    } else {
+        Err(ExcType::overflow_int_division_too_large())
+    }
+}
+
+/// `value >> drop`, rounded to nearest with ties to even. `drop` is at least 1.
+fn round_shifted_half_even(value: &BigUint, drop: u64) -> BigUint {
+    let truncated = value >> drop;
+    let discarded = value - (&truncated << drop);
+    let half = BigUint::one() << (drop - 1);
+    match discarded.cmp(&half) {
+        Ordering::Greater => truncated + BigUint::one(),
+        Ordering::Less => truncated,
+        Ordering::Equal if truncated.bit(0) => truncated + BigUint::one(),
+        Ordering::Equal => truncated,
+    }
+}
+
+/// `value * 2**exponent`, stepped so no intermediate leaves the float range.
+///
+/// A single `2f64.powi(exponent)` would be zero for the subnormal exponents this
+/// is called with, losing the product before the multiply. Callers pass a value
+/// under `2**53` and an exponent no lower than the subnormal grid's, so every
+/// step below is exact until the last, which lands on a representable result.
+fn scale_pow2(mut value: f64, mut exponent: i64) -> f64 {
+    const STEP: i32 = 500;
+    while exponent > i64::from(STEP) && value.is_finite() {
+        value *= 2f64.powi(STEP);
+        exponent -= i64::from(STEP);
+    }
+    while exponent < -i64::from(STEP) {
+        value *= 2f64.powi(-STEP);
+        exponent += i64::from(STEP);
+    }
+    value * 2f64.powi(i32::try_from(exponent).unwrap_or(i32::MAX))
 }
 
 /// Raises a `BigInt` to a `u64` exponent without truncating the exponent.
@@ -804,17 +940,52 @@ fn i64_bits(value: i64) -> u64 {
     u64::from(i64::BITS - value.unsigned_abs().leading_zeros())
 }
 
+/// A validated non-negative shift count.
+///
+/// The magnitude is reported rather than raised on, because the two shifts
+/// disagree about what an unnameable count means: `<<` has no representable
+/// answer and says so, while `>>` has one for any count at all.
+enum Shift {
+    By(u64),
+    /// Past the C `ssize_t` CPython converts a shift count through.
+    TooLarge,
+}
+
+impl Shift {
+    /// Classifies an arbitrary-precision count the caller has checked is
+    /// non-negative, so the conversion below cannot lose a sign.
+    fn from_bigint(value: &BigInt) -> Self {
+        value
+            .to_i64()
+            .map_or(Self::TooLarge, |count| Self::By(count.unsigned_abs()))
+    }
+
+    /// The count `<<` will shift by, given whether the value being shifted is
+    /// zero.
+    ///
+    /// CPython answers zero before it looks at the count's magnitude, so
+    /// `0 << 10**30` is `0` rather than an error, and only a nonzero value
+    /// reports a count it cannot name.
+    fn for_left_shift(self, value_is_zero: bool) -> RunResult<u64> {
+        match self {
+            Self::By(shift) => Ok(shift),
+            Self::TooLarge if value_is_zero => Ok(0),
+            Self::TooLarge => Err(ExcType::overflow_too_many_digits()),
+        }
+    }
+}
+
 /// Extracts a validated non-negative shift amount from an integer value.
-fn shift_amount(value: &Value, vm: &VM<'_>) -> RunResult<Option<u64>> {
+fn shift_amount(value: &Value, vm: &VM<'_>) -> RunResult<Option<Shift>> {
     let value = match value {
-        _ if let Some(value) = immediate_int(value) => return shift_i64(value).map(Some),
+        _ if let Some(value) = immediate_int(value) => return shift_i64(value).map(|shift| Some(Shift::By(shift))),
         Value::Ref(id) if let HeapData::LongInt(value) = vm.heap.get(*id) => value,
         _ => return Ok(None),
     };
     if value.is_negative() {
         Err(ExcType::value_error_negative_shift_count())
     } else {
-        value.inner().to_u64().map(Some).ok_or_else(ExcType::overflow_c_ssize_t)
+        Ok(Some(Shift::from_bigint(value.inner())))
     }
 }
 

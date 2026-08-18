@@ -31,8 +31,8 @@ use crate::{
         instance::{instance_dataclass_eq, instance_getattr, instance_repr_fmt, instance_str, instance_user_eq},
         instance_bool, instance_delattr, instance_delitem, instance_setattr, instance_setitem,
         long_int::{
-            bigint_cmp_f64, bigint_cmp_i64, bigint_eq_f64, bigint_eq_i64, check_bits_str_digits_limit, i64_cmp_f64,
-            repeat_count, wide_i128_into_value,
+            bigint_cmp_f64, bigint_cmp_i64, bigint_eq_f64, bigint_eq_i64, bigint_true_divide,
+            check_bits_str_digits_limit, i64_cmp_f64, repeat_count, wide_i128_into_value,
         },
         namedtuple::cmp_item_seqs,
         slice::slice_collect_iterator,
@@ -773,8 +773,17 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `/`.
     fn py_truediv_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        // True division always returns a float, so int and float operands share
-        // one arm; no immediate int is large enough to round to zero here.
+        // Two ints divide through their exact quotient: their `f64` images
+        // each round before the division rounds again, and three roundings do
+        // not agree with one past `2**53` (see `int_true_divide`).
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            if b == 0 {
+                return Err(ExcType::zero_division().into());
+            }
+            return Ok(Some(Self::Float(int_true_divide(a, b)?)));
+        }
+        // Reaching here, one side really is a float, so the result is whatever
+        // that float division gives.
         if let (Some(a), Some(b)) = (immediate_f64(self), immediate_f64(other)) {
             if b == 0.0 {
                 return Err(ExcType::zero_division().into());
@@ -814,7 +823,7 @@ impl<'h> PyTrait<'h> for Value {
             if b == 0.0 {
                 return Err(ExcType::zero_division().into());
             }
-            return Ok(Some(Self::Float((a / b).floor())));
+            return Ok(Some(Self::Float(py_float_floordiv(a, b))));
         }
         if let Self::Ref(id) = self {
             vm.heap.read(*id).py_floordiv_impl(other, vm)
@@ -1782,7 +1791,13 @@ impl Value {
     }
 
     /// Performs Python `** or pow()` with reflected-operation fallback.
-    pub(crate) fn py_pow(&self, other: &Self, modulus: Option<&Self>, vm: &mut VM<'_>, form: OpForm) -> RunResult<Self> {
+    pub(crate) fn py_pow(
+        &self,
+        other: &Self,
+        modulus: Option<&Self>,
+        vm: &mut VM<'_>,
+        form: OpForm,
+    ) -> RunResult<Self> {
         self.binary_op(
             other,
             vm,
@@ -2354,6 +2369,22 @@ fn immediate_int_pow(base: i64, exp: i64, vm: &mut VM<'_>) -> RunResult<Value> {
     }
 }
 
+/// The `f64` nearest to `a / b`, for a pair of immediate ints. `b` is nonzero.
+///
+/// Under `2**53` both operands convert exactly, so dividing the two doubles
+/// rounds once and is already right. Above it each conversion rounds too, and
+/// three roundings do not agree with one: `(2**53 + 1) / 3` answers
+/// `3002399751580330.5` that way against a true nearest of `3002399751580331.0`.
+/// Those go the long way, through the same exact quotient a big int takes.
+fn int_true_divide(a: i64, b: i64) -> RunResult<f64> {
+    const EXACT: i64 = 1 << 53;
+    if a.unsigned_abs() <= EXACT.unsigned_abs() && b.unsigned_abs() <= EXACT.unsigned_abs() {
+        #[expect(clippy::cast_precision_loss, reason = "both operands are exact as f64 here")]
+        return Ok(a as f64 / b as f64);
+    }
+    bigint_true_divide(&BigInt::from(a), &BigInt::from(b))
+}
+
 /// Computes Python-style floor division and modulo.
 ///
 /// Python's division rounds toward negative infinity (floor division),
@@ -2378,7 +2409,7 @@ pub(crate) fn floor_divmod(a: i64, b: i64) -> Option<(i64, i64)> {
 /// divisor's sign — `-7.0 % 3.0 == 2.0` — and a zero result gets the divisor's
 /// sign too (`6.0 % -3.0 == -0.0`). Callers must reject a zero divisor first
 /// (`ZeroDivisionError`); this helper assumes `b != 0`.
-fn py_float_mod(a: f64, b: f64) -> f64 {
+pub(crate) fn py_float_mod(a: f64, b: f64) -> f64 {
     let r = a % b;
     if r == 0.0 {
         0.0f64.copysign(b)
@@ -2387,6 +2418,14 @@ fn py_float_mod(a: f64, b: f64) -> f64 {
     } else {
         r
     }
+}
+
+/// Computes Python-style float floor division.
+///
+/// Callers must reject a zero divisor first (`ZeroDivisionError`); this helper
+/// assumes `b != 0`.
+pub(crate) fn py_float_floordiv(a: f64, b: f64) -> f64 {
+    (a / b).floor()
 }
 
 /// Computes the number of significant bits in an i64.

@@ -10,7 +10,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult, SimpleException},
     heap::{Heap, HeapData},
     resource_checks::check_pow_size,
-    types::{LongInt, PyTrait, long_int::modular_pow},
+    types::{LongInt, PyTrait, long_int::modular_pow, long_int_as_f64},
     value::Value,
 };
 
@@ -138,6 +138,24 @@ fn two_arg_pow(base: &Value, exp: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
                 Ok(Value::Float(b.powi(exp_i32)))
             } else {
                 Ok(Value::Float(b.powf(*e as f64)))
+            }
+        }
+        // A big int mixed with a float converts and then raises as floats, the
+        // same as `**` does; `pow()` shares the operator's slot in CPython.
+        (Value::Ref(id), Value::Float(e)) if let HeapData::LongInt(li) = vm.heap.get(*id) => {
+            let base = long_int_as_f64(li)?;
+            if base == 0.0 && *e < 0.0 {
+                Err(ExcType::zero_negative_power())
+            } else {
+                Ok(Value::Float(base.powf(*e)))
+            }
+        }
+        (Value::Float(b), Value::Ref(id)) if let HeapData::LongInt(li) = vm.heap.get(*id) => {
+            let exponent = long_int_as_f64(li)?;
+            if *b == 0.0 && exponent < 0.0 {
+                Err(ExcType::zero_negative_power())
+            } else {
+                Ok(Value::Float(b.powf(exponent)))
             }
         }
         _ => Err(ExcType::binary_type_error(

@@ -1448,6 +1448,16 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::OverflowError, "Python int too large to convert to C ssize_t").into()
     }
 
+    /// Creates an OverflowError for a shift count past C `ssize_t`.
+    ///
+    /// CPython words the shift's own overflow for the result rather than for the
+    /// count, so this is not [`overflow_c_ssize_t`](Self::overflow_c_ssize_t)
+    /// even though the two fire at the same boundary.
+    #[must_use]
+    fn overflow_too_many_digits() -> RunError {
+        SimpleException::new_msg(ExcType::OverflowError, "too many digits in integer").into()
+    }
+
     /// Creates an OverflowError when a Python int doesn't fit into a C `int` (i32).
     ///
     /// Matches CPython's format: `OverflowError: Python int too large to convert to C int`
@@ -1533,6 +1543,16 @@ pub(crate) trait ExcTypeExt: Sized {
     #[must_use]
     fn overflow_int_to_float() -> RunError {
         SimpleException::new_msg(ExcType::OverflowError, "int too large to convert to float").into()
+    }
+
+    /// Creates an OverflowError when `int / int` lands past the float range.
+    ///
+    /// CPython words this one for the quotient rather than for either operand,
+    /// which is why it is not [`overflow_int_to_float`](Self::overflow_int_to_float):
+    /// `10**400 / 1` overflows on a dividend that no conversion was asked of.
+    #[must_use]
+    fn overflow_int_division_too_large() -> RunError {
+        SimpleException::new_msg(ExcType::OverflowError, "integer division result too large for a float").into()
     }
 
     /// Creates a ValueError for a zero modulus passed to `pow`.
