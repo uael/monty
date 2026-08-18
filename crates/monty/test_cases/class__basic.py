@@ -66,6 +66,17 @@ assert isinstance(p, Point)
 assert isinstance(p, (int, Point))
 assert not isinstance(5, Point), 'isinstance false for a non-instance'
 
+# `type` as the second argument asks whether the first *is* a class
+assert isinstance(Point, type)
+assert isinstance(int, type)
+assert isinstance(ValueError, type)
+assert isinstance(type, type)
+assert isinstance(type(None), type)
+assert not isinstance(p, type), 'an instance is not a class'
+assert not isinstance(len, type), 'a builtin function is not a class'
+assert not isinstance(1, type), 'a value is not a class'
+assert not isinstance(iter, type), 'iter is a function, not the iterator class'
+
 
 class Other:
     def __init__(self) -> None:

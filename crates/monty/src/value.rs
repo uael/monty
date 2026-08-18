@@ -26,7 +26,9 @@ use crate::{
     types::{
         Bytes, BytesIterator, CmpOrder, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
+        class_getattr,
         instance::{instance_dataclass_eq, instance_getattr, instance_repr_fmt, instance_str, instance_user_eq},
+        instance_bool, instance_delattr, instance_delitem, instance_setattr, instance_setitem,
         long_int::{
             bigint_cmp_f64, bigint_cmp_i64, bigint_eq_f64, bigint_eq_i64, check_bits_str_digits_limit, i64_cmp_f64,
             repeat_count, wide_i128_into_value,
@@ -448,6 +450,9 @@ impl<'h> PyTrait<'h> for Value {
                 "NotImplemented should not be used in a boolean context",
             )
             .into()),
+            // A user instance consults `__bool__`/`__len__`, which re-enter the
+            // VM and so cannot run behind a live heap-read handle.
+            Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Instance(_)) => instance_bool(*id, vm),
             Self::Ref(id) => vm.heap.read(*id).py_bool(vm),
             Self::Undefined | Self::None => Ok(false),
             Self::Ellipsis => Ok(true),
@@ -1320,6 +1325,9 @@ impl<'h> PyTrait<'h> for Value {
 
     fn py_setitem(&mut self, key: Self, value: Self, vm: &mut VM<'_>) -> RunResult<()> {
         match self {
+            // `__setitem__` re-enters the VM, so it takes the same HeapId route
+            // around the read-only trait that `heap_subscript` takes for reads.
+            Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Instance(_)) => instance_setitem(*id, key, value, vm),
             Self::Ref(id) => vm.heap.read(*id).py_setitem(key, value, vm),
             _ => Err(ExcType::type_error(format!(
                 "'{}' object does not support item assignment",
@@ -1330,6 +1338,11 @@ impl<'h> PyTrait<'h> for Value {
 
     fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'_>) -> RunResult<()> {
         if let Self::Ref(id) = self {
+            // A `property` deleter re-enters the VM, so instances take the same
+            // heap-id route around the read handle that assignment takes.
+            if matches!(vm.heap.get(*id), HeapData::Instance(_)) {
+                return instance_delattr(*id, name, vm);
+            }
             vm.heap.read(*id).py_del_attr(name, vm)
         } else {
             let type_name = self.py_type_name(vm);
@@ -1339,6 +1352,11 @@ impl<'h> PyTrait<'h> for Value {
 
     fn py_delitem(&mut self, key: Self, vm: &mut VM<'_>) -> RunResult<()> {
         if let Self::Ref(id) = self {
+            // `__delitem__` re-enters the VM, so it takes the same HeapId route
+            // around the read-only trait that `__setitem__` takes.
+            if matches!(vm.heap.get(*id), HeapData::Instance(_)) {
+                return instance_delitem(*id, key, vm);
+            }
             vm.heap.read(*id).py_delitem(key, vm)
         } else {
             let type_name = self.py_type_name(vm);
@@ -1766,18 +1784,27 @@ impl Value {
             Self::Ref(heap_id) if matches!(vm.heap.get(*heap_id), HeapData::Instance(_)) => {
                 return instance_getattr(*heap_id, attr, vm);
             }
+            // Class objects resolve attributes through their own base chain and
+            // apply the descriptor protocol, both of which need the heap id.
+            Self::Ref(heap_id) if matches!(vm.heap.get(*heap_id), HeapData::Class(_)) => {
+                return class_getattr(*heap_id, attr, vm);
+            }
             Self::Ref(heap_id) => {
                 if let Some(call_result) = vm.heap.read(*heap_id).py_getattr(attr, vm)? {
                     return Ok(call_result);
                 }
             }
+            // An exception class is a type object too, and `type(exc)` hands
+            // back this form, so it answers `__name__` like any other class.
+            Self::Builtin(Builtins::ExcType(exc_type)) => {
+                if is_dunder_name(attr, vm) {
+                    let name = Type::Exception(*exc_type).name(vm.heap, vm.interns);
+                    return Ok(CallResult::Value(allocate_string(name, vm.heap)));
+                }
+            }
             Self::Builtin(Builtins::Type(t)) => {
                 // Handle type object attributes like __name__
-                let is_dunder_name = attr.static_string().map_or_else(
-                    || attr.as_str(vm.interns) == "__name__",
-                    |ss| ss == StaticStrings::DunderName,
-                );
-                if is_dunder_name {
+                if is_dunder_name(attr, vm) {
                     return Ok(CallResult::Value(allocate_string(t.name(vm.heap, vm.interns), vm.heap)));
                 }
                 if *t == Type::TimeZone && attr.as_str(vm.interns) == "utc" {
@@ -1793,6 +1820,11 @@ impl Value {
     /// Sets an attribute, consuming `value` on both success and error.
     pub fn py_set_attr(&self, name: &EitherStr, value: Self, vm: &mut VM<'_>) -> RunResult<()> {
         if let Self::Ref(heap_id) = self {
+            // A `property` setter re-enters the VM, so instances route through a
+            // path that has the heap id and no live read handle.
+            if matches!(vm.heap.get(*heap_id), HeapData::Instance(_)) {
+                return instance_setattr(*heap_id, name, value, vm);
+            }
             vm.heap.read(*heap_id).py_set_attr(name, value, vm)
         } else {
             value.drop_with(vm);
@@ -2495,6 +2527,15 @@ fn bigint_pow(base: BigInt, exp: u64) -> BigInt {
     }
 
     result
+}
+
+/// Whether `attr` names `__name__`, the one attribute the builtin class values
+/// answer.
+fn is_dunder_name(attr: &EitherStr, vm: &VM<'_>) -> bool {
+    attr.static_string().map_or_else(
+        || attr.as_str(vm.interns) == "__name__",
+        |ss| ss == StaticStrings::DunderName,
+    )
 }
 
 #[cfg(test)]

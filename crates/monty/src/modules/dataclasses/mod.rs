@@ -602,7 +602,7 @@ pub(crate) fn dataclass_init<'h>(
 /// must make). The cost is that the hook cannot suspend on an external or OS
 /// call, the same bound every synchronously-dispatched dunder carries.
 fn run_post_init(instance_id: HeapId, vm: &mut VM<'_>) -> RunResult<()> {
-    let Some(hook) = instance_attr(instance_id, "__post_init__", vm) else {
+    let Some(hook) = instance_attr(instance_id, "__post_init__", vm)? else {
         return Ok(());
     };
     defer_drop!(hook, vm);
@@ -840,9 +840,9 @@ pub(crate) fn dataclass_eq(
         let field_name = vm.interns.get_str(name).to_owned();
         // Both reads are guarded so a failing comparison below (or an early
         // return) cannot strand either value.
-        let a = instance_attr(self_id, &field_name, vm);
+        let a = instance_attr(self_id, &field_name, vm)?;
         defer_drop!(a, vm);
-        let b = instance_attr(other_id, &field_name, vm);
+        let b = instance_attr(other_id, &field_name, vm)?;
         defer_drop!(b, vm);
         match (a, b) {
             (Some(a), Some(b)) if !a.py_eq_operator(b, vm)? => return Ok(Some(false)),
@@ -901,7 +901,7 @@ fn compared_tuple(self_id: HeapId, class_id: HeapId, names: &[StringId], vm: &mu
     let (items, vm) = guard.as_parts_mut();
     for &name in names {
         let field_name = vm.interns.get_str(name).to_owned();
-        let Some(value) = instance_attr(self_id, &field_name, vm) else {
+        let Some(value) = instance_attr(self_id, &field_name, vm)? else {
             let owner = class_name(class_id, vm.heap, vm.interns).into_owned();
             return Err(ExcType::attribute_error(&owner, &field_name));
         };
@@ -1038,7 +1038,7 @@ pub(crate) fn dataclass_repr_fmt(
     // generated f-string does. A field that resolves nowhere raises.
     write_dataclass_repr(f, &name, field_names.len(), vm, heap_ids, |i, vm| {
         let field_name = vm.interns.get_str(field_names[i]).to_owned();
-        match instance_attr(self_id, &field_name, vm) {
+        match instance_attr(self_id, &field_name, vm)? {
             Some(value) => Ok((field_name, Some(value))),
             None => Err(ExcType::attribute_error(&name, &field_name)),
         }

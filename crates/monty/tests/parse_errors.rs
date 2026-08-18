@@ -36,13 +36,15 @@ fn simple_classes_compile_successfully() {
     assert!(result.is_ok(), "a simple class should compile");
 }
 
+/// A base list parses; only metaclass keywords are still rejected, since Monty
+/// has no metaclass machinery for them to drive.
 #[test]
-fn class_inheritance_returns_not_implemented_error() {
-    let err = get_parse_err("class Foo(Bar): pass");
+fn class_metaclass_returns_not_implemented_error() {
+    let err = get_parse_err("class Foo(metaclass=Meta): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support class inheritance and metaclasses"
+        @"The monty syntax parser does not yet support class metaclasses"
     );
 }
 

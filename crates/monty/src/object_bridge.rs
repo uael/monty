@@ -13,7 +13,7 @@ use crate::{
     builtins::Builtins,
     bytecode::VM,
     defer_drop,
-    exception_private::{RunError, SimpleException},
+    exception_private::{ExceptionObject, RunError, SimpleException},
     heap::{DropGuard, Heap, HeapData, HeapId, HeapReadOutput},
     intern::Interns,
     types::{
@@ -182,7 +182,8 @@ impl MontyObjectExt for MontyObject {
             }
             Self::Exception { exc_type, arg } => {
                 let exc = SimpleException::new(exc_type, arg);
-                Ok(Value::Ref(vm.heap.allocate(HeapData::Exception(exc))))
+                let object = ExceptionObject::from_summary(exc, vm);
+                Ok(Value::Ref(vm.heap.allocate(HeapData::Exception(Box::new(object)))))
             }
             Self::Dataclass {
                 name,
@@ -423,7 +424,7 @@ impl MontyObjectExt for MontyObject {
                         })
                     }
                     HeapReadOutput::Exception(exc) => {
-                        let exc_ref = exc.get(vm.heap);
+                        let exc_ref = exc.get(vm.heap).summary();
                         Self::Exception {
                             exc_type: exc_ref.exc_type(),
                             arg: exc_ref.arg().map(ToString::to_string),
@@ -619,6 +620,10 @@ impl MontyTypeExt for MontyType {
     /// `from_type_name` never hold/produce it).
     fn from_internal_static(ty: Type) -> Self {
         match ty {
+            // The descriptor wrappers and the `super()` proxy have no host
+            // counterpart; they surface as their `repr` string, like a class
+            // object does (see `limitations/classes.md`).
+            Type::StaticMethod | Type::ClassMethod | Type::Super => Self::Type,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,

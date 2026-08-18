@@ -7,8 +7,14 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::{HashValue, identity_hash},
-    heap::{BorrowedHeapReadMut, DropGuard, DropWithContext, HeapId, HeapItem, HeapRead, heap_read_ref_as_field_mut},
-    types::str::allocate_string,
+    heap::{
+        BorrowedHeapReadMut, DropGuard, DropWithContext, HeapData, HeapId, HeapItem, HeapRead,
+        heap_read_ref_as_field_mut,
+    },
+    types::{
+        instance::{class_member, class_name, descriptor_class_get},
+        str::allocate_string,
+    },
     value::{EitherStr, Value},
 };
 
@@ -100,6 +106,12 @@ impl DataclassOptions {
         }
     }
 }
+/// Ceiling on how far a base-class walk follows `__bases__`.
+///
+/// Bases are fixed at class creation and a base must already exist to be named,
+/// so a live chain is finite and acyclic; the cap only bounds the damage from a
+/// corrupted snapshot, where stopping early loses a lookup rather than hanging.
+pub(crate) const MAX_MRO_DEPTH: usize = 100;
 
 /// A user-defined class object created by a `class Foo: ...` statement.
 ///
@@ -109,9 +121,7 @@ impl DataclassOptions {
 /// work via reference identity, so there is no separate type-id counter.
 ///
 /// Calling a class (`Foo(...)`) constructs an [`Instance`](super::Instance); see
-/// `instantiate_class` in the VM's call module. Inheritance is not yet supported,
-/// but a future `bases: Vec<HeapId>` field would slot in here without disturbing
-/// the rest of the design.
+/// `instantiate_class` in the VM's call module.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Class {
     /// Class name (e.g. `Foo`), used for `repr` and `__name__`. Interned for
@@ -126,27 +136,41 @@ pub(crate) struct Class {
     /// CPython generates and Monty cannot yet install: baked in at decoration
     /// so `__dataclass_params__` stays a report, not a rewritable control.
     options: DataclassOptions,
+    /// Owned base-class values in declaration order: a `Value::Ref` to another
+    /// `Class`, or a `Value::Builtin(Builtins::ExcType(..))` for a builtin
+    /// exception root. Monty implements single inheritance, so this holds at
+    /// most one entry (`create_class` rejects more).
+    bases: Vec<Value>,
+    /// Nearest builtin exception ancestor, resolved once at creation because
+    /// bases never change. `Some` is what makes instances of this class
+    /// raisable and catchable by `except <builtin>:`.
+    exc_base: Option<ExcType>,
 }
 
 impl Class {
-    /// Creates a new class object from its name and member namespace.
+    /// Creates a class object from its name, member namespace and (owned) bases.
     ///
     /// Dataclass options start at their defaults; `@dataclass` sets them with
     /// [`HeapRead::set_dataclass_options`] once it has built the class.
+    ///
+    /// `exc_base` must already be the nearest builtin exception ancestor
+    /// reachable through `bases`; the 3-arg `type()` constructor (`builtins::type_`)
+    /// is the single place that derives it.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<Value>, exc_base: Option<ExcType>) -> Self {
         Self {
             name,
             namespace,
             options: DataclassOptions::default(),
+            bases,
+            exc_base,
         }
     }
 
     /// The `@dataclass(...)` options in force for this class.
     ///
-    /// Meaningful only once [`dataclass_options`](crate::modules::dataclasses::dataclass_options)
-    /// has confirmed the class is a dataclass — a plain class reports the
-    /// defaults it was never decorated with.
+    /// Meaningful only once the class is known to be a dataclass — a plain one
+    /// reports the defaults it was never decorated with.
     #[must_use]
     pub fn dataclass_options(&self) -> DataclassOptions {
         self.options
@@ -163,6 +187,52 @@ impl Class {
     pub fn namespace(&self) -> &Dict {
         &self.namespace
     }
+
+    /// The declared base values, in order.
+    #[must_use]
+    pub fn bases(&self) -> &[Value] {
+        &self.bases
+    }
+
+    /// The nearest builtin exception ancestor, or `None` for a plain class.
+    #[must_use]
+    pub fn exc_base(&self) -> Option<ExcType> {
+        self.exc_base
+    }
+}
+
+/// The single user-defined base class of `class_id`, or `None` at the top of
+/// the chain (or when the only base is a builtin exception type).
+pub(crate) fn class_base_id(class_id: HeapId, vm: &VM<'_>) -> Option<HeapId> {
+    match vm.heap.get(class_id) {
+        HeapData::Class(class) => class.bases().iter().find_map(|base| match base {
+            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => Some(*id),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The nearest builtin exception ancestor of `class_id`, or `None` when it is
+/// not an exception class. Cached on the class, so this is a single read.
+pub(crate) fn class_exc_base(class_id: HeapId, vm: &VM<'_>) -> Option<ExcType> {
+    match vm.heap.get(class_id) {
+        HeapData::Class(class) => class.exc_base(),
+        _ => None,
+    }
+}
+
+/// Whether `sub_id` is `base_id` or inherits from it, walking the base chain.
+pub(crate) fn class_is_subclass(sub_id: HeapId, base_id: HeapId, vm: &VM<'_>) -> bool {
+    let mut current = Some(sub_id);
+    for _ in 0..MAX_MRO_DEPTH {
+        match current {
+            Some(id) if id == base_id => return true,
+            Some(id) => current = class_base_id(id, vm),
+            None => return false,
+        }
+    }
+    false
 }
 
 impl<'h> HeapRead<'h, Class> {
@@ -234,36 +304,16 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Class> {
         Ok(write!(f, "<class '{}'>", self.get(vm.heap).name.as_str(vm.interns))?)
     }
 
-    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h>) -> RunResult<Option<CallResult>> {
-        let attr_str = attr.as_str(vm.interns);
-        // `Foo.__name__` returns the class name — before the namespace lookup
-        // because in CPython `type.__name__` is a metaclass data descriptor that
-        // shadows a same-named class-dict member (`class Foo: __name__ = 'bar'`
-        // still reads `'Foo'`; only instances see the member).
-        if attr_str == "__name__" {
-            let name = self.get(vm.heap).name.as_str(vm.interns).to_owned();
-            return Ok(Some(CallResult::Value(allocate_string(name, vm.heap))));
-        }
-        // Otherwise look up a member (method or class variable) in the namespace.
-        match self.get(vm.heap).namespace.get_by_str(attr_str, vm.heap, vm.interns) {
-            Some(value) => Ok(Some(CallResult::Value(value.clone_with_heap(vm.heap)))),
-            None => Err(ExcType::attribute_error_type(
-                self.get(vm.heap).name.as_str(vm.interns),
-                attr_str,
-            )),
-        }
-    }
-
     fn py_call_attr(
         &mut self,
-        _self_id: HeapId,
+        self_id: HeapId,
         vm: &mut VM<'h>,
         attr: &EitherStr,
         args: ArgValues,
     ) -> RunResult<CallResult> {
         let attr_str = attr.as_str(vm.interns);
         // `__name__` is a synthesized string, not a namespace member (see
-        // `py_getattr`), so calling it goes through the normal callable
+        // [`class_getattr`]), so calling it goes through the normal callable
         // dispatch and raises CPython's `TypeError: 'str' object is not
         // callable` rather than a spurious `AttributeError`.
         if attr_str == "__name__" {
@@ -273,13 +323,11 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Class> {
             return vm.call_function(name_val, args);
         }
         // `Foo.method(args)` calls the raw (unbound) member with the given args —
-        // no `self` is inserted, the caller passes the instance explicitly.
-        let member = self
-            .get(vm.heap)
-            .namespace
-            .get_by_str(attr_str, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap));
+        // no `self` is inserted, the caller passes the instance explicitly. A
+        // `classmethod` is the exception: it binds the class, as in CPython.
+        let member = class_member(self_id, attr_str, vm);
         if let Some(member) = member {
+            let member = descriptor_class_get(member, self_id, vm);
             defer_drop!(member, vm);
             vm.call_function(member, args)
         } else {
@@ -292,8 +340,35 @@ impl<'h> PyTrait<'h> for HeapRead<'h, Class> {
     }
 }
 
+/// Reads a class attribute for `Foo.attr`: the `Value`-level counterpart of
+/// [`instance_getattr`](super::instance::instance_getattr), taking the class's
+/// own `HeapId` because both the base-class walk and descriptor binding need it.
+///
+/// Lookup order is `__name__`, then this class's namespace, then each base's.
+pub(crate) fn class_getattr(class_id: HeapId, attr: &EitherStr, vm: &mut VM<'_>) -> RunResult<CallResult> {
+    let attr_str = attr.as_str(vm.interns);
+    // `Foo.__name__` returns the class name, checked before the namespace lookup
+    // because in CPython `type.__name__` is a metaclass data descriptor that
+    // shadows a same-named class-dict member (`class Foo: __name__ = 'bar'`
+    // still reads `'Foo'`; only instances see the member).
+    if attr_str == "__name__" {
+        let name = class_name(class_id, vm.heap, vm.interns).into_owned();
+        return Ok(CallResult::Value(allocate_string(name, vm.heap)));
+    }
+    match class_member(class_id, attr_str, vm) {
+        Some(member) => Ok(CallResult::Value(descriptor_class_get(member, class_id, vm))),
+        None => Err(ExcType::attribute_error_type(
+            &class_name(class_id, vm.heap, vm.interns),
+            attr_str,
+        )),
+    }
+}
+
 impl HeapItem for Class {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         self.namespace.py_dec_ref_ids(stack);
+        for base in &mut self.bases {
+            base.py_dec_ref_ids(stack);
+        }
     }
 }

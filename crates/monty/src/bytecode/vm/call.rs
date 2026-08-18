@@ -23,8 +23,14 @@ use crate::{
     modules::dataclasses,
     os_dispatch::{PendingOsEffect, release_pending_effect},
     types::{
-        Dict, Instance, PyTrait, Type, bytes::call_bytes_method, construct_namedtuple, instance::class_name,
+        Dict, Instance, PyTrait, Type,
+        bytes::call_bytes_method,
+        class::class_exc_base,
+        construct_namedtuple,
+        instance::{class_member, class_name},
+        instance_call,
         str::call_str_method,
+        super_object::set_exception_args,
     },
     value::{EitherStr, Value},
 };
@@ -508,6 +514,8 @@ impl VM<'_> {
 
         let (func_id, cells, defaults) = match self.heap.get(heap_id) {
             HeapData::Class(_) => return self.instantiate_class(heap_id, args),
+            // An instance is callable through its class's `__call__`.
+            HeapData::Instance(_) => return instance_call(heap_id, args, self),
             // Calling a namedtuple class constructs a `NamedTuple` instance.
             HeapData::NamedTupleClass(_) => {
                 return construct_namedtuple(heap_id, self, args).map(CallResult::Value);
@@ -925,14 +933,23 @@ impl VM<'_> {
         // The instance now owns a reference to its class object.
         self.heap.inc_ref(class_id);
 
-        // Look up `__init__` in the class namespace (cloned out to release the borrow).
-        let init = match self.heap.get(class_id) {
-            HeapData::Class(class) => class
-                .namespace()
-                .get_by_str("__init__", self.heap, self.interns)
-                .map(|v| v.clone_with_heap(self)),
-            _ => None,
-        };
+        // An exception class records its constructor arguments before running
+        // any `__init__`, exactly as `BaseException.__new__` does, so `e.args`
+        // is populated even for a subclass whose `__init__` never calls
+        // `super().__init__(...)`.
+        let is_exception = class_exc_base(class_id, self).is_some();
+        if is_exception {
+            let recorded = args.clone_positional(self.heap);
+            if let Err(e) = set_exception_args(instance_id, recorded, self) {
+                args.drop_with(self);
+                Value::Ref(instance_id).drop_with(self);
+                return Err(e);
+            }
+        }
+
+        // Look up `__init__` in the class and its bases (cloned out to release
+        // the borrow), so a subclass with no `__init__` inherits its base's.
+        let init = class_member(class_id, "__init__", self);
 
         match init {
             // A dataclass with no user-defined `__init__` binds its fields
@@ -946,6 +963,13 @@ impl VM<'_> {
                 dataclasses::dataclass_init(self, &class, class_id, Value::Ref(instance_id), args)
             }
             None if matches!(args, ArgValues::Empty) => Ok(CallResult::Value(Value::Ref(instance_id))),
+            // An exception class with no `__init__` anywhere in its chain still
+            // accepts arguments: `BaseException.__init__` stores them, which the
+            // `set_exception_args` call above has already done.
+            None if is_exception => {
+                args.drop_with(self);
+                Ok(CallResult::Value(Value::Ref(instance_id)))
+            }
             None => {
                 args.drop_with(self);
                 let name = class_name(class_id, self.heap, self.interns);

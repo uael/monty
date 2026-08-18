@@ -37,6 +37,20 @@ pub(crate) enum ArgValues {
 }
 
 impl ArgValues {
+    /// Owned copies of the positional arguments, leaving `self` intact.
+    ///
+    /// For callers that must record the arguments *and* still pass them on,
+    /// such as `BaseException.__new__` storing them as `e.args` before
+    /// `__init__` runs.
+    pub fn clone_positional(&self, heap: &impl ContainsHeap) -> Vec<Value> {
+        match self {
+            Self::Empty | Self::Kwargs(_) => Vec::new(),
+            Self::One(a) => vec![a.clone_with_heap(heap)],
+            Self::Two(a, b) => vec![a.clone_with_heap(heap), b.clone_with_heap(heap)],
+            Self::ArgsKargs { args, .. } => args.iter().map(|v| v.clone_with_heap(heap)).collect(),
+        }
+    }
+
     /// Checks that zero arguments were passed.
     ///
     /// On error, properly drops all contained values to maintain reference counts.

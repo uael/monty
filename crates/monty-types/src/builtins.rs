@@ -42,7 +42,7 @@ pub enum BuiltinsFunctions {
     // bytes - handled by Type enum
     // Callable,
     Chr,
-    // Classmethod,
+    Classmethod,
     // Compile,
     // complex - handled by Type enum
     // Delattr,
@@ -66,7 +66,7 @@ pub enum BuiltinsFunctions {
     // Input,
     // int - handled by Type enum
     Isinstance,
-    // Issubclass,
+    Issubclass,
     // Iter - handled by Type enum
     Len,
     // list - handled by Type enum
@@ -82,7 +82,6 @@ pub enum BuiltinsFunctions {
     Ord,
     Pow,
     Print,
-    // Property,
     // range - handled by Type enum
     Repr,
     Reversed,
@@ -91,10 +90,10 @@ pub enum BuiltinsFunctions {
     Setattr,
     // Slice,
     Sorted,
-    // Staticmethod,
+    Staticmethod,
     // str - handled by Type enum
     Sum,
-    // Super,
+    Super,
     // tuple - handled by Type enum
     Type,
     // Vars,

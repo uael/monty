@@ -212,6 +212,9 @@ message RaisedException {
   // Structured payload for exception types that carry more than a message;
   // absent for most exceptions. Mirrors monty's `ExcData`.
   ExcData data = 4;
+  // Name of the sandbox-defined class the exception was raised from, when it
+  // was not a builtin one; `exc_type` then names its nearest builtin ancestor.
+  optional string user_type = 5;
 }
 
 // Structured exception payload, mirroring monty's `ExcData` enum. Future

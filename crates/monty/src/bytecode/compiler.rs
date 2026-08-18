@@ -801,22 +801,29 @@ impl<'a> Compiler<'a> {
             } => self.compile_for(target, iter, body, or_else)?,
             Node::While { test, body, or_else } => self.compile_while(test, body, or_else)?,
             Node::Assert { test, msg } => self.compile_assert(test, msg.as_ref())?,
-            Node::Raise(expr) => {
-                if let Some(exc) = expr {
+            Node::Raise { exc, cause } => match (exc, cause) {
+                (Some(exc), Some(cause)) => {
+                    self.compile_expr(exc)?;
+                    self.compile_expr(cause)?;
+                    self.code.emit(Opcode::RaiseFrom)?;
+                }
+                (Some(exc), None) => {
                     self.compile_expr(exc)?;
                     self.code.emit(Opcode::Raise)?;
-                } else {
-                    self.code.emit(Opcode::Reraise)?;
                 }
-            }
+                // `raise from` with no exception is a syntax error ruff rejects
+                // before this point, so a missing exception is a bare `raise`.
+                (None, _) => self.code.emit(Opcode::Reraise)?,
+            },
             Node::FunctionDef { def, decorators } => self.compile_function_def(def, decorators)?,
             Node::ClassDef {
                 name,
+                bases,
                 body,
                 members,
                 decorators,
                 position,
-            } => self.compile_class_def(name, body, members, decorators, *position)?,
+            } => self.compile_class_def(name, bases, body, members, decorators, *position)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
             Node::With {
                 context, target, body, ..
@@ -1011,6 +1018,7 @@ impl<'a> Compiler<'a> {
     fn compile_class_def(
         &mut self,
         name: &Identifier,
+        bases: &[ExprLoc],
         body: &PreparedFunctionDef,
         members: &[Identifier],
         decorators: &[ExprLoc],
@@ -1021,14 +1029,28 @@ impl<'a> Compiler<'a> {
         for decorator in decorators {
             self.compile_expr(decorator)?;
         }
+        // `type(name, bases, namespace)`: the first two arguments are built
+        // here, in the enclosing scope, because that is where CPython evaluates
+        // base expressions: a base name shadowed by a class variable must
+        // still resolve to the enclosing binding.
+        let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
+        self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
+        for base in bases {
+            self.compile_expr(base)?;
+        }
+        let base_count = check_collection_size_u16(bases.len(), position)?;
+        self.code.set_location(position, None);
+        self.code.emit_u16(Opcode::BuildTuple, base_count)?;
         // Build the class-body function/closure value on the stack...
-        self.emit_make_class_body(body, members, name, position)?;
-        // ...call it with zero args — it runs the body and returns the `Class`.
-        // Record the class statement as the call site so a traceback from inside
-        // the class body attributes this frame to the `class` statement (like
-        // CPython) rather than falling back to `CodeRange::default()`.
+        self.emit_make_class_body(body, members, position)?;
+        // ...call it with zero args, which runs the body and returns the namespace
+        // dict. Record the class statement as the call site so a traceback from
+        // inside the class body attributes this frame to the `class` statement
+        // (like CPython) rather than falling back to `CodeRange::default()`.
         self.code.set_location(position, None);
         self.code.emit_u8(Opcode::CallFunction, 0)?;
+        // ...and call the 3-arg type() builtin, which builds the class object.
+        self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         // Each call consumes the callable below the current value: `deco(value)`.
         // Reversed so the bottom-most (last pushed) applies first, and located at
         // its own decorator so a traceback pins the one that raised, like CPython.
@@ -1052,7 +1074,6 @@ impl<'a> Compiler<'a> {
         &mut self,
         body: &PreparedFunctionDef,
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
     ) -> Result<(), CompileError> {
         let assert_message_annotations = self.assert_message_annotations;
@@ -1060,7 +1081,6 @@ impl<'a> Compiler<'a> {
             Self::compile_class_body(
                 &body.body,
                 members,
-                class_name,
                 position,
                 interns,
                 functions,
@@ -1072,21 +1092,20 @@ impl<'a> Compiler<'a> {
 
     /// Compiles a class body, mirroring
     /// [`compile_function_body`](Self::compile_function_body) but replacing the
-    /// implicit `LoadNone; ReturnValue` tail with a `type(name, (), {...})`
-    /// call: push the class name and an empty bases tuple, then for each
-    /// member (in source order) push `LoadConst <name>` and the member's value
-    /// from its class-body slot, build the namespace dict, and call the 3-arg
-    /// `type()` builtin (which builds the `Class`), then `ReturnValue`.
+    /// implicit `LoadNone; ReturnValue` tail with the assembled namespace dict:
+    /// for each member (in source order) push `LoadConst <name>` and the
+    /// member's value from its class-body slot, build the dict, and return it.
+    /// The enclosing scope turns that into the class object by calling the
+    /// 3-arg `type()` builtin (see [`compile_class_def`](Self::compile_class_def)),
+    /// which is also where the base expressions are evaluated.
     ///
     /// Members are plain locals (the prepare phase forces class-body locals to
     /// never be cells — see `prepare_class_def`), so [`compile_name`](Self::compile_name)
     /// emits `LoadLocal`; it would transparently emit `LoadCell` if that ever
     /// changed, so no assumption is hard-coded here.
-    #[expect(clippy::too_many_arguments)]
     fn compile_class_body(
         body: &[PreparedNode],
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
         interns: &Interns,
         functions: Vec<Function>,
@@ -1100,12 +1119,7 @@ impl<'a> Compiler<'a> {
         // should point at the class statement, not the last member's line.
         compiler.code.set_location(position, None);
 
-        // type(name, (), {members...}): push the name and empty bases tuple...
-        let class_name_const = compiler.code.add_const(Value::InternString(class_name.name_id))?;
-        compiler.code.emit_u16(Opcode::LoadConst, class_name_const)?;
-        compiler.code.emit_u16(Opcode::BuildTuple, 0)?;
-
-        // ...then the namespace dict: (name, value) for each member in order.
+        // The namespace dict: (name, value) for each member in order.
         for member in members {
             let name_const = compiler.code.add_const(Value::InternString(member.name_id))?;
             compiler.code.emit_u16(Opcode::LoadConst, name_const)?;
@@ -1113,11 +1127,6 @@ impl<'a> Compiler<'a> {
         }
         let member_count = check_collection_size_u16(members.len(), position)?;
         compiler.code.emit_u16(Opcode::BuildDict, member_count)?;
-
-        // ...and call the 3-arg type() builtin, which builds the class object.
-        compiler
-            .code
-            .emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         compiler.code.emit(Opcode::ReturnValue)?;
 
         Ok((compiler.code.build(num_locals), compiler.functions))

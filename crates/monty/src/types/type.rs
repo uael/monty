@@ -18,6 +18,7 @@ use crate::{
         dict::{DictKind, dict_fromkeys},
         instance::class_name,
         long_int::INT_MAX_STR_DIGITS,
+        property,
         str::StringRepr,
         timedelta,
     },
@@ -220,6 +221,15 @@ pub enum Type {
     /// no default (or no per-field override) was given.
     #[strum(serialize = "dataclasses._MISSING_TYPE")]
     MissingType,
+    /// `staticmethod(f)`: the wrapper object, not the function it wraps.
+    #[strum(serialize = "staticmethod")]
+    StaticMethod,
+    /// `classmethod(f)`: the wrapper object, not the function it wraps.
+    #[strum(serialize = "classmethod")]
+    ClassMethod,
+    /// The proxy `super()` returns.
+    #[strum(serialize = "super")]
+    Super,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -509,6 +519,7 @@ impl Type {
             Self::TimeZone => TimeZone::init(vm, args),
             Self::Iterator => super::iter::init(vm, args),
             Self::Path => Path::init(vm, args),
+            Self::Property => property::property_init(vm, args),
 
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),

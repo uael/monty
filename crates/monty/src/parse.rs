@@ -551,13 +551,16 @@ impl<'a> Parser<'a> {
                 "pattern matching (match statements)",
                 self.convert_range(m.range),
             )),
-            Stmt::Raise(ast::StmtRaise { exc, .. }) => {
-                // TODO add cause to Node::Raise
-                let expr = match exc {
+            Stmt::Raise(ast::StmtRaise { exc, cause, .. }) => {
+                let exc = match exc {
                     Some(expr) => Some(self.parse_expression(*expr)?),
                     None => None,
                 };
-                Ok(Node::Raise(expr))
+                let cause = match cause {
+                    Some(expr) => Some(self.parse_expression(*expr)?),
+                    None => None,
+                };
+                Ok(Node::Raise { exc, cause })
             }
             Stmt::Try(ast::StmtTry {
                 body,
@@ -818,21 +821,23 @@ impl<'a> Parser<'a> {
     /// member, and annotated names a stringized `__annotations__`. Decorators
     /// are supported on the class and on its methods (evaluated in the
     /// enclosing scope and the class-body scope respectively, applied
-    /// bottom-up); inheritance and anything else in the body are rejected as
+    /// bottom-up), as are base classes (enclosing scope); metaclass keywords
+    /// and anything else in the body are rejected as
     /// not-implemented, reserving the syntax for later.
     fn parse_class_def(&mut self, class: ast::StmtClassDef) -> Result<ParseNode, ParseError> {
         let position = self.class_keyword_range(&class);
         let decorators = self.parse_decorators(class.decorator_list)?;
-        self.check_type_params(class.type_params.as_deref())?;
-        // `class.arguments` carries base classes and metaclass keywords.
-        if class
-            .arguments
-            .is_some_and(|a| !a.args.is_empty() || !a.keywords.is_empty())
-        {
-            return Err(ParseError::not_implemented(
-                "class inheritance and metaclasses",
-                position,
-            ));
+        // `class.arguments` carries base classes and metaclass keywords. Bases
+        // are ordinary expressions evaluated in the enclosing scope; keywords
+        // are all metaclass machinery, which Monty has none of.
+        let mut bases = Vec::new();
+        if let Some(arguments) = class.arguments {
+            if !arguments.keywords.is_empty() {
+                return Err(ParseError::not_implemented("class metaclasses", position));
+            }
+            for arg in arguments.args {
+                bases.push(self.parse_expression(arg)?);
+            }
         }
 
         let name = self.identifier(&class.name.id, class.name.range);
@@ -1014,6 +1019,7 @@ impl<'a> Parser<'a> {
 
         Ok(Node::ClassDef {
             name,
+            bases,
             body,
             members,
             decorators,

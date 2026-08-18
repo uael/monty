@@ -44,9 +44,10 @@ too, rather than something that type-checks and then fails at runtime.
   before the extend begins and appends nothing, where CPython appends whatever
   was yielded first.
 
-`del d[i]` and subclassing (`class Q(deque)`) both fail at *compile* time: the
-`del` statement and class inheritance are unimplemented Monty-wide (see
-./language.md / ./classes.md), not deque limitations.
+`del d[i]` removes one item, as in CPython. Subclassing (`class Q(deque)`)
+raises `NotImplementedError` when the class statement runs: a base must be a
+sandbox class or a builtin exception (see ./classes.md), which is
+a Monty-wide restriction rather than a deque limitation.
 
 ## `namedtuple`
 

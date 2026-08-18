@@ -99,8 +99,11 @@ These raise `NameError`:
   not CPython's `OverflowError: cannot fit 'int' into an index-sized integer`.
 - **`isinstance(obj, T)`** — `T` must be a built-in type (`int`, `str`,
   `list`, ...), a built-in exception class, a sandbox-defined class (see
-  ./classes.md), or a tuple of those. Passing a host-supplied
-  dataclass / namedtuple as the second argument raises `TypeError`.
+  ./classes.md), an abstract class or union (see ./typing.md), `type` /
+  `staticmethod` / `classmethod`, or a tuple of those. Passing a host-supplied
+  dataclass / namedtuple as the second argument raises `TypeError`, as does
+  `enumerate` or `super`, which are classes in CPython and builtin functions
+  here.
 - **`iter()`** — see ./iter.md for iterator and `iter(callable, sentinel)` divergences.
 - **`pow(base, exp, mod)`** — the three-argument form requires all integers and
   rejects negative exponents with `ValueError` instead of computing a modular

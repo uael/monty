@@ -216,7 +216,9 @@ reportOptionalMemberAccess = false
 # `__value__`, not whether the right-hand side is a well-formed type.
 reportInvalidTypeForm = false
 # a decorator defined *inside* a class body takes the decorated function, not
-# `self`, which the method-decorator tests exercise
+# `self`, which the method-decorator tests exercise, and the descriptor tests
+# also write `staticmethod`/`classmethod` in the assignment form
+# (`f = staticmethod(f)`), where the function has no `self`/`cls` parameter
 reportSelfClsParameterName = false
 
 [[tool.pyright.executionEnvironments]]

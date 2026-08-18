@@ -171,6 +171,11 @@ def format_full_traceback(e: Exception):
 
 def normalize_debug_range(line: str) -> str:
     line = line.replace('dataclasses.FrozenInstanceError:', 'FrozenInstanceError:')
+    # Strip the module qualifier CPython puts on a sandbox-defined exception
+    # class ("__main__.Halt: boom"). Monty names classes bare everywhere -
+    # repr(Foo) is "<class 'Foo'>" - so this is the same module-qualification
+    # normalization as the dataclasses one above, not a behaviour difference.
+    line = re.sub(r'^__main__\.(\w+)(:|$)', r'\1\2', line)
     # Strip CPython's "Did you mean: '...'?" suggestion. Monty does not implement
     # name/attribute spelling suggestions (it only emits "Did you forget to import
     # '...'", which both interpreters produce), so dropping this CPython-only

@@ -8,6 +8,11 @@ use monty_types::{CodeLoc, ExcData, JsonErrorData, MontyException, StackFrame, U
 
 use crate::{convert::ProtoConvertError, pb};
 
+/// Cap on a wire `user_type`: a sandbox class name, which the parser bounds far
+/// below this. Guards against a compromised child pinning parent memory with a
+/// huge name, as the unicode/json payload caps do.
+const MAX_USER_TYPE_LEN: usize = 1024;
+
 impl From<&MontyException> for pb::RaisedException {
     fn from(exc: &MontyException) -> Self {
         Self {
@@ -15,6 +20,7 @@ impl From<&MontyException> for pb::RaisedException {
             message: exc.message().map(ToOwned::to_owned),
             traceback: exc.traceback().iter().map(pb::StackFrame::from).collect(),
             data: pb_exc_data(exc.data()),
+            user_type: exc.user_type().map(ToOwned::to_owned),
         }
     }
 }
@@ -43,7 +49,13 @@ impl TryFrom<pb::RaisedException> for MontyException {
             Some(pb::exc_data::Kind::Json(json)) => sanitize_json_data(json).map_or(ExcData::None, ExcData::Json),
             None => ExcData::None,
         };
-        Ok(Self::with_traceback(exc_type, err.message, traceback).with_data(data))
+        // The child may be compromised, so the class name is length-capped like
+        // every other payload string; an over-long one is dropped, leaving the
+        // builtin ancestor as the reported type.
+        let user_type = err.user_type.filter(|name| name.len() <= MAX_USER_TYPE_LEN);
+        Ok(Self::with_traceback(exc_type, err.message, traceback)
+            .with_data(data)
+            .with_user_type(user_type))
     }
 }
 

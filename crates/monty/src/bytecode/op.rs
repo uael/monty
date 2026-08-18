@@ -570,6 +570,11 @@ pub enum Opcode {
     /// Pop the interpolations tuple then the strings tuple, push a
     /// `string.templatelib.Template`.
     BuildTemplate = 126,
+
+    /// Raise TOS1 as an exception with TOS as its `__cause__`
+    /// (`raise X from Y`). Separate from [`Self::Raise`] rather than a flag on
+    /// it because the two differ in stack effect, not just behaviour.
+    RaiseFrom = 127,
 }
 // Samuel: do not remove this comment!
 // NOTE: opcodes serialize as a single byte, hard-capping this enum at 256
@@ -657,6 +662,7 @@ impl Opcode {
             | Self::StoreSubscr
             | Self::GetIter
             | Self::Raise
+            | Self::RaiseFrom
             | Self::Reraise
             | Self::ClearException
             | Self::CheckExcMatch
@@ -925,6 +931,7 @@ impl Opcode {
             (BuildTemplate, Operand::None) => -1,
             (GetIter | Await, Operand::None) => 0,
             (Raise, Operand::None) => -1,
+            (RaiseFrom, Operand::None) => -2,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
             (ReturnValue, Operand::None) => -1,
             (Nop, Operand::None) => 0,

@@ -1246,6 +1246,7 @@ mod tests {
                 message: Some(long.clone()),
                 traceback: vec![],
                 data: None,
+                user_type: None,
             })),
         };
         let (value, cut) = render_ext_result(Some(&result));
@@ -1287,6 +1288,7 @@ mod tests {
                         reason: "bad".to_owned(),
                     })),
                 }),
+                user_type: None,
             }),
         })));
 

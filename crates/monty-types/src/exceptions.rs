@@ -28,6 +28,12 @@ pub struct MontyException {
     /// deserialization.
     #[serde(default)]
     data: ExcData,
+    /// Name of the sandbox-defined class this was raised from, when the raise
+    /// did not come from a builtin type. `exc_type` then holds the nearest
+    /// builtin ancestor, so a host still gets a usable Python class to
+    /// reconstruct, while the name shown to a reader stays the real one.
+    #[serde(default)]
+    user_type: Option<String>,
 }
 
 /// Number of identical consecutive frames to show before collapsing.
@@ -74,9 +80,9 @@ impl fmt::Display for MontyException {
         }
 
         if let Some(msg) = &self.message {
-            write!(f, "{}: {}", self.exc_type, msg)
+            write!(f, "{}: {}", self.type_name(), msg)
         } else {
-            write!(f, "{}", self.exc_type)
+            f.write_str(self.type_name())
         }
     }
 }
@@ -94,6 +100,7 @@ impl MontyException {
             message,
             traceback: vec![],
             data: ExcData::None,
+            user_type: None,
         }
     }
 
@@ -111,6 +118,7 @@ impl MontyException {
             message,
             traceback,
             data: ExcData::None,
+            user_type: None,
         }
     }
 
@@ -122,6 +130,30 @@ impl MontyException {
     pub fn with_data(mut self, data: ExcData) -> Self {
         self.data = data;
         self
+    }
+
+    /// Names the sandbox class this was raised from, keeping `exc_type` as the
+    /// nearest builtin ancestor. See [`MontyException::user_type`].
+    #[must_use]
+    pub fn with_user_type(mut self, user_type: Option<String>) -> Self {
+        self.user_type = user_type;
+        self
+    }
+
+    /// The sandbox-defined class name, when the exception came from one.
+    #[must_use]
+    pub fn user_type(&self) -> Option<&str> {
+        self.user_type.as_deref()
+    }
+
+    /// The class name Python shows: the sandbox class when there is one, else
+    /// the builtin type's own name.
+    #[must_use]
+    pub fn type_name(&self) -> &str {
+        match &self.user_type {
+            Some(name) => name.as_str(),
+            None => self.exc_type.into(),
+        }
     }
 
     /// The structured payload, [`ExcData::None`] for most exceptions.
@@ -168,6 +200,7 @@ impl MontyException {
             message: Some(err.to_string()),
             traceback: vec![],
             data: ExcData::None,
+            user_type: None,
         }
     }
 
@@ -208,9 +241,9 @@ impl MontyException {
     #[must_use]
     pub fn summary(&self) -> String {
         if let Some(msg) = &self.message {
-            format!("{}: {}", self.exc_type, msg)
+            format!("{}: {}", self.type_name(), msg)
         } else {
-            self.exc_type.to_string()
+            self.type_name().to_owned()
         }
     }
 
@@ -220,7 +253,7 @@ impl MontyException {
     /// Uses appropriate quoting for messages containing quotes.
     #[must_use]
     pub fn py_repr(&self) -> String {
-        let type_str: &'static str = self.exc_type.into();
+        let type_str = self.type_name();
         if let Some(msg) = &self.message {
             format!("{}({})", type_str, StringRepr(msg))
         } else {

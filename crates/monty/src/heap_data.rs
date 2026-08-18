@@ -12,7 +12,7 @@ use crate::{
     args::ArgValues,
     asyncio::{Awaiter, Coroutine, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
     bytecode::{CallResult, VM},
-    exception_private::{ExcTypeExt, RunError, RunResult, SimpleException},
+    exception_private::{ExcTypeExt, ExceptionObject, RunError, RunResult},
     expressions::CmpOperator,
     hash::{HashValue, identity_hash},
     heap::{DropWithContext, HeapId, HeapItem, HeapReadOutput},
@@ -24,10 +24,43 @@ use crate::{
     types::{
         BoundMethod, Bytes, BytesIterator, Class, Dataclass, Deque, Dict, DictItemIterator, DictItemsView,
         DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet, Instance,
-        Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt, Module, NamedTuple, NamedTupleClass, OpenFile, Path,
-        PyTrait, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, Template,
-        Tuple, TupleIterator, Type, TypeAliasType, callable_iterator::CallableIterator, date, datetime,
-        deque::DequeIterator, list::ListIterator, str::allocate_string, timedelta, timezone,
+        Interpolation,
+        ItertoolsIter,
+        LazyHeapSet,
+        List,
+        LongInt,
+        MethodDescriptor,
+        Module,
+        NamedTuple,
+        NamedTupleClass,
+        OpenFile,
+        Path,
+        PyTrait,
+        Range,
+        RangeIterator,
+        ReMatch,
+        RePattern,
+        Set,
+        SetIterator,
+        Slice,
+        Str,
+        StringIterator,
+        SuperObject,
+        Template,
+        Tuple,
+        TupleIterator,
+        Type,
+        TypeAliasType,
+        UserProperty,
+        callable_iterator::CallableIterator,
+        date,
+        datetime,
+        deque::DequeIterator,
+        instance_subscript,
+        list::ListIterator,
+        str::allocate_string,
+        timedelta,
+        timezone,
     },
     value::{EitherStr, Value},
 };
@@ -80,9 +113,12 @@ pub(crate) enum HeapData {
     Slice(Slice),
     /// An exception instance (e.g., `ValueError('message')`).
     ///
-    /// Stored on the heap to keep `Value` enum small (16 bytes). Exceptions
-    /// are created when exception types are called or when `raise` is executed.
-    Exception(SimpleException),
+    /// Boxed: it carries the constructor `args` plus the `__cause__` /
+    /// `__context__` chaining slots, which together outgrow the inline budget.
+    /// Exceptions are created when exception types are called or when `raise`
+    /// is executed; a sandbox-defined exception class produces an
+    /// [`Instance`] instead, since it needs a `__dict__` and methods.
+    Exception(Box<ExceptionObject>),
     /// A dataclass instance with fields and method references.
     ///
     /// Contains a class name, a Dict of field name -> value mappings, and a set
@@ -202,6 +238,12 @@ pub(crate) enum HeapData {
     Interpolation(Box<Interpolation>),
     /// PEP 695 `typing.TypeAliasType`: the value of `type X = ...`.
     TypeAliasType(TypeAliasType),
+    /// A `property(fget, fset, fdel)` data descriptor.
+    Property(UserProperty),
+    /// A `staticmethod(f)` / `classmethod(f)` wrapper.
+    MethodDescriptor(MethodDescriptor),
+    /// The proxy `super()` returns.
+    Super(SuperObject),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -255,6 +297,12 @@ impl HeapData {
             | Self::Module(_)
             | Self::Coroutine(_)
             | Self::GatherFuture(_)
+            | Self::Property(_)
+            | Self::MethodDescriptor(_)
+            | Self::Super(_)
+            // An exception's `args` and `__cause__`/`__context__` can hold any
+            // value, including one that reaches back to the exception itself.
+            | Self::Exception(_)
             | Self::ExternalFuture(_)
             // Templates hold arbitrary interpolated values, and an alias's
             // memoized `__value__` can reach back to the alias itself.
@@ -267,7 +315,6 @@ impl HeapData {
             | Self::Bytes(_)
             | Self::Range(_)
             | Self::Slice(_)
-            | Self::Exception(_)
             | Self::DataclassParams(_)
             | Self::StringIterator(_)
             | Self::BytesIterator(_)
@@ -293,7 +340,16 @@ impl HeapData {
     pub(crate) fn is_callable(&self) -> bool {
         matches!(
             self,
-            Self::Class(_) | Self::BoundMethod(_) | Self::Closure(_) | Self::FunctionDefaults(_) | Self::ExtFunction(_)
+            Self::Class(_)
+                | Self::BoundMethod(_)
+                | Self::Closure(_)
+                | Self::FunctionDefaults(_)
+                | Self::ExtFunction(_)
+                // An instance is callable only when its class defines
+                // `__call__`, which this heap-only view cannot see; reporting
+                // `true` keeps `call_heap_callable` in charge of the real
+                // check, which raises the same `TypeError` when it is absent.
+                | Self::Instance(_)
         )
     }
 
@@ -340,6 +396,9 @@ impl HeapData {
             Self::DateTime(_) => Type::DateTime,
             Self::TimeDelta(_) => Type::TimeDelta,
             Self::TimeZone(_) => Type::TimeZone,
+            Self::Property(_) => Type::Property,
+            Self::MethodDescriptor(md) => md.kind.type_(),
+            Self::Super(_) => Type::Super,
             Self::ListIterator(_) => Type::ListIterator,
             Self::DequeIterator(_) => Type::DequeIterator,
             Self::TupleIterator(_) => Type::TupleIterator,
@@ -430,9 +489,9 @@ impl HeapItem for FunctionDefaults {
     }
 }
 
-impl HeapItem for SimpleException {
-    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {
-        // Exceptions don't contain heap references
+impl HeapItem for ExceptionObject {
+    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        self.dec_ref_ids(stack);
     }
 }
 
@@ -542,6 +601,9 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Template($value) => $body,
             Self::Interpolation($value) => $body,
             Self::TypeAliasType($value) => $body,
+            Self::Property($value) => $body,
+            Self::MethodDescriptor($value) => $body,
+            Self::Super($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -564,6 +626,12 @@ macro_rules! heap_read_output_py_trait_forward {
 /// that one mutating case out of the read-only trait; `Value::py_getitem`'s
 /// `Ref` arm calls this instead of reading the heap itself.
 pub(crate) fn heap_subscript(id: HeapId, key: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
+    // A user instance dispatches to a class-defined `__getitem__`, which
+    // re-enters the VM like the defaultdict factory below, so it takes the
+    // same HeapId route around the read-only trait.
+    if matches!(vm.heap.get(id), HeapData::Instance(_)) {
+        return instance_subscript(id, key, vm);
+    }
     if matches!(vm.heap.get(id), HeapData::Dict(d) if d.is_defaultdict()) {
         // The read handle is scoped to the lookup: `defaultdict_missing` runs the
         // factory, which re-enters the VM and can drop the last reference to this
@@ -864,7 +932,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                         .get_function(fd.get(vm.heap).func_id)
                         .py_repr_fmt(f, vm.interns, 0)?),
                     Self::Cell(cell) => Ok(write!(f, "<cell: {} object>", cell.get(vm.heap).0.py_type_name(vm))?),
-                    Self::Exception(e) => Ok(e.get(vm.heap).py_repr_fmt(f)?),
+                    Self::Exception(e) => e.py_repr_fmt(f, vm, heap_ids),
                     Self::Module(m) => Ok(write!(f, "<module '{}'>", vm.interns.get_str(m.get(vm.heap).name()))?),
                     Self::Coroutine(coro) => {
                         let func = vm.interns.get_function(coro.get(vm.heap).func_id);
@@ -892,7 +960,10 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             |value| value.py_str(vm),
             else {
                 match self {
-                    Self::Exception(e) => Ok(allocate_string(e.get(vm.heap).py_str(), vm.heap)),
+                    Self::Exception(e) => {
+                        let text = e.py_str(vm)?;
+                        Ok(allocate_string(text, vm.heap))
+                    }
                     _ => self.py_repr(vm),
                 }
             }
@@ -1074,6 +1145,9 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             | Self::ExtFunction(_)
             | Self::Cell(_)
             | Self::Exception(_)
+            | Self::Property(_)
+            | Self::MethodDescriptor(_)
+            | Self::Super(_)
             | Self::LongInt(_)
             | Self::Module(_)
             | Self::Coroutine(_)

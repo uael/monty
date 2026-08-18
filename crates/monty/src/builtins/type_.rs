@@ -8,7 +8,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{DropWithContext, HeapData},
     intern::StaticStrings,
-    types::{Class, Dict, PyTrait},
+    types::{Class, Dict, PyTrait, Type},
     value::Value,
 };
 
@@ -55,6 +55,11 @@ pub fn builtin_type(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// For an instance of a user-defined class the type *is* the class object
 /// itself, so `type(x) is Foo` holds via reference identity; for everything
 /// else it returns the builtin `Type` marker.
+///
+/// An exception is the one builtin whose class also has a *name* in scope, and
+/// that name evaluates to `Builtins::ExcType`. Returning the `Type` marker for
+/// it would make `type(exc) is ValueError` false against the very object the
+/// name produces, so exceptions return the same `ExcType` form.
 fn type_of(vm: &mut VM<'_>, value: Value) -> Value {
     defer_drop!(value, vm);
     if let Value::Ref(id) = &value
@@ -72,12 +77,18 @@ fn type_of(vm: &mut VM<'_>, value: Value) -> Value {
         // tuples like `sys.version_info` have no class and fall through).
         vm.heap.inc_ref(class_id);
         Value::Ref(class_id)
+    } else if let Type::Exception(exc_type) = value.py_type(vm) {
+        Value::Builtin(Builtins::ExcType(exc_type))
     } else {
         Value::Builtin(Builtins::Type(value.py_type(vm)))
     }
 }
 
 /// The 3-arg `type(name, bases, dict)` form: dynamically creates a class.
+///
+/// Also the runtime behind every compiled `class` statement, which the compiler
+/// lowers to a call of this form, so this is the single place a class object is
+/// built and the single place inheritance is validated.
 ///
 /// Follows CPython's validation order (name, then bases, then dict, then
 /// keyword rejection) and message wording (`type.__new__() argument N must
@@ -104,20 +115,22 @@ fn create_class(
         return Err(ExcType::type_error_bad_arg_pos("type.__new__", 1, "str", got));
     };
 
-    match bases {
+    let base_slots = match bases {
         Value::Ref(id) if let HeapData::Tuple(t) = vm.heap.get(*id) => {
-            // Monty divergence: classes cannot inherit, so even `(object,)` is
-            // rejected — the parse-time equivalent (`class Foo(Bar)`) is a
-            // syntax error, and this is its runtime counterpart.
-            if !t.as_slice().is_empty() {
-                return Err(ExcType::type_error("type() bases are not supported"));
-            }
+            // Cloned out so `resolve_bases` can take `&mut VM` without the
+            // tuple's borrow of the heap still being live.
+            t.as_slice()
+                .iter()
+                .map(|v| v.clone_with_heap(vm.heap))
+                .collect::<Vec<_>>()
         }
         _ => {
             let got = bases.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
             return Err(ExcType::type_error_bad_arg_pos("type.__new__", 2, "tuple", got));
         }
-    }
+    };
+    defer_drop!(base_slots, vm);
+    let (base_values, exc_base) = resolve_bases(base_slots, vm)?;
 
     let Value::Ref(ns_id) = namespace else {
         let got = namespace.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
@@ -159,8 +172,46 @@ fn create_class(
     }
     let namespace_dict = Dict::from_pairs(pairs, vm)?;
 
-    let class_id = vm
-        .heap
-        .allocate(HeapData::Class(Box::new(Class::new(class_name, namespace_dict))));
+    let class_id = vm.heap.allocate(HeapData::Class(Box::new(Class::new(
+        class_name,
+        namespace_dict,
+        base_values,
+        exc_base,
+    ))));
     Ok(Value::Ref(class_id))
+}
+
+/// Validates a `bases` tuple and takes an owned reference to each entry,
+/// returning them alongside the nearest builtin exception ancestor.
+///
+/// Monty implements single inheritance, so more than one base is rejected
+/// rather than linearized: there is no MRO algorithm behind this, only a chain
+/// walk (see `limitations/classes.md`). A base must be a class defined in the
+/// sandbox or a builtin exception type; `object` and every other builtin type
+/// are rejected, since their instances have no `__dict__` to inherit into.
+fn resolve_bases(bases: &[Value], vm: &mut VM<'_>) -> RunResult<(Vec<Value>, Option<ExcType>)> {
+    let [base] = bases else {
+        return if bases.is_empty() {
+            Ok((Vec::new(), None))
+        } else {
+            Err(ExcType::not_implemented("multiple inheritance is not supported").into())
+        };
+    };
+    let exc_base = match base {
+        Value::Builtin(Builtins::ExcType(exc_type)) => Some(*exc_type),
+        Value::Ref(id) if let HeapData::Class(class) = vm.heap.get(*id) => class.exc_base(),
+        other => {
+            // A builtin type names itself (`int`), not its own type (`type`),
+            // which is what the reader wrote in the base list.
+            let got = match other {
+                Value::Builtin(Builtins::Type(t)) => t.name(vm.heap, vm.interns),
+                _ => other.py_type(vm).cpython_arg_name(vm.heap, vm.interns),
+            };
+            return Err(ExcType::not_implemented(format!(
+                "inheriting from '{got}' is not supported; a base must be a class defined in the sandbox or a builtin exception"
+            ))
+            .into());
+        }
+    };
+    Ok((vec![base.clone_with_heap(vm.heap)], exc_base))
 }

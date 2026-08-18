@@ -204,7 +204,7 @@ fn convert_dataclass(self_id: HeapId, class_id: HeapId, shape: &Shape<'_>, vm: &
         let field_name = vm.interns.get_str(name).to_owned();
         // A field left unset (`init=False` with no default) has no value to
         // convert, so the attribute read raises exactly as CPython's does.
-        let Some(value) = instance_attr(self_id, &field_name, vm) else {
+        let Some(value) = instance_attr(self_id, &field_name, vm)? else {
             let owner = class_name(class_id, vm.heap, vm.interns).into_owned();
             return Err(ExcType::attribute_error(&owner, &field_name));
         };
@@ -286,7 +286,7 @@ pub(super) fn replace(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         if supplied {
             continue;
         }
-        let Some(value) = instance_attr(self_id, &field_name, vm) else {
+        let Some(value) = instance_attr(self_id, &field_name, vm)? else {
             let owner = class_name(class_id, vm.heap, vm.interns).into_owned();
             return Err(ExcType::attribute_error(&owner, &field_name));
         };

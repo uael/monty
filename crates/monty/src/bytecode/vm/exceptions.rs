@@ -4,15 +4,33 @@ use std::fmt::{self, Write};
 
 use super::VM;
 use crate::{
+    args::ArgValues,
     builtins::Builtins,
     defer_drop,
-    exception_private::{ExcType, ExcTypeExt, ExceptionRaise, RawStackFrame, RunError, RunResult, SimpleException},
+    exception_private::{
+        ExcType, ExcTypeExt, ExceptionObject, ExceptionRaise, RawStackFrame, RunError, RunResult, SimpleException,
+        exception_message,
+    },
     expressions::CmpOperator,
-    heap::{DropGuard, HeapData},
+    heap::{DropGuard, DropWithContext, HeapData, HeapId, HeapReadOutput},
     intern::{StaticStrings, StringId},
-    types::{LazyHeapSet, PyTrait, Type},
+    types::{
+        LazyHeapSet, PyTrait, Type, allocate_string, class_is_subclass,
+        instance::{class_defines, class_name, instance_args, instance_class_id, instance_exc_base, instance_str},
+    },
     value::Value,
 };
+
+/// What the operand of a `raise` turned out to be, classified before the
+/// operand's own reference is consumed.
+enum RaiseOperand {
+    /// A builtin exception class, to instantiate with no arguments.
+    BuiltinType(ExcType),
+    /// A sandbox-defined exception class, likewise.
+    ExceptionClass,
+    /// Anything else, raised (or rejected) as-is.
+    Object,
+}
 
 /// Result of handling an exception until execution can resume, it escapes, or
 /// it needs to be propagated in a waiting task.
@@ -88,15 +106,19 @@ impl VM<'_> {
     /// The `is_raise` flag indicates if this is from a `raise` statement (hide caret).
     pub(super) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
         let simple_exc = match exc_value {
-            // Exception instance on heap
-            Value::Ref(heap_id) => {
-                if let HeapData::Exception(exc) = self.heap.get(*heap_id) {
-                    exc.clone()
-                } else {
-                    // Not an exception type
-                    SimpleException::new_msg(ExcType::TypeError, "exceptions must derive from BaseException")
+            Value::Ref(heap_id) => match self.heap.get(*heap_id) {
+                // Exception instance on heap
+                HeapData::Exception(exc) => exc.summary().clone(),
+                // An instance of a sandbox-defined exception class: the summary
+                // records the real class name, with the nearest builtin ancestor
+                // as `exc_type` so `except ValueError:` and the host bindings
+                // still see a class they understand.
+                HeapData::Instance(_) if instance_exc_base(*heap_id, self).is_some() => {
+                    self.user_exception_summary(*heap_id)
                 }
-            }
+                // Not an exception type
+                _ => SimpleException::new_msg(ExcType::TypeError, "exceptions must derive from BaseException"),
+            },
             // Exception type (e.g., `raise ValueError` instead of `raise ValueError()`)
             // Instantiate with no message
             Value::Builtin(Builtins::ExcType(exc_type)) => SimpleException::new_none(*exc_type),
@@ -115,7 +137,159 @@ impl VM<'_> {
             exc: simple_exc,
             frame: Some(frame),
             hide_caret: false,
+            token: 0,
         })
+    }
+
+    /// Turns the operand of a `raise` into the error to propagate plus the
+    /// object `except ... as e` should bind, consuming `exc`.
+    ///
+    /// A bare class is instantiated first, as CPython does, so `raise MyError`
+    /// and `raise MyError()` reach the same object; that runs `__init__`
+    /// synchronously, so an `__init__` that calls an external function raises
+    /// instead of suspending. Anything that is not an exception yields
+    /// CPython's `TypeError: exceptions must derive from BaseException`.
+    pub(super) fn prepare_raise(&mut self, exc: Value) -> (RunError, Option<Value>) {
+        // Classified before `exc` is consumed: every binding a `match exc` could
+        // make here is `Copy`, so the arms would leave the operand's own
+        // reference undropped rather than moving it.
+        let operand = match &exc {
+            Value::Builtin(Builtins::ExcType(exc_type)) => RaiseOperand::BuiltinType(*exc_type),
+            Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Class(class) if class.exc_base().is_some()) => {
+                RaiseOperand::ExceptionClass
+            }
+            // Already an exception object (builtin or sandbox-defined), or
+            // something that is not an exception at all, for which
+            // produces the `TypeError` for the latter.
+            _ => RaiseOperand::Object,
+        };
+        let instance = match operand {
+            // `raise ValueError` / `raise MyError`: instantiate with no args.
+            RaiseOperand::BuiltinType(exc_type) => {
+                exc.drop_with(self);
+                match exc_type.call(self, ArgValues::Empty) {
+                    Ok(value) => value,
+                    Err(e) => return (e, None),
+                }
+            }
+            RaiseOperand::ExceptionClass => {
+                let built = self.evaluate_function("raise", &exc, ArgValues::Empty);
+                exc.drop_with(self);
+                match built {
+                    Ok(value) => value,
+                    Err(e) => return (e, None),
+                }
+            }
+            RaiseOperand::Object => exc,
+        };
+        let error = self.make_exception(&instance, true); // is_raise=true, hide caret
+        if self.is_exception_object(&instance) {
+            self.attach_context(&instance);
+            (error, Some(instance))
+        } else {
+            instance.drop_with(self);
+            (error, None)
+        }
+    }
+
+    /// Whether `value` is something `raise` accepts: a builtin exception object
+    /// or an instance of a sandbox-defined exception class.
+    fn is_exception_object(&self, value: &Value) -> bool {
+        match value {
+            Value::Ref(id) => match self.heap.get(*id) {
+                HeapData::Exception(_) => true,
+                HeapData::Instance(_) => instance_exc_base(*id, self).is_some(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Records `__cause__` on the object being raised by `raise X from Y`,
+    /// consuming `cause`. A rebuilt exception (no object to write to) drops it.
+    pub(super) fn attach_cause(&mut self, raised: Option<Value>, cause: Value) -> Option<Value> {
+        match raised.as_ref() {
+            Some(&Value::Ref(id)) => self.set_chain_slot(id, "__cause__", cause),
+            _ => cause.drop_with(self),
+        }
+        raised
+    }
+
+    /// Records `__context__`: the exception currently being handled, if any and
+    /// if it is not the one being raised (CPython skips self-chaining).
+    fn attach_context(&mut self, raised: &Value) {
+        let &Value::Ref(id) = raised else { return };
+        let Some(context) = self
+            .exception_stack
+            .last()
+            .filter(|active| !matches!(active, Value::Ref(active_id) if *active_id == id))
+            .map(|active| active.clone_with_heap(self.heap))
+        else {
+            return;
+        };
+        self.set_chain_slot(id, "__context__", context);
+    }
+
+    /// Writes one of the chaining slots on a raised exception, consuming `value`.
+    fn set_chain_slot(&mut self, id: HeapId, slot: &'static str, value: Value) {
+        match self.heap.read(id) {
+            HeapReadOutput::Exception(mut exc) => {
+                if slot == "__cause__" {
+                    exc.set_cause(value, self);
+                } else {
+                    exc.set_context(value, self);
+                }
+            }
+            HeapReadOutput::Instance(mut inst) => {
+                let name = allocate_string(slot, self.heap);
+                // A failure here is a resource limit, which is terminal
+                // anyway; the chain slot is not worth aborting the raise for.
+                if let Ok(previous) = inst.set_attr(name, value, self) {
+                    previous.drop_with(self);
+                }
+            }
+            other => {
+                drop(other);
+                value.drop_with(self);
+            }
+        }
+    }
+
+    /// Summarizes a sandbox-defined exception instance for the error path.
+    ///
+    /// The message is `str(e)`: a user `__str__` when the class defines one,
+    /// otherwise `BaseException.__str__` over `e.args`. A `__str__` that itself
+    /// raises falls back to the args form rather than replacing the exception
+    /// being raised, which is what CPython's traceback printer does when it
+    /// cannot stringify a value.
+    fn user_exception_summary(&mut self, instance_id: HeapId) -> SimpleException {
+        let exc_base = instance_exc_base(instance_id, self).unwrap_or(ExcType::Exception);
+        let name = {
+            let class_id = instance_class_id(instance_id, self).expect("checked to be an instance");
+            class_name(class_id, self.heap, self.interns).into_owned()
+        };
+        let message = self
+            .user_exception_message(instance_id)
+            .unwrap_or_else(|_| Some(format!("<unprintable {name} object>")));
+        SimpleException::new(exc_base, message).with_user_type(name)
+    }
+
+    /// `str(e)` for a sandbox-defined exception instance.
+    fn user_exception_message(&mut self, instance_id: HeapId) -> RunResult<Option<String>> {
+        let class_id = instance_class_id(instance_id, self).expect("checked to be an instance");
+        let this = self;
+        if class_defines(class_id, "__str__", this) {
+            let text = instance_str(instance_id, this)?;
+            defer_drop!(text, this);
+            let text = text.to_str(this)?.to_owned();
+            return Ok((!text.is_empty()).then_some(text));
+        }
+        let args = instance_args(instance_id, this);
+        let message = exception_message(&args, this);
+        for arg in args {
+            arg.drop_with(this);
+        }
+        message
     }
 
     /// Runs fused bare `assert test`.
@@ -233,6 +407,7 @@ impl VM<'_> {
             exc: SimpleException::new(ExcType::AssertionError, msg),
             frame: Some(frame),
             hide_caret: false,
+            token: 0,
         })
     }
 
@@ -257,14 +432,56 @@ impl VM<'_> {
     pub(super) fn handle_exception_with_value(
         &mut self,
         mut error: RunError,
-        mut raised: Option<Value>,
+        raised: Option<Value>,
     ) -> Option<RunError> {
+        let mut raised = raised.or_else(|| self.take_pending_raised(&error));
         loop {
             match self.handle_exception_step(error, raised.take()) {
                 ExceptionHandlingResult::Caught => return None,
                 ExceptionHandlingResult::Unhandled(error) => return Some(error),
                 ExceptionHandlingResult::PropagateToWaiter(waiter_error) => error = waiter_error,
             }
+        }
+    }
+
+    /// Reclaims the exception object parked by an earlier unwinding step, but
+    /// only when `error` is the very raise that parked it.
+    ///
+    /// Anything left over from an error that was swallowed on the way out (a
+    /// `StopIteration` ending an iterator) has a token no live error claims, so
+    /// it is released here rather than attached to an unrelated raise.
+    fn take_pending_raised(&mut self, error: &RunError) -> Option<Value> {
+        let (parked, token) = self.pending_raised.take()?;
+        let wanted = match error {
+            RunError::Exc(exc) | RunError::UncatchableExc(exc) => exc.token,
+            RunError::Internal(_) => 0,
+        };
+        if wanted == token {
+            Some(parked)
+        } else {
+            parked.drop_with(self);
+            None
+        }
+    }
+
+    /// Parks `raised` so the next handler in an outer `run()` can bind the very
+    /// object that was raised, stamping `error` with the matching token.
+    ///
+    /// Only sandbox-defined exceptions need this: every other raised value is
+    /// rebuilt losslessly from the error's own summary.
+    fn park_raised(&mut self, error: &mut RunError, raised: Value) {
+        if !matches!(&raised, Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Instance(_))) {
+            raised.drop_with(self);
+            return;
+        }
+        let RunError::Exc(exc) = error else {
+            raised.drop_with(self);
+            return;
+        };
+        self.raise_seq = self.raise_seq.wrapping_add(1);
+        exc.token = self.raise_seq;
+        if let Some((previous, _)) = self.pending_raised.replace((raised, self.raise_seq)) {
+            previous.drop_with(self);
         }
     }
 
@@ -350,8 +567,11 @@ impl VM<'_> {
                 // No more frames - exception is unhandled
                 let is_spawned = this.is_spawned_task();
 
-                // Drop exc_value before potentially switching tasks
-                drop(exc_guard);
+                // Reclaim exc_value before potentially switching tasks; a
+                // sandbox-defined exception is parked so an outer `run()` can
+                // still catch the object itself, the rest are released.
+                let (exc_value, this) = exc_guard.into_parts();
+                this.park_raised(&mut error, exc_value);
 
                 // For spawned tasks, fail the task instead of propagating
                 if is_spawned {
@@ -373,8 +593,12 @@ impl VM<'_> {
 
             // Pop this frame
             if this.pop_frame() {
-                // The frame indicated evaluation should stop - e.g. inside `evaluate_function` - return the error
-                // now to stop unwinding.
+                // The frame indicated evaluation should stop - e.g. inside
+                // `evaluate_function` - return the error now to stop unwinding,
+                // parking the raised object so the native caller's own handler
+                // search can still bind it.
+                let (exc_value, this) = exc_guard.into_parts();
+                this.park_raised(&mut error, exc_value);
                 return ExceptionHandlingResult::Unhandled(error);
             }
 
@@ -425,8 +649,8 @@ impl VM<'_> {
     ///
     /// Allocates an Exception on the heap and returns a Value::Ref to it.
     fn create_exception_value(&mut self, exc: &ExceptionRaise) -> Value {
-        let exception = exc.exc.clone();
-        let heap_id = self.heap.allocate(HeapData::Exception(exception));
+        let exception = ExceptionObject::from_summary(exc.exc.clone(), self);
+        let heap_id = self.heap.allocate(HeapData::Exception(Box::new(exception)));
         Value::Ref(heap_id)
     }
 
@@ -453,49 +677,63 @@ impl VM<'_> {
     /// earlier element already matched (e.g. `except (TypeError, (ValueError,))`
     /// raising `TypeError` still raises the `TypeError` about catching classes).
     pub(super) fn check_exc_match(&self, exception: &Value, exc_type: &Value) -> Result<bool, RunError> {
-        let exc_type_enum = exception.py_type(self);
         match exc_type {
-            // Single exception class.
-            Value::Builtin(Builtins::ExcType(handler_type)) => {
-                Ok(Self::exc_matches_handler(exc_type_enum, *handler_type))
-            }
             // Flat tuple of exception classes. CPython does not descend into
             // nested tuples in this position, so neither do we.
-            Value::Ref(id) => {
-                if let HeapData::Tuple(tuple) = self.heap.get(*id) {
-                    let mut matched = false;
-                    for v in tuple.as_slice() {
-                        match v {
-                            Value::Builtin(Builtins::ExcType(handler_type)) => {
-                                if !matched && Self::exc_matches_handler(exc_type_enum, *handler_type) {
-                                    matched = true;
-                                }
-                            }
-                            // A nested tuple or any non-exception value is
-                            // rejected exactly as CPython rejects it, even if a
-                            // previous element already matched.
-                            _ => return Err(ExcType::except_invalid_type_error()),
-                        }
-                    }
-                    Ok(matched)
-                } else {
-                    // A non-tuple heap value (e.g. an exception instance) is not
-                    // a valid exception type for an `except` clause.
-                    Err(ExcType::except_invalid_type_error())
+            Value::Ref(id) if let HeapData::Tuple(tuple) = self.heap.get(*id) => {
+                let mut matched = false;
+                for handler in tuple.as_slice() {
+                    // A nested tuple or any non-exception value is rejected
+                    // exactly as CPython rejects it, even if a previous element
+                    // already matched.
+                    let Some(hit) = self.exc_matches_handler(exception, handler) else {
+                        return Err(ExcType::except_invalid_type_error());
+                    };
+                    matched |= hit;
                 }
+                Ok(matched)
             }
-            // Any other value is invalid for an `except` clause.
-            _ => Err(ExcType::except_invalid_type_error()),
+            // A single exception class, builtin or sandbox-defined.
+            single => self
+                .exc_matches_handler(exception, single)
+                .ok_or_else(ExcType::except_invalid_type_error),
         }
     }
 
-    /// Returns whether a raised exception's type is caught by `handler_type`.
+    /// Returns whether the raised `exception` is caught by the single class
+    /// `handler`, or `None` when `handler` is not an exception class at all
+    /// (which the caller turns into CPython's "catching classes that do not
+    /// inherit from BaseException" `TypeError`).
     ///
-    /// Helper shared by the single-class and flat-tuple arms of
-    /// [`check_exc_match`]; the raised value only matches when its type is an
-    /// exception that is a subclass of the handler's class.
-    fn exc_matches_handler(exc_type_enum: Type, handler_type: ExcType) -> bool {
-        matches!(exc_type_enum, Type::Exception(et) if et.is_subclass_of(handler_type))
+    /// Shared by the single-class and flat-tuple arms of [`check_exc_match`].
+    fn exc_matches_handler(&self, exception: &Value, handler: &Value) -> Option<bool> {
+        match handler {
+            // A builtin exception type catches builtin exceptions by the
+            // hard-coded hierarchy, and a sandbox-defined one through the
+            // nearest builtin ancestor its class chain reaches.
+            Value::Builtin(Builtins::ExcType(handler_type)) => Some(match exception.py_type(self) {
+                Type::Exception(raised) => raised.is_subclass_of(*handler_type),
+                Type::Instance(_) => match exception {
+                    Value::Ref(id) => instance_exc_base(*id, self).is_some_and(|b| b.is_subclass_of(*handler_type)),
+                    _ => false,
+                },
+                _ => false,
+            }),
+            // A sandbox-defined exception class catches its own instances and
+            // those of its subclasses. A builtin exception never matches one:
+            // it cannot have a sandbox class as an ancestor.
+            Value::Ref(handler_id) => match self.heap.get(*handler_id) {
+                HeapData::Class(class) if class.exc_base().is_some() => Some(match exception {
+                    Value::Ref(raised_id) => match self.heap.get(*raised_id) {
+                        HeapData::Instance(inst) => class_is_subclass(inst.class(), *handler_id, self),
+                        _ => false,
+                    },
+                    _ => false,
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 }
 

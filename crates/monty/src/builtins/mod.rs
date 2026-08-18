@@ -17,6 +17,7 @@ mod hash;
 mod hex;
 mod id;
 mod isinstance;
+mod issubclass;
 mod len;
 mod map;
 mod min_max; // min and max share implementation
@@ -32,6 +33,7 @@ mod round;
 mod setattr;
 mod sorted;
 mod sum;
+mod super_;
 mod type_;
 mod zip;
 
@@ -41,7 +43,7 @@ use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
     exception_private::{ExcType, ExcTypeExt, RunResult},
-    types::Type,
+    types::{Type, property},
     value::Value,
 };
 
@@ -144,7 +146,9 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Hash => hash::builtin_hash(vm, args),
             Self::Hex => hex::builtin_hex(vm, args),
             Self::Id => id::builtin_id(vm, args),
+            Self::Classmethod => property::classmethod_init(vm, args),
             Self::Isinstance => isinstance::builtin_isinstance(vm, args),
+            Self::Issubclass => issubclass::builtin_issubclass(vm, args),
             Self::Len => len::builtin_len(vm, args),
             Self::Map => map::builtin_map(vm, args),
             Self::Max => min_max::builtin_max(vm, args),
@@ -161,7 +165,9 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Round => round::builtin_round(vm, args),
             Self::Setattr => setattr::builtin_setattr(vm, args),
             Self::Sorted => sorted::builtin_sorted(vm, args),
+            Self::Staticmethod => property::staticmethod_init(vm, args),
             Self::Sum => sum::builtin_sum(vm, args),
+            Self::Super => super_::builtin_super(vm, args),
             Self::Type => type_::builtin_type(vm, args),
             Self::Zip => zip::builtin_zip(vm, args),
         };

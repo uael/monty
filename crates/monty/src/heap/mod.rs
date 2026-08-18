@@ -28,15 +28,42 @@ pub(crate) use crate::heap_traits::{ContainsHeap, DropGuard, DropWithContext, He
 use crate::types::Type;
 use crate::{
     asyncio::{Awaiter, Coroutine, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
-    exception_private::SimpleException,
+    exception_private::ExceptionObject,
     heap_data::{CellValue, Closure, FunctionDefaults},
     modules::dataclasses::{DataclassField, DataclassParams},
     types::{
         BoundMethod, Bytes, BytesIterator, Class, Dataclass, Deque, Dict, DictItemIterator, DictItemsView,
         DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction, FrozenSet, Instance,
-        Interpolation, ItertoolsIter, List, LongInt, Module, NamedTuple, NamedTupleClass, OpenFile, Path, Range,
-        RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, Template, TimeZone, Tuple,
-        TupleIterator, TypeAliasType, callable_iterator::CallableIterator, date, datetime, deque::DequeIterator,
+        Interpolation,
+        ItertoolsIter,
+        List,
+        LongInt,
+        MethodDescriptor,
+        Module,
+        NamedTuple,
+        NamedTupleClass,
+        OpenFile,
+        Path,
+        Range,
+        RangeIterator,
+        ReMatch,
+        RePattern,
+        Set,
+        SetIterator,
+        Slice,
+        Str,
+        StringIterator,
+        SuperObject,
+        Template,
+        TimeZone,
+        Tuple,
+        TupleIterator,
+        TypeAliasType,
+        UserProperty,
+        callable_iterator::CallableIterator,
+        date,
+        datetime,
+        deque::DequeIterator,
         list::ListIterator, timedelta, timezone,
     },
     value::Value,
@@ -239,7 +266,7 @@ pub enum HeapReadOutput<'a> {
     Cell(HeapRead<'a, CellValue>),
     Range(HeapRead<'a, Range>),
     Slice(HeapRead<'a, Slice>),
-    Exception(HeapRead<'a, SimpleException>),
+    Exception(HeapRead<'a, ExceptionObject>),
     Dataclass(HeapRead<'a, Dataclass>),
     Class(HeapRead<'a, Class>),
     Instance(HeapRead<'a, Instance>),
@@ -274,6 +301,9 @@ pub enum HeapReadOutput<'a> {
     Template(HeapRead<'a, Template>),
     Interpolation(HeapRead<'a, Interpolation>),
     TypeAliasType(HeapRead<'a, TypeAliasType>),
+    Property(HeapRead<'a, UserProperty>),
+    MethodDescriptor(HeapRead<'a, MethodDescriptor>),
+    Super(HeapRead<'a, SuperObject>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -667,9 +697,10 @@ impl<'a> HeapPtr<'a> {
             HeapData::Cell(cell_value) => HeapReadOutput::Cell(heap_read(base, cell_value, readers)),
             HeapData::Range(range) => HeapReadOutput::Range(heap_read(base, range, readers)),
             HeapData::Slice(slice) => HeapReadOutput::Slice(heap_read(base, slice, readers)),
-            HeapData::Exception(simple_exception) => {
-                HeapReadOutput::Exception(heap_read(base, simple_exception, readers))
-            }
+            HeapData::Exception(exception) => HeapReadOutput::Exception(heap_read_boxed(base, exception, readers)),
+            HeapData::Property(property) => HeapReadOutput::Property(heap_read(base, property, readers)),
+            HeapData::MethodDescriptor(md) => HeapReadOutput::MethodDescriptor(heap_read(base, md, readers)),
+            HeapData::Super(super_obj) => HeapReadOutput::Super(heap_read(base, super_obj, readers)),
             HeapData::Dataclass(dataclass) => HeapReadOutput::Dataclass(heap_read_boxed(base, dataclass, readers)),
             HeapData::Class(class) => HeapReadOutput::Class(heap_read_boxed(base, class, readers)),
             HeapData::Instance(instance) => HeapReadOutput::Instance(heap_read_boxed(base, instance, readers)),
@@ -1695,7 +1726,8 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
             }
         }
         HeapData::Class(class) => {
-            // The class namespace holds method/class-variable values.
+            // The class namespace holds method/class-variable values, and each
+            // base is an owned reference to another class object.
             for (k, v) in class.namespace() {
                 if let Value::Ref(id) = k {
                     on_child(*id);
@@ -1704,7 +1736,26 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                     on_child(*id);
                 }
             }
+            for base in class.bases() {
+                if let Value::Ref(id) = base {
+                    on_child(*id);
+                }
+            }
         }
+        HeapData::Exception(exc) => exc.for_each_child(&mut on_child),
+        HeapData::Property(property) => {
+            for value in [&property.fget, &property.fset, &property.fdel] {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::MethodDescriptor(md) => {
+            if let Value::Ref(id) = &md.func {
+                on_child(*id);
+            }
+        }
+        HeapData::Super(super_obj) => super_obj.for_each_child(&mut on_child),
         HeapData::Instance(instance) => {
             // An instance references its class plus its attribute dict's entries.
             on_child(instance.class());
@@ -1898,6 +1949,10 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::Cell(cell) => cell.0.py_dec_ref_ids(stack),
         HeapData::Dataclass(dc) => dc.py_dec_ref_ids(stack),
         HeapData::Class(class) => class.py_dec_ref_ids(stack),
+        HeapData::Exception(exc) => exc.py_dec_ref_ids(stack),
+        HeapData::Property(property) => property.py_dec_ref_ids(stack),
+        HeapData::MethodDescriptor(md) => md.py_dec_ref_ids(stack),
+        HeapData::Super(super_obj) => super_obj.py_dec_ref_ids(stack),
         HeapData::Instance(instance) => instance.py_dec_ref_ids(stack),
         HeapData::BoundMethod(bm) => bm.py_dec_ref_ids(stack),
         HeapData::DataclassField(field) => field.py_dec_ref_ids(stack),

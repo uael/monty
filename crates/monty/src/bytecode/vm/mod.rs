@@ -694,6 +694,24 @@ pub struct VM<'h> {
     /// need a reference to the module code when being restored after task switching.
     module_code: Option<&'h Code>,
 
+    /// The exception object of the raise currently unwinding out of this VM,
+    /// paired with its [`ExceptionRaise::token`].
+    ///
+    /// A raise that leaves a nested `run()` (a `__repr__`, a `sorted(key=...)`
+    /// callback) returns to native code as a plain `RunError`, which carries no
+    /// heap references and so cannot hold the raised object. Parking it here
+    /// keeps a sandbox-defined exception's identity and attributes across that
+    /// hop, so the `except MyError as e:` that eventually catches it binds the
+    /// object that was raised. The token makes the pairing checkable: an error
+    /// that was swallowed on the way out (a `StopIteration` ending an iterator)
+    /// leaves a stale value here, which the next raise discards rather than
+    /// mistaking for its own.
+    pending_raised: Option<(Value, u64)>,
+
+    /// Source of [`ExceptionRaise::token`] values; only equality matters, so
+    /// wrapping after 2^64 raises is harmless.
+    raise_seq: u64,
+
     /// Bytecode IP of the most recent `LoadGlobalCallable` that
     /// pushed an `ExtFunction` for an undefined name.
     ///
@@ -773,6 +791,8 @@ impl<'h> VM<'h> {
             exception_stack: Vec::new(),
             instruction_ip: 0,
             scheduler: Scheduler::new(),
+            pending_raised: None,
+            raise_seq: 0,
             ext_function_load_ip: None, // Set by LoadGlobalCallable
             module_code: None,
             json_string_cache: JsonStringCache::default(),
@@ -844,6 +864,10 @@ impl<'h> VM<'h> {
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
             scheduler: snapshot.scheduler,
+            // A raise never spans a suspension: it is parked only while an
+            // error unwinds out of a nested `run()`, which cannot yield.
+            pending_raised: None,
+            raise_seq: 0,
             module_code: Some(module_code),
             ext_function_load_ip: None,
             json_string_cache: JsonStringCache::default(),
@@ -1693,21 +1717,22 @@ impl<'h> VM<'h> {
                 // Exception Handling
                 Opcode::Raise => {
                     let exc = self.pop();
-                    let error = self.make_exception(&exc, true); // is_raise=true, hide caret
-                    // Re-raise an instance as-is so `raise e` preserves `e`'s
-                    // identity, like CPython. A bare type or non-exception has
-                    // nothing to reuse and rebuilds from the error.
-                    let raised = match &exc {
-                        Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Exception(_)) => Some(exc),
-                        _ => {
-                            exc.drop_with(self);
-                            None
-                        }
-                    };
+                    let (error, raised) = self.prepare_raise(exc);
                     if let Some(result) = self.handle_exception_with_value(error, raised) {
                         return Err(result);
                     }
                     // Exception was caught - handler may be in different frame, reload cache
+                    reload_cache!(self, cached_frame);
+                }
+                Opcode::RaiseFrom => {
+                    // Stack: [exc, cause] -> raises `exc` with `__cause__` set.
+                    let cause = self.pop();
+                    let exc = self.pop();
+                    let (error, raised) = self.prepare_raise(exc);
+                    let raised = self.attach_cause(raised, cause);
+                    if let Some(result) = self.handle_exception_with_value(error, raised) {
+                        return Err(result);
+                    }
                     reload_cache!(self, cached_frame);
                 }
                 Opcode::Assert => {
@@ -2056,6 +2081,18 @@ impl<'h> VM<'h> {
     #[inline]
     pub(crate) fn current_frame(&self) -> &CallFrame<'h> {
         self.frames.last().expect("no active frame")
+    }
+
+    /// The running function and its first local, which is what a zero-argument
+    /// `super()` resolves from: CPython uses the method's first positional
+    /// argument (`self`) plus the compiler's `__class__` cell, and Monty
+    /// recovers the class from the function instead (see `types::super_object`).
+    ///
+    /// `None` at module level, or in a frame with no locals at all.
+    pub(crate) fn zero_arg_super_context(&self) -> Option<(FunctionId, &Value)> {
+        let frame = self.frames.last()?;
+        let func_id = frame.function_id?;
+        (frame.locals_count > 0).then(|| (func_id, &self.stack[frame.stack_base]))
     }
 
     /// Creates a new cached frame from the current frame.
@@ -2508,6 +2545,9 @@ impl ContainsHeap for VM<'_> {
 impl Drop for VM<'_> {
     fn drop(&mut self) {
         release_pending_effect(self.pending_os_effect.take(), self.heap);
+        if let Some((raised, _)) = self.pending_raised.take() {
+            raised.drop_with(self.heap);
+        }
         self.exception_stack.drain(..).drop_with(self.heap);
         self.cleanup_current_task();
         self.scheduler.cleanup(self.heap);

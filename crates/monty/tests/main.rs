@@ -189,19 +189,57 @@ fn external_function_as_itertools_callable_raises_not_implemented() {
     }
 }
 
-/// The 3-arg `type()` form rejects non-empty bases because Monty classes
-/// cannot inherit (documented in `limitations/classes.md`). Kept as a
-/// Rust-side test because CPython accepts bases, so the comparative
-/// test-case suite cannot cover the divergence.
+/// A base must be a sandbox class or a builtin exception: Monty cannot
+/// subclass a builtin type, where CPython can (documented in
+/// `limitations/classes.md`). Kept as a Rust-side test because CPython accepts
+/// it, so the comparative test-case suite cannot cover the divergence.
 #[test]
-fn dynamic_type_with_bases_raises_type_error() {
+fn dynamic_type_rejects_a_builtin_base() {
     let code = "type('A', (int,), {})";
     let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
     let err = ex.run_no_limits(vec![]).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "Traceback (most recent call last):\n  File \"test.py\", line 1, in <module>\n    type('A', (int,), {})\n    ~~~~~~~~~~~~~~~~~~~~~\nTypeError: type() bases are not supported"
+        "Traceback (most recent call last):\n  File \"test.py\", line 1, in <module>\n    type('A', (int,), {})\n    ~~~~~~~~~~~~~~~~~~~~~\nNotImplementedError: inheriting from 'int' is not supported; a base must be a class defined in the sandbox or a builtin exception"
     );
+}
+
+/// Monty implements single inheritance only, so a second base is rejected
+/// rather than linearized into an MRO. CPython accepts it, so this cannot live
+/// in the comparative test-case suite.
+#[test]
+fn multiple_inheritance_is_rejected() {
+    let code = "class A:\n    pass\nclass B:\n    pass\ntype('C', (A, B), {})";
+    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let err = ex.run_no_limits(vec![]).unwrap_err();
+    assert!(
+        err.to_string()
+            .ends_with("NotImplementedError: multiple inheritance is not supported"),
+        "got: {err}"
+    );
+}
+
+/// The same rejection through the `class` statement, which lowers to the same
+/// 3-arg `type()` call.
+#[test]
+fn multiple_inheritance_in_a_class_statement_is_rejected() {
+    let code = "class A:\n    pass\nclass B:\n    pass\nclass C(A, B):\n    pass";
+    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let err = ex.run_no_limits(vec![]).unwrap_err();
+    assert!(
+        err.to_string()
+            .ends_with("NotImplementedError: multiple inheritance is not supported"),
+        "got: {err}"
+    );
+}
+
+/// Metaclass keywords stay rejected at parse time; there is no metaclass
+/// machinery behind them.
+#[test]
+fn class_metaclass_keyword_is_rejected() {
+    let code = "class Meta:\n    pass\nclass C(metaclass=Meta):\n    pass";
+    let err = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("class metaclasses"), "got: {err}");
 }
 
 /// The 3-arg `type()` form rejects non-string namespace keys with a

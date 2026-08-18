@@ -539,7 +539,14 @@ pub enum Node<F> {
     Pass,
     Expr(ExprLoc),
     Return(Option<ExprLoc>),
-    Raise(Option<ExprLoc>),
+    /// `raise`, `raise exc`, or `raise exc from cause`.
+    ///
+    /// A bare `raise` (both fields `None`) re-raises the exception being
+    /// handled; a `cause` with no `exc` is a syntax error the parser rejects.
+    Raise {
+        exc: Option<ExprLoc>,
+        cause: Option<ExprLoc>,
+    },
     Assert {
         test: ExprLoc,
         msg: Option<ExprLoc>,
@@ -713,12 +720,18 @@ pub enum Node<F> {
     /// assembles the namespace and returns a `Class`. Methods are ordinary
     /// `FunctionDef`s in that body (with `self` as the first parameter); class
     /// variables are `Assign`s. Class decorators are supported (see
-    /// [`decorators`](Self::ClassDef::decorators)); inheritance, metaclasses and
-    /// decorators on a `def` — including `classmethod`/`staticmethod`/`property`
-    /// — are rejected at parse time. See `limitations/classes.md`.
+    /// [`decorators`](Self::ClassDef::decorators)), as is single inheritance
+    /// (see [`bases`](Self::ClassDef::bases)); metaclasses and decorators on a
+    /// `def` are rejected at parse time. See `limitations/classes.md`.
     ClassDef {
         /// The class name identifier (resolved to an enclosing-scope slot at prepare time).
         name: Identifier,
+        /// Base classes, in source order. Evaluated in the *enclosing* scope
+        /// (like [`decorators`](Self::ClassDef::decorators)), never the class
+        /// body, so a base name shadowed by a class variable still resolves to
+        /// the enclosing binding as CPython does. At most one is accepted at
+        /// runtime; see `limitations/classes.md`.
+        bases: Vec<ExprLoc>,
         /// The synthetic class-body function: its body is the class statements
         /// in source order. Prepared and compiled exactly like a function; its
         /// emitted code ends by building the namespace `Dict` and returning the

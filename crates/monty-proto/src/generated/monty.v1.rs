@@ -174,6 +174,10 @@ pub struct RaisedException {
     /// absent for most exceptions. Mirrors monty's `ExcData`.
     #[prost(message, optional, tag = "4")]
     pub data: ::core::option::Option<ExcData>,
+    /// Name of the sandbox-defined class the exception was raised from, when it
+    /// was not a builtin one; `exc_type` then names its nearest builtin ancestor.
+    #[prost(string, optional, tag = "5")]
+    pub user_type: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Structured exception payload, mirroring monty's `ExcData` enum. Future
 /// exception types that carry more than a message (e.g. OSError's errno)

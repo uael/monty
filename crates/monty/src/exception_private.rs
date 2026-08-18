@@ -1,24 +1,24 @@
 use std::{
     borrow::Cow,
     fmt::{self, Display, Write},
+    mem,
 };
 
 use monty_types::{ExcData, JsonErrorData, MontyException, StackFrame, UnicodeErrorData};
-use smallvec::smallvec;
 
 use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
     defer_drop,
     fstring::{FormatError, ascii_escape},
-    heap::{HeapData, HeapRead},
+    heap::{DropWithContext, HeapData, HeapId, HeapRead},
     intern::{Interns, StaticStrings, StringId},
     parse::CodeRange,
     source_map::{SourceMap, StackFrameExt},
     types::{
-        PyTrait, Type, allocate_tuple,
+        LazyHeapSet, PyTrait, Type, allocate_tuple,
         long_int::INT_MAX_STR_DIGITS,
-        str::{StringRepr, allocate_string, string_repr_fmt},
+        str::{allocate_string, string_repr_fmt},
     },
     value::{EitherStr, Value},
 };
@@ -52,6 +52,7 @@ pub(crate) trait ExcTypeExt: Sized {
             exc,
             frame: None,
             hide_caret: true, // CPython doesn't show carets for attribute GET errors
+            token: 0,
         })
     }
 
@@ -70,6 +71,26 @@ pub(crate) trait ExcTypeExt: Sized {
             exc,
             frame: None,
             hide_caret: true, // CPython doesn't show carets for attribute GET errors
+            token: 0,
+        })
+    }
+
+    /// Creates the AttributeError for a `property` used through an accessor it
+    /// does not define, e.g. reading a setter-only one.
+    ///
+    /// Matches CPython 3.14: `property 'x' of 'C' object has no getter`.
+    /// `accessor` is `"getter"`, `"setter"` or `"deleter"`.
+    #[must_use]
+    fn attribute_error_property(attr: &str, class_name: &str, accessor: &str) -> RunError {
+        let exc = SimpleException::new_msg(
+            ExcType::AttributeError,
+            format!("property '{attr}' of '{class_name}' object has no {accessor}"),
+        );
+        RunError::Exc(ExceptionRaise {
+            exc,
+            frame: None,
+            hide_caret: true, // CPython doesn't show carets for attribute GET errors
+            token: 0,
         })
     }
 
@@ -99,6 +120,7 @@ pub(crate) trait ExcTypeExt: Sized {
             exc,
             frame: None,
             hide_caret: true, // CPython doesn't show carets for attribute GET errors
+            token: 0,
         })
     }
 
@@ -135,6 +157,13 @@ pub(crate) trait ExcTypeExt: Sized {
     #[must_use]
     fn cannot_reuse_already_awaited_coroutine() -> RunError {
         SimpleException::new_msg(ExcType::RuntimeError, "cannot reuse already awaited coroutine").into()
+    }
+
+    /// Creates the `RuntimeError` a zero-argument `super()` raises outside a
+    /// method, matching CPython's wording for a missing `__class__` cell.
+    #[must_use]
+    fn runtime_error_no_super_arguments() -> RunError {
+        SimpleException::new_msg(ExcType::RuntimeError, "super(): no arguments").into()
     }
 
     /// Creates a TypeError for item assignment on types that don't support it.
@@ -1258,6 +1287,7 @@ pub(crate) trait ExcTypeExt: Sized {
             exc,
             frame: None,
             hide_caret: true, // CPython doesn't show carets for module not found errors
+            token: 0,
         })
     }
 
@@ -1314,6 +1344,7 @@ pub(crate) trait ExcTypeExt: Sized {
             exc,
             frame: None,
             hide_caret: true,
+            token: 0,
         })
     }
 
@@ -2002,39 +2033,55 @@ pub(crate) trait ExcTypeExt: Sized {
 impl ExcTypeExt for ExcType {
     /// Creates an exception instance from an exception type and arguments.
     ///
-    /// Handles exception constructors like `ValueError('message')`.
-    /// Currently supports zero or one string argument.
-    ///
-    /// The `interns` parameter provides access to interned string content.
-    /// Returns a heap-allocated exception value.
+    /// Every positional shape CPython accepts works (`ValueError()`,
+    /// `ValueError('m')`, `ValueError('m', 2)`), and the arguments are kept as
+    /// `e.args`. Keywords are rejected, as `BaseException.__new__` rejects them.
     fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
-        defer_drop!(args, vm);
-        let exc = match args {
-            ArgValues::Empty => Ok(SimpleException::new_none(self)),
-            ArgValues::One(value) => match value {
-                Value::InternString(string_id) => Ok(SimpleException::new_msg(
-                    self,
-                    vm.interns.get_str(*string_id).to_owned(),
-                )),
-                Value::Ref(heap_id) => {
-                    if let HeapData::Str(s) = vm.heap.get(*heap_id) {
-                        Ok(SimpleException::new_msg(self, s.as_str().to_owned()))
-                    } else {
-                        Err(RunError::internal(
-                            "exceptions can only be called with zero or one string argument",
-                        ))
-                    }
-                }
-                _ => Err(RunError::internal(
-                    "exceptions can only be called with zero or one string argument",
-                )),
-            },
-            _ => Err(RunError::internal(
-                "exceptions can only be called with zero or one string argument",
-            )),
-        }?;
-        let heap_id = vm.heap.allocate(HeapData::Exception(exc));
+        let (pos, kwargs) = args.into_parts();
+        if !kwargs.is_empty() {
+            pos.drop_with(vm);
+            kwargs.drop_with(vm);
+            let name: &'static str = self.into();
+            return Err(Self::type_error_no_kwargs(name));
+        }
+        let args: Vec<Value> = pos.collect();
+        let message = match exception_message(&args, vm) {
+            Ok(message) => message,
+            Err(e) => {
+                drop_values(args, vm);
+                return Err(e);
+            }
+        };
+        let exc = SimpleException::new(self, message);
+        let object = ExceptionObject::new(exc, args);
+        let heap_id = vm.heap.allocate(HeapData::Exception(Box::new(object)));
         Ok(Value::Ref(heap_id))
+    }
+}
+
+/// The message a raised exception shows after its type name, i.e. `str(e)`.
+///
+/// `None` for a no-argument exception, so the traceback prints the bare type
+/// name; a single argument is stringified and several become the args tuple's
+/// repr, exactly as `BaseException.__str__` does.
+///
+/// The message is stored unquoted even for `KeyError`, whose `str(e)` adds the
+/// repr quotes on the way out (`SimpleException::py_str`), matching what every
+/// existing `ExcType::key_error` call site stores.
+pub(crate) fn exception_message(args: &[Value], vm: &mut VM<'_>) -> RunResult<Option<String>> {
+    match args {
+        [] => Ok(None),
+        [only] => {
+            let text = only.py_str(vm)?;
+            defer_drop!(text, vm);
+            Ok(Some(text.to_str(vm)?.to_owned()))
+        }
+        many => {
+            let mut s = String::new();
+            let mut heap_ids = LazyHeapSet::default();
+            write_arg_tuple(many, &mut s, vm, &mut heap_ids)?;
+            Ok(Some(s))
+        }
     }
 }
 
@@ -2053,6 +2100,16 @@ pub(crate) struct SimpleException {
     /// where skipped fields break deserialization.
     #[serde(default)]
     data: ExcData,
+    /// Name of the sandbox-defined class this was raised from, when it was not
+    /// raised from a builtin type. `exc_type` then holds the nearest builtin
+    /// ancestor, which is what `except <builtin>:` and the host bindings match
+    /// on, while this drives the traceback's final line and `repr`.
+    ///
+    /// `Box<str>` rather than `String`: this rides inside every [`RunError`],
+    /// which is returned from every fallible interpreter call, so the eight
+    /// bytes of unused capacity would be paid on every one of them.
+    #[serde(default)]
+    user_type: Option<Box<str>>,
 }
 
 impl fmt::Display for SimpleException {
@@ -2065,6 +2122,7 @@ impl From<MontyException> for SimpleException {
         Self {
             exc_type: exc.exc_type(),
             data: exc.take_data(),
+            user_type: exc.user_type().map(Box::from),
             arg: exc.into_message(),
         }
     }
@@ -2078,33 +2136,34 @@ impl SimpleException {
             exc_type,
             arg,
             data: ExcData::None,
+            user_type: None,
         }
     }
 
     /// Creates a new exception with the given type and argument message.
     #[must_use]
     pub fn new_msg(exc_type: ExcType, arg: impl fmt::Display) -> Self {
-        Self {
-            exc_type,
-            arg: Some(arg.to_string()),
-            data: ExcData::None,
-        }
+        Self::new(exc_type, Some(arg.to_string()))
     }
 
     /// Creates a new exception with the given type and no argument message.
     #[must_use]
     pub fn new_none(exc_type: ExcType) -> Self {
-        Self {
-            exc_type,
-            arg: None,
-            data: ExcData::None,
-        }
+        Self::new(exc_type, None)
     }
 
     /// Attaches a structured payload — see [`ExcData`].
     #[must_use]
     pub fn with_data(mut self, data: ExcData) -> Self {
         self.data = data;
+        self
+    }
+
+    /// Names the sandbox class this was raised from, keeping `exc_type` as the
+    /// nearest builtin ancestor. See [`SimpleException::user_type`].
+    #[must_use]
+    pub fn with_user_type(mut self, user_type: impl Into<Box<str>>) -> Self {
+        self.user_type = Some(user_type.into());
         self
     }
 
@@ -2118,29 +2177,19 @@ impl SimpleException {
         self.arg.as_ref()
     }
 
-    /// str() for an exception
+    /// The class name Python shows: the user class when there is one, else the
+    /// builtin type's own name.
     #[must_use]
-    pub fn py_str(&self) -> String {
-        match (self.exc_type, &self.arg) {
-            // KeyError expecificaly uses repr of the key for str(exc)
-            (ExcType::KeyError, Some(exc)) => StringRepr(exc).to_string(),
-            (_, Some(arg)) => arg.to_owned(),
-            (_, None) => String::new(),
+    pub fn type_name(&self) -> &str {
+        match &self.user_type {
+            Some(name) => name,
+            None => self.exc_type.into(),
         }
     }
-}
 
-impl<'h> HeapRead<'h, SimpleException> {
-    pub(crate) fn py_type(&self, vm: &VM<'h>) -> Type {
-        Type::Exception(self.get(vm.heap).exc_type)
-    }
-}
-
-impl SimpleException {
     /// Returns the exception formatted as Python would repr it.
     pub fn py_repr_fmt(&self, f: &mut impl Write) -> fmt::Result {
-        let type_str: &'static str = self.exc_type.into();
-        write!(f, "{type_str}(")?;
+        write!(f, "{}(", self.type_name())?;
 
         if let Some(arg) = &self.arg {
             string_repr_fmt(arg, f)?;
@@ -2154,15 +2203,186 @@ impl SimpleException {
             exc: self,
             frame: Some(RawStackFrame::from_position(position)),
             hide_caret: false,
+            token: 0,
         }
     }
 }
 
-impl<'h> HeapRead<'h, SimpleException> {
+/// A raised exception living on the heap: the value `except ... as e` binds.
+///
+/// Splits what an exception *is* from what a [`RunError`] *carries*: the error
+/// path holds a self-contained [`SimpleException`] (plain data, freely cloned
+/// while unwinding), while the args and chaining slots hold `Value`s and so
+/// need reference counting and cycle tracing, which only a heap object can do.
+///
+/// Exceptions raised from a sandbox-defined class are `Instance`s instead (they
+/// need a `__dict__` and methods); this type backs the builtin ones.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ExceptionObject {
+    /// Type, message and structured payload: everything the traceback needs.
+    exc: SimpleException,
+    /// The constructor arguments, exposed as `e.args`.
+    args: Vec<Value>,
+    /// `__cause__`: the explicit `raise X from Y` cause, else `Value::None`.
+    cause: Value,
+    /// `__context__`: the exception being handled when this one was raised,
+    /// else `Value::None`.
+    context: Value,
+}
+
+impl ExceptionObject {
+    /// Builds an exception object from its constructor arguments, deriving the
+    /// summary message CPython's `str(e)` would produce.
+    #[must_use]
+    pub fn new(exc: SimpleException, args: Vec<Value>) -> Self {
+        Self {
+            exc,
+            args,
+            cause: Value::None,
+            context: Value::None,
+        }
+    }
+
+    /// Rebuilds the heap object for an error that carries only its summary
+    /// (the unwinding path, which has no `Value`s), synthesizing the single-arg
+    /// tuple the message came from.
+    pub fn from_summary(exc: SimpleException, vm: &mut VM<'_>) -> Self {
+        let args = match exc.arg() {
+            Some(arg) => vec![allocate_string(arg.as_str(), vm.heap)],
+            None => Vec::new(),
+        };
+        Self::new(exc, args)
+    }
+
+    /// The value-only summary, for tracebacks and the host boundary.
+    #[must_use]
+    pub fn summary(&self) -> &SimpleException {
+        &self.exc
+    }
+
+    #[must_use]
+    pub fn exc_type(&self) -> ExcType {
+        self.exc.exc_type()
+    }
+
+    /// Pushes every owned heap id (args plus both chaining slots) for the
+    /// heap's iterative destruction, and for cycle collection.
+    pub fn dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        for arg in &mut self.args {
+            arg.py_dec_ref_ids(stack);
+        }
+        self.cause.py_dec_ref_ids(stack);
+        self.context.py_dec_ref_ids(stack);
+    }
+
+    /// Calls `on_child` for every heap value this exception reaches, for the
+    /// cycle collector's trial deletion.
+    pub fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
+        for value in self.args.iter().chain([&self.cause, &self.context]) {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }
+    }
+}
+
+impl<'h> HeapRead<'h, ExceptionObject> {
+    /// `str(e)`, following `BaseException.__str__`: empty for no args, the sole
+    /// argument for one, and the args tuple's repr for more.
+    ///
+    /// The arguments are cloned out first: rendering them re-enters the VM (a
+    /// user `__str__` may run), which cannot happen while this handle borrows
+    /// the heap.
+    pub fn py_str(&self, vm: &mut VM<'h>) -> RunResult<String> {
+        let exc_type = self.get(vm.heap).exc_type();
+        let args = self.cloned_args(vm);
+        let result = match args.as_slice() {
+            [] => Ok(String::new()),
+            // `KeyError` reprs its single argument instead, as CPython does.
+            [only] if exc_type == ExcType::KeyError => {
+                let mut s = String::new();
+                let mut heap_ids = LazyHeapSet::default();
+                only.py_repr_fmt(&mut s, vm, &mut heap_ids).map(|()| s)
+            }
+            [only] => match only.py_str(vm) {
+                Ok(text) => {
+                    defer_drop!(text, vm);
+                    text.to_str(vm).map(ToOwned::to_owned)
+                }
+                Err(e) => Err(e),
+            },
+            many => {
+                let mut s = String::new();
+                let mut heap_ids = LazyHeapSet::default();
+                write_arg_tuple(many, &mut s, vm, &mut heap_ids).map(|()| s)
+            }
+        };
+        drop_values(args, vm);
+        result
+    }
+
+    /// `repr(e)`: `TypeName(arg_reprs...)`, matching CPython.
+    pub fn py_repr_fmt(&self, f: &mut impl Write, vm: &mut VM<'h>, heap_ids: &mut LazyHeapSet) -> RunResult<()> {
+        let name = self.get(vm.heap).exc.type_name().to_owned();
+        let args = self.cloned_args(vm);
+        // Written inside the guarded region: the sink can refuse (the
+        // assert-repr writer stops at its byte cap), and an early `?` here
+        // would strand the cloned arguments.
+        let result = f
+            .write_str(&name)
+            .map_err(RunError::from)
+            .and_then(|()| write_arg_tuple(&args, f, vm, heap_ids));
+        drop_values(args, vm);
+        result
+    }
+
+    /// Owned copies of `args`, so the heap borrow ends before formatting.
+    fn cloned_args(&self, vm: &VM<'h>) -> Vec<Value> {
+        self.get(vm.heap)
+            .args
+            .iter()
+            .map(|v| v.clone_with_heap(vm.heap))
+            .collect()
+    }
+}
+
+/// Releases a batch of owned values.
+fn drop_values(values: Vec<Value>, vm: &mut VM<'_>) {
+    for value in values {
+        value.drop_with(vm);
+    }
+}
+
+/// Writes `(a, b)` into `f`.
+///
+/// No trailing comma for a single argument: this renders both the call-like
+/// `repr(e)` and the multi-argument `str(e)`, and neither ever shows one.
+fn write_arg_tuple(args: &[Value], f: &mut impl Write, vm: &mut VM<'_>, heap_ids: &mut LazyHeapSet) -> RunResult<()> {
+    f.write_char('(')?;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            f.write_str(", ")?;
+        }
+        // The argument is cloned out so the borrow of `self` ends before the
+        // repr re-enters the VM (a user `__repr__` can mutate the heap).
+        let arg = arg.clone_with_heap(vm.heap);
+        let result = arg.py_repr_fmt(f, vm, heap_ids);
+        arg.drop_with(vm);
+        result?;
+    }
+    f.write_char(')')?;
+    Ok(())
+}
+
+impl<'h> HeapRead<'h, ExceptionObject> {
+    pub(crate) fn py_type(&self, vm: &VM<'h>) -> Type {
+        Type::Exception(self.get(vm.heap).exc_type())
+    }
+
     /// Gets an attribute from this exception.
     ///
-    /// Handles the `.args` attribute by allocating a tuple containing the message.
-    /// Returns `None` for all other attributes.
+    /// Handles `args` (always a tuple) and the `__cause__` / `__context__`
+    /// chaining slots. Returns `None` for all other attributes.
     pub fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h>) -> Option<CallResult> {
         // Fast path: interned strings can be matched by ID
         let is_args = attr
@@ -2170,16 +2390,34 @@ impl<'h> HeapRead<'h, SimpleException> {
             .map_or_else(|| attr.as_str(vm.interns) == "args", |ss| ss == StaticStrings::Args);
 
         if is_args {
-            // Construct tuple with 0 or 1 elements based on whether arg exists
-            let elements = if let Some(arg_str) = &self.get(vm.heap).arg {
-                smallvec![allocate_string(arg_str.as_str(), vm.heap)]
-            } else {
-                smallvec![]
-            };
+            let elements = self
+                .get(vm.heap)
+                .args
+                .iter()
+                .map(|v| v.clone_with_heap(vm.heap))
+                .collect();
             Some(CallResult::Value(allocate_tuple(elements, vm.heap)))
         } else {
-            None
+            match attr.as_str(vm.interns) {
+                "__cause__" => Some(CallResult::Value(self.get(vm.heap).cause.clone_with_heap(vm.heap))),
+                "__context__" => Some(CallResult::Value(self.get(vm.heap).context.clone_with_heap(vm.heap))),
+                _ => None,
+            }
         }
+    }
+
+    /// Fills in `__cause__` (an explicit `raise ... from ...`), dropping any
+    /// previous one. Takes ownership of `cause`.
+    pub fn set_cause(&mut self, cause: Value, vm: &mut VM<'h>) {
+        let previous = mem::replace(&mut self.get_mut(vm.heap).cause, cause);
+        previous.drop_with(vm);
+    }
+
+    /// Fills in `__context__` (implicit chaining), dropping any previous one.
+    /// Takes ownership of `context`.
+    pub fn set_context(&mut self, context: Value, vm: &mut VM<'h>) {
+        let previous = mem::replace(&mut self.get_mut(vm.heap).context, context);
+        previous.drop_with(vm);
     }
 }
 
@@ -2196,6 +2434,14 @@ pub struct ExceptionRaise {
     /// whether the caret should be hidden.
     #[serde(default)]
     pub hide_caret: bool,
+    /// Identifies the raised object parked in `VM::pending_raised`, so an
+    /// exception that unwound out of a nested `run()` can be reunited with its
+    /// heap object. Zero for every error built from Rust, which has no object
+    /// to reunite with; the counter is incremented before use, so zero is never
+    /// a live token. A bare `u64` rather than an `Option` because this rides
+    /// inside every [`RunError`].
+    #[serde(default)]
+    pub token: u64,
 }
 
 impl From<SimpleException> for ExceptionRaise {
@@ -2204,6 +2450,7 @@ impl From<SimpleException> for ExceptionRaise {
             exc,
             frame: None,
             hide_caret: false,
+            token: 0,
         }
     }
 }
@@ -2214,6 +2461,7 @@ impl From<MontyException> for ExceptionRaise {
             exc: exc.into(),
             frame: None,
             hide_caret: false,
+            token: 0,
         }
     }
 }
@@ -2309,7 +2557,9 @@ impl ExceptionRaise {
             })
             .unwrap_or_default();
 
-        MontyException::with_traceback(self.exc.exc_type, self.exc.arg, traceback).with_data(self.exc.data)
+        MontyException::with_traceback(self.exc.exc_type, self.exc.arg, traceback)
+            .with_data(self.exc.data)
+            .with_user_type(self.exc.user_type.map(String::from))
     }
 }
 

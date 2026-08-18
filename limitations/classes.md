@@ -36,20 +36,104 @@ and function-attributes-become-methods), bound methods, class variables
 **class decorators** (`@deco class Foo`), **method decorators** taking any
 callable in scope,
 `__repr__`/`__str__`/`__enter__`/`__exit__`/`__eq__`/`__hash__` dispatch,
+**class decorators** (`@deco class Foo`), **single inheritance** (`class B(A)`,
+inherited methods/class variables/`__init__`, `super()`),
+**descriptors** (`property`, `staticmethod`, `classmethod`),
+`__repr__`/`__str__`/`__enter__`/`__exit__`/`__eq__`/`__hash__`/`__call__`/
+`__getitem__`/`__setitem__`/`__len__`/`__bool__` dispatch,
 `obj.__class__`, `Foo.__name__`, `Foo.__doc__`/`obj.__doc__`,
 `Foo.__annotations__` (ordered; values stringized and provisional, see
-./typing.md), `type(obj)`/`isinstance(obj, Foo)`, and the 3-arg
-`type()` constructor. The `__enter__`/`__exit__` divergences are in
-./with.md.
+./typing.md), `type(obj)`, `isinstance(obj, Foo)`, `issubclass(B, A)`, and the
+3-arg `type()` constructor. The `__enter__`/`__exit__` divergences are in
+./with.md; exception classes are in ./exceptions.md.
+
+## Inheritance
+
+`class B(A):` works, with one base. Attribute and method lookup walks the
+chain derived-first, so an override wins and an inherited `__init__`,
+`__repr__`, dunder or class variable is found; `isinstance` and `issubclass`
+walk it too. Divergences:
+
+- **Single inheritance only.** A second base raises
+  `NotImplementedError: multiple inheritance is not supported` rather than
+  being linearized: there is no C3 MRO, only a chain walk. `Foo.__mro__` does
+  not exist.
+- **A base must be a class defined in the sandbox or a builtin exception
+  type.** Subclassing a builtin (`class MyList(list)`, `class C(object)`)
+  raises `NotImplementedError: inheriting from '...' is not supported; a base
+  must be a class defined in the sandbox or a builtin exception`. CPython
+  allows both, and `object` is not even a name Monty defines.
+- **Base expressions are evaluated in the enclosing scope**, as in CPython,
+  but the chain is fixed at class creation: there is no `__bases__` attribute
+  and no way to reassign it.
+- **`super()` takes no arguments.** The explicit `super(C, obj)` form raises
+  `NotImplementedError: super() with arguments is not supported`. The
+  zero-argument form works, including from a middle class of a chain, but
+  Monty recovers the defining class by finding which class in the receiver's
+  chain binds the running function rather than from a compiler-injected
+  `__class__` cell. The two agree for any class built by a `class` statement;
+  they can differ if the *same* function object is bound in two classes of one
+  chain (`type('B', (A,), {'m': A.m})`), where Monty resolves to the most
+  derived of them.
+- **`super()` outside a method** raises `RuntimeError: super(): no arguments`,
+  matching CPython's wording for a missing `__class__` cell.
+- **A generic base is not supported.** `class Held[T](Spawned[T])` parses (PEP
+  695 type parameters are accepted and ignored, see ./typing.md) but fails at
+  runtime with `TypeError: 'type' object is not subscriptable`: subscripting a
+  class dispatches neither `__class_getitem__` nor `__mro_entries__`, and a
+  PEP 695 generic class gets no implicit `Generic` base to supply them. A
+  non-subscripted base of the same class works.
+- **The implicit root class is minimal.** `super().__init__()` falls back to
+  `object.__init__` (zero arguments) or, in an exception class,
+  `BaseException.__init__` (which stores `args`). No other `object` method
+  (`__eq__`, `__str__`, `__reduce__`, ...) is reachable through `super()`;
+  they raise `AttributeError`.
+
+## Descriptors
+
+`property`, `staticmethod` and `classmethod` are real objects, and class
+attribute lookup invokes them. Because decorators on a `def` inside a class
+body are still rejected at parse time, they are written in the assignment
+form:
+
+```python
+class C:
+    def _get(self):
+        return self._v
+
+    def _set(self, value):
+        self._v = value
+
+    x = property(_get, _set)
+```
+
+Divergences:
+
+- **`property()` takes positional arguments only.** `property(fget=f)` raises
+  a `TypeError`; CPython accepts all four as keywords. The fourth argument
+  (`doc`) is accepted and discarded, since there is no `property.__doc__`.
+- **A property's deleter never fires.** `del obj.x` is rejected at parse time
+  (the `del` statement is unsupported generally), so `fdel` is stored but
+  unreachable.
+- **`repr(property_object)` is `<property object>`**, without CPython's
+  `at 0x..` address.
+- **A general user-defined descriptor protocol is not implemented.** Only
+  these three built-in descriptors are invoked; a class defining `__get__` /
+  `__set__` / `__delete__` and used as a class attribute is returned as-is.
+- `p.getter(f)` / `p.setter(f)` / `p.deleter(f)` work and return a new
+  property, so the `@x.setter` form will work once method decorators land.
 
 ## Dynamic class creation — `type(name, bases, dict)`
 
 The 3-arg `type()` form creates classes at runtime with CPython's validation
 order and error wording, but with these divergences:
 
-- **`bases` must be the empty tuple `()`.** Any non-empty bases tuple, even
-  `(object,)`, raises `TypeError: type() bases are not supported`, the
-  runtime counterpart of the parse-time `class Foo(Bar)` rejection.
+- **`bases` accepts at most one entry, and it must be a sandbox class or a
+  builtin exception type.** `(object,)` and `(int,)` raise
+  `NotImplementedError`, and two bases raise
+  `NotImplementedError: multiple inheritance is not supported`; see
+  "Inheritance" above. This is the same code path a compiled `class`
+  statement takes, so the two agree by construction.
 - **Keywords are always rejected.** CPython forwards extra keywords to
   `__init_subclass__`; Monty has no `__init_subclass__`, but the error
   message matches what `object.__init_subclass__` produces
@@ -73,11 +157,11 @@ order and error wording, but with these divergences:
   'y'`, where CPython says `Foo.__init__() missing ...`.
 - **`type(obj)`** returns the class object (so identity works), but its own
   `repr` is `<class 'Foo'>` with the bare name; CPython qualifies it.
-- **The class object is not itself a `type` instance.** The bare name `type`
-  resolves to the builtin `type` *function*, not a type object, so
-  `type(Foo) is type` is `False` (CPython: `True`) and `isinstance(Foo, type)`
-  raises `TypeError: isinstance() arg 2 must be a type, a tuple of types, or a
-  union` (CPython: `True`). There is no metaclass.
+- **`type(Foo) is type` is `False`** (CPython: `True`). The bare name `type`
+  resolves to the builtin `type` *function*, not a type object, and there is no
+  metaclass. `isinstance(Foo, type)` does answer `True`, as it does for every
+  builtin type and exception type, since `type` as the second argument asks
+  whether the first is a class rather than comparing objects.
 - **Bound methods report `function`, not `method`.** `type(obj.method)` is
   `<class 'function'>` where CPython says `<class 'method'>`; Monty has no
   dedicated `method` type.
@@ -101,8 +185,12 @@ order and error wording, but with these divergences:
   completion synchronously, so one that calls an external/OS function raises
   rather than yielding to the host. An exception raised by `__eq__` terminates
   the run instead of being catchable by a `try` around the comparison.
+- **`__getitem__`/`__setitem__`/`__len__`/`__bool__` and a `property`
+  getter/setter cannot suspend either**, for the same reason: they run to
+  completion synchronously and raise `NotImplementedError` on an external/OS
+  call. `__call__` is the exception: it runs as a real pushed frame, so it can
+  suspend exactly as an ordinary method does.
 - **Ordering dunders are still not dispatched**; see the entry above.
-  Instances are always truthy (no `__bool__`/`__len__` dispatch).
 - **Bound methods compare and hash by identity**: each `obj.method` access
   creates a fresh object, so `obj.method == obj.method` is `False` and two
   accesses hash differently. CPython compares/hashes bound methods by
@@ -172,12 +260,13 @@ first, e.g. return a `dict` of the fields.
 
 ## What does NOT exist for user code
 
-- `class Foo(Bar): ...` — no inheritance, no MRO, no `super()` (rejected at
-  parse time: "class inheritance and metaclasses"; the runtime equivalent
-  `type('Foo', (Bar,), {})` raises `TypeError`, see above).
-- Metaclasses, `__init_subclass__`, `__set_name__`, and any other
+- Multiple inheritance, an MRO, and `__mro__`/`__bases__`; see "Inheritance".
+- Metaclasses (`class Foo(metaclass=Meta)` is rejected at parse time: "class
+  metaclasses"), `__init_subclass__`, `__set_name__`, and any other
   metaclass-driven namespace customization.
-- `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).
+- `__slots__`, and a general user descriptor protocol (`__get__` / `__set__` /
+  `__delete__` on a user class); see "Descriptors" for the three built-in
+  ones that do work.
 - Abstract base classes (`abc.ABC`, `@abstractmethod`).
 - `@classmethod`, `@staticmethod` and `@property` — the *decorator syntax* on a
   method works and applies any callable in scope, but these three builtin
@@ -188,6 +277,10 @@ first, e.g. return a `dict` of the fields.
   `functools.wraps`-style metadata copying has no equivalent here either.
 - **Tracebacks from a method decorator that raises** point at the whole `class`
   statement, like class decorators below, rather than at the decorator line.
+- Decorators on a `def` inside a class body (rejected at parse time), so
+  `@classmethod`/`@staticmethod`/`@property` must be written in the assignment
+  form; see "Descriptors". Decorators on classes and on non-method functions
+  are supported.
 - **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
   are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
   latter with stringized values, see ./typing.md). A class decorator
@@ -199,10 +292,13 @@ first, e.g. return a `dict` of the fields.
   identifies which one raised.
 - Dunder protocols other than `__init__`, `__repr__`, `__str__`,
   `__enter__`, `__exit__`, `__iter__`, `__next__`, `__contains__`, `__eq__`,
-  and `__hash__`: `__new__`, `__call__`, `__getitem__`, `__setitem__`,
-  `__add__`, `__ne__`, `__bool__`, etc. are not dispatched for user-defined
-  instances. `__ne__` is always the negation of `__eq__`, as CPython derives it
-  by default, so a custom `__ne__` is ignored.
+  `__hash__`, `__call__`, `__getitem__`, `__setitem__`, `__len__` and
+  `__bool__`: `__new__`, `__add__`, `__ne__`, `__lt__`, `__getattr__`, etc. are
+  not dispatched for user-defined instances. `__ne__` is always the negation of
+  `__eq__`, as CPython derives it by default, so a custom `__ne__` is ignored.
+- `__delitem__` is **defined but unreachable**: `del obj[k]` is rejected at
+  parse time (the `del` statement is unsupported generally), so a class
+  defining it never has it called.
 - `__iter__` / `__next__` / `__contains__` **are** dispatched, but like
   `__repr__`/`__str__` they run synchronously, so one that calls an external or
   OS function cannot suspend and raises `NotImplementedError`. Two related
@@ -220,15 +316,12 @@ first, e.g. return a `dict` of the fields.
   a `StopIteration` raised anywhere inside it ends the iteration, including one
   that propagates out of a nested call, where CPython's PEP 479 protections
   apply only to generators, which Monty does not have.
-- **A `__contains__` returning a user instance is always `True`.** The result is
-  coerced by Monty's truthiness, which reports every instance as truthy (see
-  above), where CPython's `PyObject_IsTrue` consults the returned object's
-  `__bool__`/`__len__`. Every other return type coerces as CPython does.
+
 - Attribute-access hooks are **never** dispatched: `__getattr__`,
   `__getattribute__`, `__setattr__`, `__delattr__`, and `__del__`. A missing
   attribute always raises the default `AttributeError` even when the class
-  defines `__getattr__`, and attribute writes always go straight to the
-  instance `__dict__`.
+  defines `__getattr__`, and attribute writes go straight to the instance
+  `__dict__` unless the class binds the name to a `property`.
 - Introspection attributes other than `__name__`, `__doc__`, `__annotations__`
   and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`, `Foo.__bases__`,
   `Foo.__mro__`, `Foo.__qualname__`, `Foo.__module__`, and explicit
