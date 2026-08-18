@@ -26,6 +26,7 @@ mod os_dispatch;
 mod parse;
 mod predicate;
 mod prepare;
+mod program;
 mod repl;
 mod resource_checks;
 mod run;

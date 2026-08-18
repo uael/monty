@@ -1190,3 +1190,53 @@ fn call_builtin_via_session() {
         .unwrap();
     assert_eq!(result, MontyObject::Int(2));
 }
+
+/// A probe that runs while a snippet is suspended interns whatever it names,
+/// and those strings have to survive the snippet being abandoned.
+///
+/// The session compiles into one symbol space and a compile commits to it
+/// before it runs, so there is nothing for an exit to reconcile. When the
+/// in-flight snippet carried its own tables instead, this probe's strings went
+/// with the snippet and the list was left holding an id that meant something
+/// else in the table the session kept.
+#[test]
+fn a_probe_keeps_its_strings_when_the_suspended_snippet_is_abandoned() {
+    let (repl, _) = init_repl("board = []");
+
+    let progress = repl.feed_start("ext_fn(1)", vec![], PrintWriter::Stdout).unwrap();
+    let mut call = progress.into_function_call().expect("expected function call");
+    call.probe("board.append('probed')", vec![], PrintWriter::Stdout)
+        .unwrap();
+
+    let mut repl = call.into_repl();
+    assert_eq!(
+        feed_run_print(&mut repl, "board").unwrap(),
+        MontyObject::List(vec![MontyObject::String("probed".to_owned())])
+    );
+}
+
+/// The same, resuming the snippet rather than abandoning it: the probe's names
+/// and the snippet's own both survive, in one table.
+#[test]
+fn a_probe_and_its_suspended_snippet_share_one_symbol_space() {
+    let (repl, _) = init_repl("board = []");
+
+    let progress = repl
+        .feed_start("board.append(ext_fn(1))", vec![], PrintWriter::Stdout)
+        .unwrap();
+    let mut call = progress.into_function_call().expect("expected function call");
+    call.probe("board.append('probed')", vec![], PrintWriter::Stdout)
+        .unwrap();
+
+    let progress = call
+        .resume(MontyObject::String("resumed".to_owned()), PrintWriter::Stdout)
+        .unwrap();
+    let (mut repl, _) = progress.into_complete().expect("expected completion");
+    assert_eq!(
+        feed_run_print(&mut repl, "board").unwrap(),
+        MontyObject::List(vec![
+            MontyObject::String("probed".to_owned()),
+            MontyObject::String("resumed".to_owned()),
+        ])
+    );
+}

@@ -17,6 +17,7 @@ use crate::{
     heap::{Heap, HeapReader},
     object_bridge::MontyObjectExt,
     os_dispatch::release_pending_effect,
+    program::Program,
     run::Executor,
 };
 
@@ -315,6 +316,7 @@ impl NameLookup {
 
         let Snapshot {
             mut heap,
+            program,
             executor,
             vm_state: snapshot_vm_state,
         } = self.snapshot;
@@ -322,14 +324,16 @@ impl NameLookup {
         let is_global = self.is_global;
         let name = self.name;
 
-        let (converted, vm_state) =
-            HeapReader::with(&mut heap, &mut (&executor, print), |reader, (executor, print)| {
+        let (converted, vm_state) = HeapReader::with(
+            &mut heap,
+            &mut (&program, &executor, print),
+            |reader, (program, executor, print)| {
                 // Restore the VM first, then convert inside its lifetime
                 let mut vm = VM::restore(
                     snapshot_vm_state,
                     &executor.module_code,
                     reader,
-                    &executor.interns,
+                    &program.interns,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -366,8 +370,9 @@ impl NameLookup {
                 let converted = convert_frame_exit(vm_result, &mut vm);
                 let vm_state = check_snapshot_from_converted(&converted, vm);
                 Ok((converted, vm_state))
-            })?;
-        build_run_progress(converted, vm_state, executor, heap)
+            },
+        )?;
+        build_run_progress(converted, vm_state, program, executor, heap)
     }
 }
 
@@ -384,7 +389,9 @@ impl NameLookup {
 /// `resume(results, print)` with some or all of the results.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResolveFutures {
-    /// The executor containing compiled code and interns.
+    /// Names and interned data this run resolves against.
+    program: Program,
+    /// The executor containing the compiled code.
     executor: Executor,
     /// The VM state containing stack, frames, globals, and exception state.
     vm_state: VMSnapshot,
@@ -396,8 +403,9 @@ pub struct ResolveFutures {
 
 impl ResolveFutures {
     /// Creates a new `ResolveFutures` from its parts.
-    fn new(executor: Executor, vm_state: VMSnapshot, heap: Heap, pending_call_ids: Vec<u32>) -> Self {
+    fn new(program: Program, executor: Executor, vm_state: VMSnapshot, heap: Heap, pending_call_ids: Vec<u32>) -> Self {
         Self {
+            program,
             executor,
             vm_state,
             heap,
@@ -428,18 +436,19 @@ impl ResolveFutures {
     #[must_use]
     pub fn __force_gc_for_tests(self) -> Self {
         let Self {
+            program,
             executor,
             vm_state,
             mut heap,
             pending_call_ids,
         } = self;
 
-        let vm_state = HeapReader::with(&mut heap, &mut &executor, |reader, executor| {
+        let vm_state = HeapReader::with(&mut heap, &mut (&program, &executor), |reader, (program, executor)| {
             let mut vm = VM::restore(
                 vm_state,
                 &executor.module_code,
                 reader,
-                &executor.interns,
+                &program.interns,
                 PrintWriter::Stdout,
                 executor.assert_repr_max_bytes,
             );
@@ -447,7 +456,7 @@ impl ResolveFutures {
             vm.snapshot()
         });
 
-        Self::new(executor, vm_state, heap, pending_call_ids)
+        Self::new(program, executor, vm_state, heap, pending_call_ids)
     }
 
     /// Resumes execution with results for some or all pending futures.
@@ -471,6 +480,7 @@ impl ResolveFutures {
         print: PrintWriter<'_>,
     ) -> Result<RunProgress, MontyException> {
         let Self {
+            program,
             executor,
             vm_state,
             mut heap,
@@ -483,14 +493,16 @@ impl ResolveFutures {
             .find(|(call_id, _)| !pending_call_ids.contains(call_id))
             .map(|(call_id, _)| *call_id);
 
-        let (converted, vm_state) =
-            HeapReader::with(&mut heap, &mut (&executor, print), |reader, (executor, print)| {
+        let (converted, vm_state) = HeapReader::with(
+            &mut heap,
+            &mut (&program, &executor, print),
+            |reader, (program, executor, print)| {
                 // Restore the VM from the snapshot (must happen before any error return to clean up properly).
                 let mut vm = VM::restore(
                     vm_state,
                     &executor.module_code,
                     reader,
-                    &executor.interns,
+                    &program.interns,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -508,8 +520,9 @@ impl ResolveFutures {
                 let converted = convert_frame_exit(result, &mut vm);
                 let vm_state = check_snapshot_from_converted(&converted, vm);
                 Ok((converted, vm_state))
-            })?;
-        build_run_progress(converted, vm_state, executor, heap)
+            },
+        )?;
+        build_run_progress(converted, vm_state, program, executor, heap)
     }
 }
 
@@ -524,7 +537,9 @@ impl ResolveFutures {
 /// public API.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Snapshot {
-    /// The executor containing compiled code and interns.
+    /// Names and interned data this run resolves against.
+    pub(crate) program: Program,
+    /// The executor containing the compiled code.
     pub(crate) executor: Executor,
     /// The VM state containing stack, frames, globals, and exception state.
     pub(crate) vm_state: VMSnapshot,
@@ -542,18 +557,21 @@ impl Snapshot {
         let ext_result = result.into();
 
         let Self {
+            program,
             executor,
             vm_state,
             mut heap,
         } = self;
 
-        let (converted, vm_state) =
-            HeapReader::with(&mut heap, &mut (&executor, print), |reader, (executor, print)| {
+        let (converted, vm_state) = HeapReader::with(
+            &mut heap,
+            &mut (&program, &executor, print),
+            |reader, (program, executor, print)| {
                 let mut vm = VM::restore(
                     vm_state,
                     &executor.module_code,
                     reader,
-                    &executor.interns,
+                    &program.interns,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -575,8 +593,9 @@ impl Snapshot {
                 let converted = convert_frame_exit(vm_result, &mut vm);
                 let vm_state = check_snapshot_from_converted(&converted, vm);
                 (converted, vm_state)
-            });
-        build_run_progress(converted, vm_state, executor, heap)
+            },
+        );
+        build_run_progress(converted, vm_state, program, executor, heap)
     }
 }
 
@@ -739,12 +758,14 @@ pub(crate) fn check_snapshot_from_converted(converted: &ConvertedExit, vm: VM<'_
 pub(crate) fn build_run_progress(
     converted: ConvertedExit,
     vm_state: Option<VMSnapshot>,
+    program: Program,
     executor: Executor,
     heap: Heap,
 ) -> Result<RunProgress, MontyException> {
     macro_rules! new_snapshot {
         () => {
             Snapshot {
+                program,
                 executor,
                 vm_state: vm_state.expect("snapshot should exist"),
                 heap,
@@ -774,6 +795,7 @@ pub(crate) fn build_run_progress(
             new_snapshot!(),
         ))),
         ConvertedExit::ResolveFutures(pending_call_ids) => Ok(RunProgress::ResolveFutures(ResolveFutures::new(
+            program,
             executor,
             vm_state.expect("snapshot should exist for ResolveFutures"),
             heap,
@@ -789,8 +811,6 @@ pub(crate) fn build_run_progress(
             is_global,
             new_snapshot!(),
         ))),
-        ConvertedExit::Error(err) => {
-            Err(err.into_python_exception(&executor.interns, |_| Some(executor.code.as_str())))
-        }
+        ConvertedExit::Error(err) => Err(err.into_python_exception(&program.interns, |_| Some(executor.code.as_str()))),
     }
 }
