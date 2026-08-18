@@ -498,7 +498,7 @@ impl ResourceTracker {
 
     /// Called before operations that may produce large results (>100KB).
     ///
-    /// This allows pre-emptive rejection of operations like `2 ** 10_000_000`
+    /// This allows preemptive rejection of operations like `2 ** 10_000_000`
     /// before the memory is actually allocated. The check only happens for
     /// estimated result sizes above `LARGE_RESULT_THRESHOLD` to avoid overhead
     /// on small operations.
