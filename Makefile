@@ -20,6 +20,11 @@ endif
 # cause. Resolve the interpreter `.python-version` pins instead, and expand to
 # nothing when uv cannot, so pyo3's own search still applies. `build.rs` fails
 # the build with an explanation whenever what it finds is too old.
+#
+# Every recipe that *compiles* monty-datatest needs this, `--workspace` builds
+# included, not only the ones that run it. It is deliberately not a blanket
+# `export`: `make dev-py` and `make pytest` build the python extension against
+# whatever `UV_PYTHON` selects, which CI varies from 3.10 to 3.14.
 PYTHON_PIN = $(shell cat .python-version)
 DATATEST_PYTHON = $(shell p=$$(uv python find $(PYTHON_PIN) 2>/dev/null); test -n "$$p" && echo PYO3_PYTHON=$$p)
 
@@ -34,7 +39,7 @@ install-js: ## Install JS package dependencies
 
 .PHONY: install
 install: .cargo install-py install-js ## Install the package, dependencies, and prek for local development
-	cargo check --workspace
+	$(DATATEST_PYTHON) cargo check --workspace
 	uvx prek install --install-hooks
 
 .PHONY: dev-py
@@ -105,13 +110,13 @@ format: format-rs format-py format-js ## Format Rust code, this does not format 
 .PHONY: lint-rs
 lint-rs:  ## Lint Rust code with clippy and import checks
 	@cargo clippy --version
-	cargo clippy --workspace --tests -p monty-bench --benches -- -D warnings
-	cargo clippy --workspace --tests --all-features -- -D warnings
+	$(DATATEST_PYTHON) cargo clippy --workspace --tests -p monty-bench --benches -- -D warnings
+	$(DATATEST_PYTHON) cargo clippy --workspace --tests --all-features -- -D warnings
 	./scripts/check_imports.py
 
 .PHONY: clippy-fix
 clippy-fix: ## Fix Rust code with clippy
-	cargo clippy --workspace --tests -p monty-bench --benches --all-features --fix --allow-dirty
+	$(DATATEST_PYTHON) cargo clippy --workspace --tests -p monty-bench --benches --all-features --fix --allow-dirty
 
 .PHONY: generate-proto
 generate-proto: ## Regenerate monty-proto's checked-in code from the .proto schema

@@ -21,31 +21,32 @@ fn check_interpreter_version() {
 
     let pinned = fs::read_to_string(&pinned_path).expect("workspace .python-version should be readable");
     let mut parts = pinned.trim().split('.');
-    let (Some(Ok(major)), Some(Ok(minor))) = (
-        parts.next().map(str::parse::<u8>),
-        parts.next().map(str::parse::<u8>),
-    ) else {
-        panic!("{} should hold a `<major>.<minor>` version, got {pinned:?}", pinned_path.display());
+    let (Some(Ok(major)), Some(Ok(minor))) = (parts.next().map(str::parse::<u8>), parts.next().map(str::parse::<u8>))
+    else {
+        panic!(
+            "{} should hold a `<major>.<minor>` version, got {pinned:?}",
+            pinned_path.display()
+        );
     };
 
     let resolved = pyo3_build_config::get();
     let found = resolved.version();
     let executable = resolved.executable().unwrap_or("<unknown>");
-    if (found.major, found.minor) < (major, minor) {
-        panic!(
-            "monty-datatest runs every test case against the CPython it links, so it needs the \
-             interpreter this workspace pins.\n\
-             \n\
-             pinned:   {major}.{minor} (from .python-version)\n\
-             resolved: {}.{} at {executable}\n\
-             \n\
-             Point pyo3 at a {major}.{minor} interpreter:\n\
-             \n    PYO3_PYTHON=$(uv python find {major}.{minor}) cargo run -p monty-datatest\n\
-             \n\
-             `make test-cases` (and every other datatest recipe) already does this.",
-            found.major, found.minor,
-        );
-    }
+    assert!(
+        (found.major, found.minor) >= (major, minor),
+        "monty-datatest runs every test case against the CPython it links, so it needs the \
+         interpreter this workspace pins.\n\
+         \n\
+         pinned:   {major}.{minor} (from .python-version)\n\
+         resolved: {}.{} at {executable}\n\
+         \n\
+         Point pyo3 at a {major}.{minor} interpreter:\n\
+         \n    PYO3_PYTHON=$(uv python find {major}.{minor}) cargo run -p monty-datatest\n\
+         \n\
+         `make test-cases` (and every other datatest recipe) already does this.",
+        found.major,
+        found.minor,
+    );
     if (found.major, found.minor) > (major, minor) {
         println!(
             "cargo::warning=monty-datatest resolved CPython {}.{} at {executable}, newer than the \

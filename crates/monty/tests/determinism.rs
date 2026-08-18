@@ -66,10 +66,10 @@ fn run(printed: &mut String, mut dump_at_first_suspension: Option<&mut Vec<u8>>)
         .start(vec![], ResourceTracker::default(), PrintWriter::collect_string(printed))
         .expect("program should start");
     loop {
-        if let Some(out) = dump_at_first_suspension.take() {
-            if !matches!(progress, RunProgress::Complete(_)) {
-                *out = dump("determinism.py", None, SessionRef::Running(&progress)).expect("dump should serialize");
-            }
+        if let Some(out) = dump_at_first_suspension.take()
+            && !matches!(progress, RunProgress::Complete(_))
+        {
+            *out = dump("determinism.py", None, SessionRef::Running(&progress)).expect("dump should serialize");
         }
         progress = advance(progress, printed);
         if let RunProgress::Complete(value) = progress {
