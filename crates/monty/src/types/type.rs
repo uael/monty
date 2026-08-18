@@ -230,6 +230,11 @@ pub enum Type {
     /// The proxy `super()` returns.
     #[strum(serialize = "super")]
     Super,
+    /// A paused `def` containing `yield`.
+    Generator,
+    /// A paused `async def` containing `yield`.
+    #[strum(serialize = "async_generator")]
+    AsyncGenerator,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

@@ -16,6 +16,7 @@ pub mod dict;
 pub mod dict_view;
 pub mod ext_function;
 pub mod file;
+pub mod generator;
 pub mod instance;
 pub mod iter;
 pub mod itertools;

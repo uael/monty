@@ -13,6 +13,7 @@ mod exception_private;
 mod expressions;
 mod fstring;
 mod function;
+mod generator;
 mod hash;
 mod heap_data;
 mod identity;

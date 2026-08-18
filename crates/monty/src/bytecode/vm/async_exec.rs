@@ -18,7 +18,10 @@ use crate::{
         AwaitedGather, Awaiter, CallId, Coroutine, CoroutineState, ExternalFuture, ExternalFutureState, GatherFuture,
         GatherState, TaskId,
     },
-    bytecode::vm::scheduler::{Scheduler, SerializedTaskFrame, TaskState},
+    bytecode::vm::{
+        generator::{ResumeMode, stop_async_iteration},
+        scheduler::{Scheduler, SerializedTaskFrame, TaskState},
+    },
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{DropGuard, DropWithContext, HeapData, HeapId, HeapRead, HeapReadOutput, HeapReader},
@@ -52,6 +55,15 @@ impl<'h> VM<'h> {
         match awaitable {
             Value::Ref(heap_id) => {
                 let heap_id = *heap_id;
+                // An async generator hands itself back from `__anext__`, so
+                // awaiting one drives exactly one step of its body.
+                if matches!(this.heap.get(heap_id), HeapData::Generator(generator) if generator.is_async) {
+                    return if this.generator_resume_op(heap_id, ResumeMode::Await, Value::None)? {
+                        Ok(AwaitResult::FramePushed)
+                    } else {
+                        Err(stop_async_iteration())
+                    };
+                }
                 let poll = match this.heap.read(heap_id) {
                     HeapReadOutput::Coroutine(coro) => return this.await_coroutine(coro),
                     HeapReadOutput::GatherFuture(gather) => this.await_gather_future(heap_id, gather, awaiter)?,

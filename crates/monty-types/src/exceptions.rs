@@ -388,6 +388,14 @@ pub enum ExcType {
     /// representations into the required attributes.
     #[strum(serialize = "re.PatternError")]
     RePatternError,
+
+    // --- Iteration protocol sentinels ---
+    /// Ends an `async for`, the async counterpart of `StopIteration`.
+    StopAsyncIteration,
+    /// Thrown into a generator by `close()`. A direct `BaseException`
+    /// subclass, so `except Exception:` inside the generator does not swallow
+    /// the shutdown.
+    GeneratorExit,
 }
 impl ExcType {
     /// Checks if this exception type is a subclass of another exception type.
@@ -408,7 +416,10 @@ impl ExcType {
             // BaseException catches all exceptions
             Self::BaseException => true,
             // Exception catches everything except BaseException, and direct subclasses: KeyboardInterrupt, SystemExit
-            Self::Exception => !matches!(self, Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit),
+            Self::Exception => !matches!(
+                self,
+                Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit | Self::GeneratorExit
+            ),
             // LookupError catches KeyError and IndexError
             Self::LookupError => matches!(self, Self::KeyError | Self::IndexError),
             // ArithmeticError catches ZeroDivisionError and OverflowError

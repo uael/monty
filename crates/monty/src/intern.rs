@@ -1044,6 +1044,32 @@ pub enum StaticStrings {
     /// `__post_init__`, the hook the synthesized `__init__` calls last.
     #[strum(serialize = "__post_init__")]
     DunderPostInit,
+    // Iteration protocol names. Appended at the enum end for the same reason
+    // as the block above: discriminants are serialized `StringId`s.
+    #[strum(serialize = "__iter__")]
+    DunderIter,
+    #[strum(serialize = "__next__")]
+    DunderNext,
+    #[strum(serialize = "__aiter__")]
+    DunderAiter,
+    #[strum(serialize = "__anext__")]
+    DunderAnext,
+    #[strum(serialize = "__aenter__")]
+    DunderAenter,
+    #[strum(serialize = "__aexit__")]
+    DunderAexit,
+    /// `generator.send(value)`.
+    Send,
+    /// `generator.throw(exc)`.
+    Throw,
+    /// Name of the function a generator expression desugars into.
+    #[strum(serialize = "<genexpr>")]
+    GenexprName,
+    /// The synthetic parameter a generator expression takes its outermost
+    /// iterator through. Deliberately not a valid identifier, exactly as
+    /// CPython names it, so no user name can collide with it.
+    #[strum(serialize = ".0")]
+    GenexprArg,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

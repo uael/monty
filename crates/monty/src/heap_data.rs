@@ -14,6 +14,7 @@ use crate::{
     bytecode::{CallResult, VM},
     exception_private::{ExcTypeExt, ExceptionObject, RunError, RunResult},
     expressions::CmpOperator,
+    generator::Generator,
     hash::{HashValue, identity_hash},
     heap::{DropWithContext, HeapId, HeapItem, HeapReadOutput},
     intern::FunctionId,
@@ -244,6 +245,10 @@ pub(crate) enum HeapData {
     MethodDescriptor(MethodDescriptor),
     /// The proxy `super()` returns.
     Super(SuperObject),
+    /// A paused generator-function invocation, from calling a `def` whose body
+    /// contains `yield`. Boxed: it carries the whole suspended frame region,
+    /// far past the payload ceiling of the hot variants.
+    Generator(Box<Generator>),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -308,7 +313,10 @@ impl HeapData {
             // memoized `__value__` can reach back to the alias itself.
             | Self::Template(_)
             | Self::Interpolation(_)
-            | Self::TypeAliasType(_) => true,
+            | Self::TypeAliasType(_)
+            // A generator's suspended frame can hold anything, including a
+            // reference back to the generator itself (`g.send(g)`).
+            | Self::Generator(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -388,6 +396,7 @@ impl HeapData {
             Self::LongInt(_) => Type::Int,
             Self::Module(_) => Type::Module,
             Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::Generator(generator) => generator.py_type(),
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
             Self::RePattern(_) => Type::RePattern,
@@ -604,6 +613,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Property($value) => $body,
             Self::MethodDescriptor($value) => $body,
             Self::Super($value) => $body,
+            Self::Generator($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -1139,6 +1149,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Template(value) => value.py_iter(self_id, vm),
             Self::Interpolation(value) => value.py_iter(self_id, vm),
             Self::TypeAliasType(value) => value.py_iter(self_id, vm),
+            Self::Generator(value) => value.py_iter(self_id, vm),
             Self::NamedTupleClass(_)
             | Self::Closure(_)
             | Self::FunctionDefaults(_)
@@ -1202,6 +1213,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Template(value) => value.py_next(self_id, vm),
             Self::Interpolation(value) => value.py_next(self_id, vm),
             Self::TypeAliasType(value) => value.py_next(self_id, vm),
+            Self::Generator(value) => value.py_next(self_id, vm),
             other => Err(ExcType::type_error_not_iterator(
                 &other.py_type(vm).name(vm.heap, vm.interns),
             )),

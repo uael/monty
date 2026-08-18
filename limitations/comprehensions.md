@@ -11,8 +11,11 @@ enclosing scope.
 - **`locals()` while a comprehension is running.** CPython exposes the
   comprehension's active targets in `locals()` during the comprehension body.
   Monty does not implement `locals()` introspection.
-- **Generator expressions.** `(x for x in iterable)` parses but currently
-  materialises to a `list` rather than a lazy iterator.
+- **Generator expressions bind walrus targets in their own scope.** A
+  comprehension is inlined into the enclosing frame, so `[(y := v) for v in xs]`
+  leaves `y` bound there as CPython's PEP 572 requires. A generator expression
+  is compiled as its own function, so `(y := v for v in xs)` binds `y` inside
+  that function and the name is unbound outside it.
 - **Targets must be names.** `[x for obj.a in xs]` and `[x for d['k'] in xs]`
   raise `NotImplementedError: The monty syntax parser does not yet support
   attribute or subscript targets in a comprehension`. CPython accepts both.

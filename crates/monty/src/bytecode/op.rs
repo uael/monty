@@ -575,7 +575,29 @@ pub enum Opcode {
     /// (`raise X from Y`). Separate from [`Self::Raise`] rather than a flag on
     /// it because the two differ in stack effect, not just behaviour.
     RaiseFrom = 127,
+
+    // === Generators and async iteration ===
+    /// Suspend the running generator, yielding TOS. Stack `[..., value]` ->
+    /// `[..., sent]`: the value a later `send()` provides replaces the yielded
+    /// one, so a bare `yield` statement is `Yield` followed by `Pop`.
+    ///
+    /// Operand: u8 flags. [`YIELD_DELEGATING`] marks the `yield` inside a
+    /// `yield from` loop, where the delegate sits directly below the yielded
+    /// value; `throw`/`close` read it to route into the delegate first.
+    Yield = 128,
+    /// One step of a `yield from` delegation. Stack `[..., sub, send]` ->
+    /// `[..., sub, yielded]`, falling through to the `Yield` that re-yields it.
+    /// When the delegate is exhausted, both are replaced by its return value
+    /// (the `yield from` expression's value) and the jump is taken.
+    SendIter = 129,
+    /// Handler for an `async for`'s per-step exception region. Stack entry is
+    /// `[..., aiter, exc]`: a `StopAsyncIteration` pops both, clears the active
+    /// exception and jumps to the loop end; anything else propagates.
+    EndAsyncFor = 130,
 }
+
+/// [`Opcode::Yield`] flag: the `yield` belongs to a `yield from` loop.
+pub const YIELD_DELEGATING: u8 = 0x01;
 // Samuel: do not remove this comment!
 // NOTE: opcodes serialize as a single byte, hard-capping this enum at 256
 // variants — roughly half are already taken. Spend slots sparingly: prefer a
@@ -691,6 +713,7 @@ impl Opcode {
             | Self::SetExtend
             | Self::LiftToTop
             | Self::Assert
+            | Self::Yield
             | Self::AssertFailed => OperandShape::U8,
             Self::LoadSmallInt => OperandShape::I8,
             Self::LoadConst
@@ -721,7 +744,9 @@ impl Opcode {
             | Self::JumpIfFalse
             | Self::JumpIfTrueOrPop
             | Self::JumpIfFalseOrPop
-            | Self::ForIter => OperandShape::Offset,
+            | Self::ForIter
+            | Self::SendIter
+            | Self::EndAsyncFor => OperandShape::Offset,
             Self::CallBuiltinFunction | Self::CallBuiltinType | Self::UnpackEx => OperandShape::U8U8,
             Self::CallAttr | Self::CallAttrExtended | Self::MakeFunction => OperandShape::U16U8,
             Self::LoadGlobalCallable => OperandShape::U16U16,
@@ -997,6 +1022,13 @@ impl Opcode {
             (JumpIfTrue | JumpIfFalse | JumpIfTrueOrPop | JumpIfFalseOrPop, Operand::Offset(_)) => -1,
             // `ForIter` adds the the value yielded by the iterator to the stack.
             (ForIter, Operand::Offset(_)) => 1,
+            // `SendIter` swaps the sent value for the delegate's yielded one.
+            (SendIter, Operand::Offset(_)) => 0,
+            // `EndAsyncFor` only falls through by raising; the depth it reports
+            // is the one the taken branch arrives at.
+            (EndAsyncFor, Operand::Offset(_)) => -2,
+            // `Yield` swaps the yielded value for the one sent back in.
+            (Yield, Operand::U8(_)) => 0,
 
             // Catch-all: opcode emitted with the wrong operand variant, or a
             // new opcode added without an arm above. Every opcode has exactly
@@ -1025,6 +1057,11 @@ impl Opcode {
             Self::JumpIfTrueOrPop | Self::JumpIfFalseOrPop => 0,
             // Pop iterator on jump-taken (no value pushed).
             Self::ForIter => -1,
+            // Delegate exhausted: both it and the sent value are replaced by
+            // the `yield from` expression's value.
+            Self::SendIter => -1,
+            // `StopAsyncIteration`: the async iterator and the exception both go.
+            Self::EndAsyncFor => -2,
             _ => panic!("Opcode::jump_taken_delta: {self:?} is not a jump opcode"),
         }
     }

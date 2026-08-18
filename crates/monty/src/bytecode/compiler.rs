@@ -16,7 +16,7 @@ use super::{
     RESERVED_MODULE_DUNDERS,
     builder::{CodeBuilder, JumpLabel, JumpTarget, Offset},
     code::{Code, HandlerKind},
-    op::{FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, Opcode, assert_flags},
+    op::{FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, Opcode, YIELD_DELEGATING, assert_flags},
 };
 use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
@@ -28,7 +28,7 @@ use crate::{
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
-    intern::{Interns, StringId},
+    intern::{Interns, StaticStrings, StringId},
     modules::StandardLib,
     name_map::NameMap,
     namespace::NamespaceId,
@@ -798,7 +798,14 @@ impl<'a> Compiler<'a> {
                 iter,
                 body,
                 or_else,
-            } => self.compile_for(target, iter, body, or_else)?,
+                is_async,
+            } => {
+                if *is_async {
+                    self.compile_async_for(target, iter, body, or_else)?;
+                } else {
+                    self.compile_for(target, iter, body, or_else)?;
+                }
+            }
             Node::While { test, body, or_else } => self.compile_while(test, body, or_else)?,
             Node::Assert { test, msg } => self.compile_assert(test, msg.as_ref())?,
             Node::Raise { exc, cause } => match (exc, cause) {
@@ -826,8 +833,18 @@ impl<'a> Compiler<'a> {
             } => self.compile_class_def(name, bases, body, members, decorators, *position)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
             Node::With {
-                context, target, body, ..
-            } => self.compile_with(context, target.as_ref(), body)?,
+                context,
+                target,
+                body,
+                position,
+                is_async,
+            } => {
+                if *is_async {
+                    self.compile_async_with(context, target.as_ref(), body, *position)?;
+                } else {
+                    self.compile_with(context, target.as_ref(), body)?;
+                }
+            }
             Node::Import { names } => {
                 for import_name in names {
                     self.compile_import(import_name.module_name, &import_name.binding)?;
@@ -967,6 +984,7 @@ impl<'a> Compiler<'a> {
             func_def.cell_param_indices.clone(),
             func_def.default_exprs.len(),
             func_def.is_async,
+            func_def.is_generator,
             body_code,
         );
         functions.push(function);
@@ -1217,6 +1235,31 @@ impl<'a> Compiler<'a> {
     // Expression Compilation
     // ========================================================================
 
+    /// Extends the list under construction with everything `expr` yields, for
+    /// one `*expr` in a call, list or tuple.
+    ///
+    /// A generator expression is drained by a `ForIter` loop rather than by
+    /// `ListExtend`: the loop steps it on the VM's own frame stack, so a host
+    /// call inside the generator body can suspend, which it cannot do while
+    /// `ListExtend`'s Rust-side drain holds a frame across the step (see
+    /// `limitations/iter.md`). Unpacking consumes the generator here either way,
+    /// so nothing observes the difference. Every other operand keeps
+    /// `ListExtend`, whose `TypeError` names the star form.
+    fn emit_unpack_extend(&mut self, expr: &ExprLoc) -> Result<(), CompileError> {
+        self.compile_expr(expr)?;
+        if !matches!(expr.expr, Expr::GeneratorExp { .. }) {
+            return self.code.emit(Opcode::ListExtend);
+        }
+        self.code.emit(Opcode::GetIter)?;
+        let loop_start = self.code.current_jump_target();
+        let end_jump = self.code.emit_jump(Opcode::ForIter)?;
+        // Stack is `[..., list, iterator, value]`, so the list is one below.
+        self.code.emit_u8(Opcode::ListAppend, 1)?;
+        self.code.emit_jump_to(Opcode::Jump, loop_start)?;
+        self.code.patch_jump(end_jump)?;
+        Ok(())
+    }
+
     /// Compiles an expression, leaving its value on the stack.
     fn compile_expr(&mut self, expr_loc: &ExprLoc) -> Result<(), CompileError> {
         // Set source location for traceback info
@@ -1286,10 +1329,7 @@ impl<'a> Compiler<'a> {
                                 self.compile_expr(e)?;
                                 self.code.emit_u8(Opcode::ListAppend, 0)?;
                             }
-                            SequenceItem::Unpack(e) => {
-                                self.compile_expr(e)?;
-                                self.code.emit(Opcode::ListExtend)?;
-                            }
+                            SequenceItem::Unpack(e) => self.emit_unpack_extend(e)?,
                         }
                     }
                 } else {
@@ -1316,10 +1356,7 @@ impl<'a> Compiler<'a> {
                                 self.compile_expr(e)?;
                                 self.code.emit_u8(Opcode::ListAppend, 0)?;
                             }
-                            SequenceItem::Unpack(e) => {
-                                self.compile_expr(e)?;
-                                self.code.emit(Opcode::ListExtend)?;
-                            }
+                            SequenceItem::Unpack(e) => self.emit_unpack_extend(e)?,
                         }
                     }
                     self.code.emit(Opcode::ListToTuple)?;
@@ -1481,6 +1518,34 @@ impl<'a> Compiler<'a> {
             Expr::LambdaRaw { .. } => {
                 // LambdaRaw should be converted to Lambda during prepare phase
                 unreachable!("Expr::LambdaRaw should not exist after prepare phase")
+            }
+
+            Expr::GeneratorExp { func_def, iter } => {
+                // Build the synthetic generator function, then call it with the
+                // outermost iterator. Nothing in the body runs until the
+                // resulting generator is stepped.
+                self.compile_lambda(func_def)?;
+                self.compile_expr(iter)?;
+                self.code.set_location(expr_loc.position, None);
+                self.code.emit(Opcode::GetIter)?;
+                self.code.emit_u8(Opcode::CallFunction, 1)?;
+            }
+
+            Expr::GeneratorExpRaw { .. } => {
+                unreachable!("Expr::GeneratorExpRaw should not exist after prepare phase")
+            }
+
+            Expr::Yield(value) => {
+                match value {
+                    Some(value) => self.compile_expr(value)?,
+                    None => self.code.emit(Opcode::LoadNone)?,
+                }
+                self.code.set_location(expr_loc.position, None);
+                self.code.emit_u8(Opcode::Yield, 0)?;
+            }
+
+            Expr::YieldFrom(value) => {
+                self.compile_yield_from(value, expr_loc.position)?;
             }
 
             Expr::Await(value) => {
@@ -2150,8 +2215,7 @@ impl<'a> Compiler<'a> {
 
         // Extend with *args if present
         if let Some(var_args_expr) = var_args {
-            self.compile_expr(var_args_expr)?;
-            self.code.emit(Opcode::ListExtend)?;
+            self.emit_unpack_extend(var_args_expr)?;
         }
 
         // Convert list to tuple
@@ -2259,8 +2323,7 @@ impl<'a> Compiler<'a> {
 
         // Extend with *args if present
         if let Some(var_args_expr) = var_args {
-            self.compile_expr(var_args_expr)?;
-            self.code.emit(Opcode::ListExtend)?;
+            self.emit_unpack_extend(var_args_expr)?;
         }
 
         // Convert list to tuple
@@ -2469,10 +2532,7 @@ impl<'a> Compiler<'a> {
                             self.compile_expr(e)?;
                             self.code.emit_u8(Opcode::ListAppend, 0)?;
                         }
-                        CallArg::Unpack(e) => {
-                            self.compile_expr(e)?;
-                            self.code.emit(Opcode::ListExtend)?;
-                        }
+                        CallArg::Unpack(e) => self.emit_unpack_extend(e)?,
                     }
                 }
                 self.code.emit(Opcode::ListToTuple)?;
@@ -2536,8 +2596,7 @@ impl<'a> Compiler<'a> {
 
         // Extend with *args if present
         if let Some(var_args_expr) = var_args {
-            self.compile_expr(var_args_expr)?;
-            self.code.emit(Opcode::ListExtend)?;
+            self.emit_unpack_extend(var_args_expr)?;
         }
 
         // Convert list to tuple
@@ -2604,10 +2663,7 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(e)?;
                     self.code.emit_u8(Opcode::ListAppend, 0)?;
                 }
-                CallArg::Unpack(e) => {
-                    self.compile_expr(e)?;
-                    self.code.emit(Opcode::ListExtend)?;
-                }
+                CallArg::Unpack(e) => self.emit_unpack_extend(e)?,
             }
         }
         self.code.emit(Opcode::ListToTuple)?;
@@ -2641,6 +2697,102 @@ impl<'a> Compiler<'a> {
         let flags = u8::from(has_kwargs);
         self.code.emit_u8(Opcode::CallFunctionExtended, flags)?;
         Ok(())
+    }
+
+    /// Compiles `yield from iterable`.
+    ///
+    /// Delegation is a loop rather than one opcode because each of the
+    /// delegate's values has to leave through the *outer* generator's own
+    /// `yield`: `SendIter` advances the delegate and the `Yield` beside it
+    /// re-yields that value and receives the next sent one. When the delegate
+    /// finishes, `SendIter` jumps out leaving its return value, which is what
+    /// the whole expression evaluates to.
+    fn compile_yield_from(&mut self, value: &ExprLoc, position: CodeRange) -> Result<(), CompileError> {
+        self.compile_expr(value)?;
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::GetIter)?;
+        // The first step always sends `None`; later ones send what the outer
+        // generator was sent.
+        self.code.emit(Opcode::LoadNone)?;
+
+        let loop_start = self.code.current_jump_target();
+        let end_jump = self.code.emit_jump(Opcode::SendIter)?;
+        self.code.emit_u8(Opcode::Yield, YIELD_DELEGATING)?;
+        self.code.emit_jump_to(Opcode::Jump, loop_start)?;
+        self.code.patch_jump(end_jump)?;
+        Ok(())
+    }
+
+    /// Compiles `async for target in iter: body [else: or_else]`.
+    ///
+    /// Each step is `aiter.__anext__()` awaited inside a one-instruction
+    /// exception region, because that is how the protocol signals the end: the
+    /// awaited step raises `StopAsyncIteration`, and the region's `EndAsyncFor`
+    /// handler turns exactly that exception into the loop's exit.
+    fn compile_async_for(
+        &mut self,
+        target: &UnpackTarget,
+        iter: &ExprLoc,
+        body: &'a [PreparedNode],
+        or_else: &'a [PreparedNode],
+    ) -> Result<(), CompileError> {
+        let Some(stack_depth) = self.code.stack_depth() else {
+            return Ok(());
+        };
+        let position = iter.position;
+        let aiter_idx = check_name_index_u16(StaticStrings::DunderAiter.into(), position)?;
+        let anext_idx = check_name_index_u16(StaticStrings::DunderAnext.into(), position)?;
+
+        self.compile_expr(iter)?;
+        self.code.set_location(position, None);
+        self.code.emit_u16_u8(Opcode::CallAttr, aiter_idx, 0)?;
+        // Keep a suspended `__aiter__` call's resume offset outside the region.
+        self.code.emit(Opcode::Nop)?;
+
+        let loop_start = self.code.current_jump_target();
+        self.fblocks.push(FBlock::ForLoop(LoopInfo {
+            start: loop_start,
+            break_jumps: Vec::new(),
+        }));
+
+        // The async iterator stays below the protected step's operands.
+        let region = Region::open(self.code.current_offset(), stack_depth + 1, self.exc_stack_count());
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit_u16_u8(Opcode::CallAttr, anext_idx, 0)?;
+        self.code.emit(Opcode::Await)?;
+        // The awaited step's `StopAsyncIteration` surfaces at the caller's
+        // *resume* offset, one past `Await`, so that offset has to be inside
+        // the region for the handler lookup to find it.
+        self.code.emit(Opcode::Nop)?;
+        // Exclude the target binding and body, whose exceptions are the user's.
+        let body_end = self.code.current_offset();
+
+        self.compile_unpack_target(target)?;
+        self.compile_block(body)?;
+        self.code.emit_jump_to(Opcode::Jump, loop_start)?;
+
+        // === Exception handler === entry stack: [aiter, exc].
+        let handler_start = self.code.current_offset();
+        self.code.new_code_region(stack_depth + 2);
+        // Only `StopAsyncIteration` takes the jump; everything else re-raises,
+        // so the fall-through path never reaches the code below.
+        let end_jump = self.code.emit_jump(Opcode::EndAsyncFor)?;
+        self.code.patch_jump(end_jump)?;
+
+        let loop_info = self
+            .fblocks
+            .pop()
+            .expect("async-for compilation should retain its frame block")
+            .expect_for_loop();
+
+        if !or_else.is_empty() {
+            self.compile_block(or_else)?;
+        }
+        for break_jump in loop_info.break_jumps {
+            self.code.patch_jump(break_jump)?;
+        }
+
+        region.add_entries(body_end, &mut self.code, handler_start, HandlerKind::Consuming)
     }
 
     /// Compiles a for loop.
@@ -3775,6 +3927,86 @@ impl<'a> Compiler<'a> {
         }
 
         region.add_entries(body_end, &mut self.code, dispatch_start, HandlerKind::Consuming)
+    }
+
+    /// Compiles `async with context as target: body`.
+    ///
+    /// Same shape as [`compile_with`](Self::compile_with), but the protocol
+    /// methods are ordinary attribute calls whose results are awaited, rather
+    /// than the `BeforeWith`/`WithExit` opcodes: those dispatch to
+    /// `PyTrait::py_enter`/`py_exit`, which are the synchronous pair.
+    ///
+    /// The exception handler builds `__aexit__(type(exc), exc, None)` by hand,
+    /// since the argument shape `WithExceptStart` assembles internally has to
+    /// be on the operand stack for a normal call.
+    fn compile_async_with(
+        &mut self,
+        context: &ExprLoc,
+        target: Option<&UnpackTarget>,
+        body: &'a [PreparedNode],
+        position: CodeRange,
+    ) -> Result<(), CompileError> {
+        let Some(stack_depth) = self.code.stack_depth() else {
+            return Ok(());
+        };
+        let aenter_idx = check_name_index_u16(StaticStrings::DunderAenter.into(), position)?;
+        let aexit_idx = check_name_index_u16(StaticStrings::DunderAexit.into(), position)?;
+
+        self.compile_expr(context)?;
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit_u16_u8(Opcode::CallAttr, aenter_idx, 0)?;
+        self.code.emit(Opcode::Await)?;
+
+        // === Body (protected region) ===
+        // The context manager remains below the protected body's operands.
+        let region = Region::open(self.code.current_offset(), stack_depth + 1, self.exc_stack_count());
+        self.fblocks.push(FBlock::With { region });
+        // Protect target binding so unpack failures invoke `__aexit__`.
+        if let Some(target) = target {
+            self.compile_unpack_target(target)?;
+        } else {
+            self.code.emit(Opcode::Pop)?;
+        }
+        self.compile_block(body)?;
+        let region = self
+            .fblocks
+            .pop()
+            .expect("async-with compilation should retain its frame block")
+            .expect_with();
+        // Exclude `__aexit__` so its failures cannot re-enter this handler.
+        let body_end = self.code.current_offset();
+
+        // Normal exit: `__aexit__(None, None, None)`, result discarded.
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit_u16_u8(Opcode::CallAttr, aexit_idx, 3)?;
+        self.code.emit(Opcode::Await)?;
+        self.code.emit(Opcode::Pop)?;
+        let end_jump = self.code.emit_jump(Opcode::Jump)?;
+
+        // === Exception handler === entry stack: [ctx, exc].
+        let handler_start = self.code.current_offset();
+        self.code.new_code_region(stack_depth + 2);
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 1)?;
+        // [ctx, exc, type(exc)] -> [ctx, type(exc), exc, None]
+        self.code.emit(Opcode::Rot2)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit_u16_u8(Opcode::CallAttr, aexit_idx, 3)?;
+        self.code.emit(Opcode::Await)?;
+        let swallow_jump = self.code.emit_jump(Opcode::JumpIfTrue)?;
+        self.code.emit(Opcode::Reraise)?;
+
+        self.code.patch_jump(swallow_jump)?;
+        self.code.emit(Opcode::ClearException)?;
+
+        // === Merge point for the normal-exit and swallowed-exception paths ===
+        self.code.patch_jump(end_jump)?;
+
+        region.add_entries(body_end, &mut self.code, handler_start, HandlerKind::Consuming)
     }
 
     /// Compiles normal and exceptional exits for a `with` statement.

@@ -8,7 +8,7 @@ use std::mem;
 
 use monty_types::OsFunctionCall;
 
-use super::{CallFrame, VM, recursion::RunReentryGuard};
+use super::{CallFrame, VM, generator::allocate_generator, recursion::RunReentryGuard};
 use crate::{
     args::{ArgValues, KwargsValues},
     asyncio::Coroutine,
@@ -448,7 +448,7 @@ impl VM<'_> {
 
     /// Converts a nested VM suspension into a specific synchronous-context error.
     #[cold]
-    fn unsupported_frame_exit(&mut self, ctx: &'static str, exit: FrameExit) -> RunError {
+    pub(super) fn unsupported_frame_exit(&mut self, ctx: &'static str, exit: FrameExit) -> RunError {
         let error = match &exit {
             FrameExit::Return(_) => unreachable!("return exits are handled above"),
             FrameExit::ExternalCall { function_name, .. } => ExcType::not_implemented(format!(
@@ -767,11 +767,41 @@ impl VM<'_> {
     ) -> Result<CallResult, RunError> {
         let func = self.interns.get_function(func_id);
 
-        if func.is_async {
+        if func.is_generator {
+            self.create_generator(func_id, cells, defaults, args)
+        } else if func.is_async {
             self.create_coroutine(func_id, cells, defaults, args)
         } else {
             self.call_sync_function(func_id, cells, defaults, args)
         }
+    }
+
+    /// Creates the paused [`Generator`](crate::generator::Generator) a
+    /// generator-function call evaluates to.
+    ///
+    /// Arguments are bound now, so a signature error raises at the call site as
+    /// in CPython, but no bytecode runs until the first step.
+    fn create_generator(
+        &mut self,
+        func_id: FunctionId,
+        cells: &[HeapId],
+        defaults: &[Value],
+        args: ArgValues,
+    ) -> Result<CallResult, RunError> {
+        let func = self.interns.get_function(func_id);
+        let is_async = func.is_async;
+
+        let namespace = Vec::with_capacity(func.namespace_size);
+        let mut namespace_guard = DropGuard::new(namespace, self);
+        let (namespace, this) = namespace_guard.as_parts_mut();
+
+        func.signature.bind(args, defaults, this, func.name, namespace)?;
+        this.install_closure_cells(func, cells, namespace);
+
+        let (namespace, this) = namespace_guard.into_parts();
+        Ok(CallResult::Value(allocate_generator(
+            func_id, namespace, is_async, this,
+        )))
     }
 
     /// Creates a Coroutine for an async function call.

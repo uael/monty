@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, mem};
 
 use monty_types::{MontyException, StackFrame};
 use num_bigint::BigInt;
@@ -21,7 +21,7 @@ use crate::{
         Node, Operator, SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
-    intern::{InternerBuilder, StringId},
+    intern::{InternerBuilder, StaticStrings, StringId},
     source_map::{SourceMap, StackFrameExt},
     stringize::stringize_annotation,
     tstring::{ParsedTemplate, TemplateInterpolation},
@@ -129,7 +129,7 @@ impl ParsedSignature {
 /// Contains the function name, signature, and body as parsed AST nodes.
 /// During the prepare phase, this is transformed into `PreparedFunctionDef`
 /// with resolved names and scope information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawFunctionDef {
     /// The function name identifier (not yet resolved to a namespace index).
     pub name: Identifier,
@@ -139,6 +139,8 @@ pub struct RawFunctionDef {
     pub body: Vec<ParseNode>,
     /// Whether this is an async function (`async def`).
     pub is_async: bool,
+    /// Whether the body contains a `yield`, making this a generator function.
+    pub is_generator: bool,
 }
 
 /// Type alias for parsed AST nodes (output of the parser).
@@ -236,6 +238,11 @@ pub struct Parser<'a> {
     /// Starts at MAX_NESTING_DEPTH and decrements on each nested level.
     /// When it reaches zero, we return a "Source is too deeply nested" syntax error.
     depth_remaining: u16,
+    /// Whether a `yield` has been parsed in the function body currently being
+    /// parsed. Saved and restored around every nested body, so it always
+    /// describes the innermost function scope: that is what decides whether a
+    /// `def` is a generator function.
+    saw_yield: bool,
     /// Ascending source offsets of every `class` keyword, taken from the lexer.
     ///
     /// Ruff's AST is abstract — a `StmtClassDef` *is* a class statement, so it
@@ -258,6 +265,7 @@ impl<'a> Parser<'a> {
             filename_id,
             interner,
             depth_remaining: MAX_NESTING_DEPTH,
+            saw_yield: false,
             class_keyword_offsets,
         }
     }
@@ -449,17 +457,13 @@ impl<'a> Parser<'a> {
                 range,
                 ..
             }) => {
-                if is_async {
-                    return Err(ParseError::not_implemented(
-                        "async for loops",
-                        self.convert_range(range),
-                    ));
-                }
+                let _ = range;
                 Ok(Node::For {
                     target: self.parse_unpack_target(*target)?,
                     iter: self.parse_expression(*iter)?,
                     body: self.parse_statements(body)?,
                     or_else: self.parse_statements(orelse)?,
+                    is_async,
                 })
             }
             Stmt::While(ast::StmtWhile { test, body, orelse, .. }) => Ok(Node::While {
@@ -485,12 +489,6 @@ impl<'a> Parser<'a> {
                 range,
                 ..
             }) => {
-                if is_async {
-                    return Err(ParseError::not_implemented(
-                        "async context managers (async with)",
-                        self.convert_range(range),
-                    ));
-                }
                 if items.is_empty() {
                     return Err(ParseError::syntax(
                         "with statement requires at least one context manager",
@@ -532,6 +530,7 @@ impl<'a> Parser<'a> {
                     target: last_target,
                     body,
                     position,
+                    is_async,
                 };
                 let mut levels: u16 = 0;
                 while let Some((context, target)) = parsed_items.pop() {
@@ -542,6 +541,7 @@ impl<'a> Parser<'a> {
                         target,
                         body: vec![node],
                         position,
+                        is_async,
                     };
                 }
                 self.depth_remaining += levels;
@@ -776,8 +776,11 @@ impl<'a> Parser<'a> {
         };
 
         let name = self.identifier(&function.name.id, function.name.range);
-        // Parse function body recursively
+        // Parse function body recursively. `saw_yield` describes the innermost
+        // scope, so it is reset for the body and restored afterwards.
+        let outer_saw_yield = mem::replace(&mut self.saw_yield, false);
         let body = self.parse_statements(function.body)?;
+        let is_generator = mem::replace(&mut self.saw_yield, outer_saw_yield);
         let is_async = function.is_async;
 
         Ok((
@@ -786,6 +789,7 @@ impl<'a> Parser<'a> {
                 signature,
                 body,
                 is_async,
+                is_generator,
             },
             decorators,
         ))
@@ -1015,6 +1019,7 @@ impl<'a> Parser<'a> {
             signature: ParsedSignature::default(),
             body,
             is_async: false,
+            is_generator: false,
         };
 
         Ok(Node::ClassDef {
@@ -1261,6 +1266,7 @@ impl<'a> Parser<'a> {
             signature: ParsedSignature::default(),
             body,
             is_async: false,
+            is_generator: false,
         })
     }
 
@@ -1420,8 +1426,12 @@ impl<'a> Parser<'a> {
                     ParsedSignature::default()
                 };
 
-                // Parse the body expression
+                // Parse the body expression. A lambda is its own function
+                // scope, so a `yield` in it makes the lambda a generator and
+                // leaves the enclosing function alone.
+                let outer_saw_yield = mem::replace(&mut self.saw_yield, false);
                 let body = Box::new(self.parse_expression(*body)?);
+                let is_generator = mem::replace(&mut self.saw_yield, outer_saw_yield);
 
                 Ok(ExprLoc::new(
                     position,
@@ -1429,6 +1439,7 @@ impl<'a> Parser<'a> {
                         name_id,
                         signature,
                         body,
+                        is_generator,
                     },
                 ))
             }
@@ -1532,32 +1543,34 @@ impl<'a> Parser<'a> {
             AstExpr::Generator(ast::ExprGenerator {
                 elt, generators, range, ..
             }) => {
-                // TODO: When proper generators are implemented, this should produce
-                // Expr::Generator instead of Expr::ListComp. Currently we treat generator
-                // expressions as list comprehensions since we don't have generator support.
-                let elt = Box::new(self.parse_expression(*elt)?);
+                let position = self.convert_range(range);
+                let outer_saw_yield = mem::replace(&mut self.saw_yield, false);
+                let elt = self.parse_expression(*elt)?;
                 let generators = self.parse_comprehension_generators(generators)?;
-                Ok(ExprLoc::new(
-                    self.convert_range(range),
-                    Expr::ListComp {
-                        elt,
-                        generators,
-                        captured_slots: Vec::new(),
-                    },
-                ))
+                if mem::replace(&mut self.saw_yield, outer_saw_yield) {
+                    return Err(ParseError::syntax("'yield' inside generator expression", position));
+                }
+                Self::build_generator_expression(elt, generators, position)
             }
             AstExpr::Await(a) => {
                 let value = self.parse_expression(*a.value)?;
                 Ok(ExprLoc::new(self.convert_range(a.range), Expr::Await(Box::new(value))))
             }
-            AstExpr::Yield(y) => Err(ParseError::not_implemented(
-                "yield expressions",
-                self.convert_range(y.range),
-            )),
-            AstExpr::YieldFrom(y) => Err(ParseError::not_implemented(
-                "yield from expressions",
-                self.convert_range(y.range),
-            )),
+            AstExpr::Yield(y) => {
+                let position = self.convert_range(y.range);
+                self.saw_yield = true;
+                let value = match y.value {
+                    Some(value) => Some(Box::new(self.parse_expression(*value)?)),
+                    None => None,
+                };
+                Ok(ExprLoc::new(position, Expr::Yield(value)))
+            }
+            AstExpr::YieldFrom(y) => {
+                let position = self.convert_range(y.range);
+                self.saw_yield = true;
+                let value = self.parse_expression(*y.value)?;
+                Ok(ExprLoc::new(position, Expr::YieldFrom(Box::new(value))))
+            }
             AstExpr::Compare(ast::ExprCompare {
                 left,
                 ops,
@@ -2059,6 +2072,59 @@ impl<'a> Parser<'a> {
                 Ok(Comprehension { target, iter, ifs })
             })
             .collect()
+    }
+
+    /// Desugars `(elt for t0 in it0 if c ... )` into a generator function.
+    ///
+    /// The clauses become an ordinary loop nest ending in `yield elt`, so the
+    /// whole thing reduces to machinery that already exists: preparation turns
+    /// the body into a function like a lambda's, and `yield` makes it a
+    /// generator. Only the outermost iterable stays behind, because Python
+    /// evaluates it where the expression is written rather than on the first
+    /// step (`(x for x in 5)` raises immediately).
+    ///
+    /// The synthetic parameter is named `.0` exactly as CPython names it: not a
+    /// valid identifier, so it cannot collide with anything the body refers to.
+    fn build_generator_expression(
+        elt: ExprLoc,
+        mut generators: Vec<Comprehension>,
+        position: CodeRange,
+    ) -> Result<ExprLoc, ParseError> {
+        if generators.is_empty() {
+            return Err(ParseError::syntax(
+                "generator expression requires at least one 'for' clause",
+                position,
+            ));
+        }
+        let outermost = generators.remove(0);
+        let iter = outermost.iter;
+
+        let param = StaticStrings::GenexprArg.into();
+        let outer_iter = ExprLoc::new(position, Expr::Name(Identifier::new(param, position)));
+        let outermost = Comprehension {
+            target: outermost.target,
+            iter: outer_iter,
+            ifs: outermost.ifs,
+        };
+        generators.insert(0, outermost);
+
+        let yielded = ExprLoc::new(position, Expr::Yield(Some(Box::new(elt))));
+        let body = generator_expression_body(&mut generators.into_iter(), yielded);
+
+        Ok(ExprLoc::new(
+            position,
+            Expr::GeneratorExpRaw {
+                signature: ParsedSignature {
+                    pos_args: vec![ParsedParam {
+                        name: param,
+                        default: None,
+                    }],
+                    ..ParsedSignature::default()
+                },
+                body: vec![body],
+                iter: Box::new(iter),
+            },
+        ))
     }
 
     /// Parses an f-string value into expression parts.
@@ -2713,5 +2779,31 @@ fn parse_int_literal(s: &str, position: CodeRange) -> Result<BigInt, ParseError>
         cleaned
             .parse::<BigInt>()
             .map_err(|e| ParseError::syntax(format!("invalid integer literal {s:?}, error: {e}"), position))
+    }
+}
+
+/// Wraps `inner` in one comprehension clause's `for` loop and `if` filters,
+/// recursing through the remaining clauses.
+///
+/// The filters nest inside the loop rather than becoming `continue`s so the
+/// result is a plain statement tree the compiler already knows how to emit.
+fn generator_expression_body(clauses: &mut impl Iterator<Item = Comprehension>, inner: ExprLoc) -> ParseNode {
+    let Some(clause) = clauses.next() else {
+        return Node::Expr(inner);
+    };
+    let mut body = vec![generator_expression_body(clauses, inner)];
+    for condition in clause.ifs.into_iter().rev() {
+        body = vec![Node::If {
+            test: condition,
+            body,
+            or_else: Vec::new(),
+        }];
+    }
+    Node::For {
+        target: clause.target,
+        iter: clause.iter,
+        body,
+        or_else: Vec::new(),
+        is_async: false,
     }
 }

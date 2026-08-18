@@ -114,7 +114,7 @@ impl VM<'_> {
     /// Borrows the value so callers that already own one can keep it — the
     /// `raise`/`Reraise` paths reuse it as the raised object itself.
     /// The `is_raise` flag indicates if this is from a `raise` statement (hide caret).
-    pub(super) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
+    pub(crate) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
         let simple_exc = match exc_value {
             Value::Ref(heap_id) => match self.heap.get(*heap_id) {
                 // Exception instance on heap
@@ -622,12 +622,20 @@ impl VM<'_> {
                 return ExceptionHandlingResult::Unhandled(error);
             }
 
+            // A generator dies with an exception escaping its body; the
+            // error then belongs to whoever asked it for a value.
+            let generator_boundary = this.at_generator_frame();
+
             // Get the caller's call-site offset before popping frame.
             // This is where the caller invoked the function that's failing.
             let call_offset = this.current_frame().call_offset;
 
             // Pop this frame
-            if this.pop_frame() {
+            let stop = this.pop_frame();
+            if generator_boundary {
+                this.close_unwound_generator();
+            }
+            if stop {
                 // The frame indicated evaluation should stop - e.g. inside
                 // `evaluate_function` - return the error now to stop unwinding,
                 // parking the raised object so the native caller's own handler
@@ -659,11 +667,16 @@ impl VM<'_> {
     fn unwind_for_traceback(&mut self, mut error: RunError) -> RunError {
         // Pop frames and add caller frame info to the traceback
         while self.frames.len() > 1 {
+            let generator_boundary = self.at_generator_frame();
+
             // Get the caller's call-site offset before popping frame
             let call_offset = self.current_frame().call_offset;
 
             // Pop this frame (cleans up namespace, etc.)
             self.pop_frame();
+            if generator_boundary {
+                self.close_unwound_generator();
+            }
 
             // Add caller frame info to traceback. Resolve the offset against the
             // caller, which is the current frame after the pop above.

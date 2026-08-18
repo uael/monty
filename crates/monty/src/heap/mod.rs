@@ -29,6 +29,7 @@ use crate::types::Type;
 use crate::{
     asyncio::{Awaiter, Coroutine, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
     exception_private::ExceptionObject,
+    generator::Generator,
     heap_data::{CellValue, Closure, FunctionDefaults},
     modules::dataclasses::{DataclassField, DataclassParams},
     types::{
@@ -288,6 +289,7 @@ pub enum HeapReadOutput<'a> {
     LongInt(HeapRead<'a, LongInt>),
     Module(HeapRead<'a, Module>),
     Coroutine(HeapRead<'a, Coroutine>),
+    Generator(HeapRead<'a, Generator>),
     GatherFuture(HeapRead<'a, GatherFuture>),
     ExternalFuture(HeapRead<'a, ExternalFuture>),
     Path(HeapRead<'a, Path>),
@@ -722,6 +724,7 @@ impl<'a> HeapPtr<'a> {
             HeapData::LongInt(l) => HeapReadOutput::LongInt(heap_read(base, l, readers)),
             HeapData::Module(module) => HeapReadOutput::Module(heap_read_boxed(base, module, readers)),
             HeapData::Coroutine(coroutine) => HeapReadOutput::Coroutine(heap_read(base, coroutine, readers)),
+            HeapData::Generator(generator) => HeapReadOutput::Generator(heap_read_boxed(base, generator, readers)),
             HeapData::GatherFuture(gather_future) => {
                 HeapReadOutput::GatherFuture(heap_read_boxed(base, gather_future, readers))
             }
@@ -1827,6 +1830,7 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 }
             }
         }
+        HeapData::Generator(generator) => generator.for_each_child_id(&mut on_child),
         HeapData::GatherFuture(gather) => {
             // Add inc_ref'd item HeapIds. Both coroutines and external
             // futures are owned by the gather for its entire lifecycle.
@@ -1976,6 +1980,7 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
                 value.py_dec_ref_ids(stack);
             }
         }
+        HeapData::Generator(generator) => generator.py_dec_ref_ids(stack),
         HeapData::GatherFuture(gather) => {
             // Decrement ref count for owned item HeapIds (coroutines and
             // external futures are both owned by the gather).

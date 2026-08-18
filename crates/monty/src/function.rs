@@ -67,6 +67,12 @@ pub(crate) struct Function {
     /// immediately pushing a frame. The coroutine captures the bound arguments
     /// and starts execution only when awaited.
     pub is_async: bool,
+    /// Whether the body contains a `yield`, making this a generator function.
+    ///
+    /// Calling it binds the arguments and hands back a paused `Generator`
+    /// rather than running anything. Combined with `is_async` it is an async
+    /// generator, stepped through `__anext__` instead of `__next__`.
+    pub is_generator: bool,
     /// Compiled bytecode for this function body. Wrapped in `Arc` to avoid deep clone.
     pub code: Arc<Code>,
 }
@@ -86,6 +92,7 @@ impl Function {
     /// * `cell_param_indices` - Maps each owned cell to a parameter index, if any
     /// * `defaults_count` - Number of default parameter values
     /// * `is_async` - Whether this is an async function
+    /// * `is_generator` - Whether the body contains a `yield`
     /// * `code` - The compiled bytecode for the function body
     #[expect(clippy::too_many_arguments)]
     pub fn new(
@@ -98,6 +105,7 @@ impl Function {
         cell_param_indices: Vec<Option<usize>>,
         defaults_count: usize,
         is_async: bool,
+        is_generator: bool,
         code: Code,
     ) -> Self {
         Self {
@@ -110,6 +118,7 @@ impl Function {
             cell_param_indices,
             defaults_count,
             is_async,
+            is_generator,
             code: Arc::new(code),
         }
     }

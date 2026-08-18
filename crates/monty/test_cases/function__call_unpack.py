@@ -146,3 +146,20 @@ assert result == ((1, 2, 3), {'x': 5})
 
 result = funcs[0](*[1, 2], *[3], x=5)
 assert result == ((1, 2, 3), {'x': 5})
+
+# === Starred generator expressions ===
+# The unpack drains the generator before the call, so what the callee receives
+# is indistinguishable from unpacking a list.
+items = [1, 2, 3]
+assert f(*(x * 2 for x in items)) == ((2, 4, 6), {})
+assert f(1, *(x for x in items), *[7]) == ((1, 1, 2, 3, 7), {})
+assert f(*(x for x in [])) == ((), {})
+assert f(*(x for x in (y + 1 for y in items))) == ((2, 3, 4), {})
+assert funcs[0](*(x for x in items), *(x for x in items)) == ((1, 2, 3, 1, 2, 3), {})
+assert [0, *(x for x in items), 9] == [0, 1, 2, 3, 9]
+assert (0, *(x for x in items)) == (0, 1, 2, 3)
+
+# The generator is left exhausted, as any other consumer leaves it.
+gen = (x for x in items)
+assert f(*gen) == ((1, 2, 3), {})
+assert list(gen) == []

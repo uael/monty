@@ -13,14 +13,14 @@ any code runs.
   class-body statements other than `def`, a simple `name [: T] = <expr>`
   assignment, `type X = ...`, `pass`, or a docstring. There is no inheritance
   and no general dunder protocol. See ./classes.md.
-- **`async with` statements** — not yet supported.
-- **`yield` / `yield from` expressions** — no generator functions. Generator
-  *expressions* (`(x for x in ...)`) parse but currently materialize to a
-  `list` rather than a lazy iterator, a known temporary divergence; see
-  `iter__generator_expr_type.py`.
 - **`match` statements** — structural pattern matching is not supported.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
-- **`async for` loops** and **async comprehensions**.
+- **Async comprehensions** (`[x async for x in ...]`) — `async for` as a
+  *statement* is supported; only the comprehension form is rejected.
+- **`yield` inside a generator expression** — `SyntaxError: 'yield' inside
+  generator expression`, as in CPython. Monty rejects it for the whole
+  expression, including the outermost iterable (`(x for x in (yield))`), which
+  CPython accepts.
 - **Wildcard imports** (`from m import *`) — raises `ImportError:
   "Wildcard imports (\`from ... import *\`) are not supported"`.
 
@@ -225,8 +225,10 @@ direct `x == x` (`False` on both). Named tuples inherit all of this from `tuple`
   `for` targets and `with` targets (see above).
 - PEP 695 `type X = ...` aliases and type parameters on `def`/`class`.
 - PEP 750 template strings (`t'...'`).
-- List / dict / set comprehensions; generator comprehensions degrade to
-  lists (see above).
+- List / dict / set comprehensions, and lazy generator expressions.
+- Generator functions (`yield`, `yield from`, `send`/`throw`/`close`),
+  `async for`, `async with`, and async generators. See ./iter.md and
+  ./asyncio.md for their divergences.
 - `try` / `except` / `else` / `finally`, `raise ... from ...`.
 - `for` / `while` / `if` / `elif` / `else`, `break`, `continue`, `pass`,
   `assert`, `global`, `nonlocal`, `return`.

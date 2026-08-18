@@ -18,10 +18,14 @@ fn complex_numbers_return_not_implemented_error() {
 }
 
 #[test]
-fn yield_expressions_return_not_implemented_error() {
-    let err = get_parse_err("def foo():\n    yield 1");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support yield expressions");
+fn yield_inside_a_generator_expression_is_a_syntax_error() {
+    // `yield` itself is supported (see `test_cases/generator__all.py`). Inside a
+    // generator expression CPython rejects it, and so must we: the outermost
+    // iterable is lifted into the enclosing scope, where a `Yield` has no
+    // generator to suspend.
+    let err = get_parse_err("def foo():\n    return ((yield x) for x in [1])");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"'yield' inside generator expression");
 }
 
 #[test]
@@ -215,17 +219,16 @@ fn undefined_future_import_returns_syntax_error() {
 }
 
 #[test]
-fn async_with_statement_returns_not_implemented_error() {
-    // Plain `with` is supported (see `test_cases/with__all.py`); only `async with`
-    // is still rejected at parse time.
-    let result = MontyRun::new(
-        "async def f():\n    async with open('f') as g: pass\n".to_owned(),
-        "test.py",
-        vec![],
-        CompileOptions::default(),
-    );
-    let err = result.expect_err("expected parse error");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
+fn async_statements_compile_successfully() {
+    // `async with` and `async for` both compile now; their behaviour is covered
+    // by `test_cases/async__iteration.py`.
+    for source in [
+        "async def f(cm):\n    async with cm as g: pass\n",
+        "async def f(it):\n    async for x in it: pass\n",
+    ] {
+        let result = MontyRun::new(source.to_owned(), "test.py", vec![], CompileOptions::default());
+        assert!(result.is_ok(), "expected {source:?} to compile");
+    }
 }
 
 #[test]

@@ -153,6 +153,10 @@ exclude = [
     "crates/monty/test_cases/loop__continue_in_function_error.py",
     "crates/monty/test_cases/loop__break_in_if_error.py",
     "crates/monty/test_cases/loop__continue_in_if_error.py",
+    # top-level `async for` / `async with`: the harness wraps `# run-async`
+    # fixtures in an async function, which basedpyright reading the file
+    # standalone cannot see
+    "crates/monty/test_cases/async__iteration.py",
     "scripts/startup_performance.py",
     "examples/web_scraper/example_code.py",
 ]

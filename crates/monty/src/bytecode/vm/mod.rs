@@ -12,12 +12,15 @@ mod compare;
 mod context_manager;
 mod exceptions;
 mod format;
+mod generator;
 mod recursion;
 mod scheduler;
 
 use std::mem;
 
 pub(crate) use call::CallResult;
+use generator::{GenActivation, GeneratorYield, ResumeMode};
+pub(crate) use generator::{GeneratorInput, GeneratorStep, stop_iteration_with};
 use monty_types::{InvalidInputError, MontyObject, OsFunctionCall, PrintWriter};
 pub(crate) use recursion::{ContainsVM, RecursionToken};
 use scheduler::Scheduler;
@@ -28,7 +31,7 @@ use crate::{
     builtins::Builtins,
     bytecode::{
         code::{Code, LocationEntry},
-        op::{Opcode, decode_assert_flags},
+        op::{Opcode, YIELD_DELEGATING, decode_assert_flags},
     },
     defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RawStackFrame, RunError, RunResult, SimpleException},
@@ -115,6 +118,16 @@ macro_rules! jump_relative {
             .checked_add_signed($offset.into())
             .expect("jump resulted in negative or overflowing IP");
     }};
+}
+
+/// Resolves a jump opcode's relative offset to an absolute bytecode offset.
+///
+/// `ip` must already be past the operand, matching what [`jump_relative`] does
+/// in place; this form is for the opcodes that have to hand the target to the
+/// generator machinery rather than take the jump immediately.
+fn jump_target(ip: usize, offset: i16) -> usize {
+    ip.checked_add_signed(offset.into())
+        .expect("jump resulted in negative or overflowing IP")
 }
 
 /// Handles the result of a load operation that may yield a `FrameExit::NameLookup`.
@@ -620,6 +633,10 @@ pub struct VMSnapshot {
     /// IP of the instruction that caused the pause (for exception handling).
     instruction_ip: usize,
 
+    /// In-flight generator steps; see [`VM::gen_activations`].
+    #[serde(default)]
+    gen_activations: Vec<GenActivation>,
+
     /// Scheduler state (always present).
     ///
     /// Contains call ID counter, task state, pending calls, and resolved futures.
@@ -680,6 +697,14 @@ pub struct VM<'h> {
     /// Updated at the start of each instruction before operands are fetched.
     /// This allows us to find the correct exception handler when an error occurs.
     instruction_ip: usize,
+
+    /// In-flight generator steps, innermost last.
+    ///
+    /// A resumed generator's frame runs on the VM's own stacks, so this is the
+    /// only record of where its region begins and who is waiting for the
+    /// yielded value. Snapshotted: a generator body can suspend to the host
+    /// mid-step, and the resume has to find its way back out.
+    gen_activations: Vec<GenActivation>,
 
     /// Scheduler for task management and call ID allocation.
     ///
@@ -804,6 +829,7 @@ impl<'h> VM<'h> {
             print_writer,
             exception_stack: Vec::new(),
             instruction_ip: 0,
+            gen_activations: Vec::new(),
             scheduler: Scheduler::new(),
             pending_raised: None,
             raise_seq: 0,
@@ -878,6 +904,7 @@ impl<'h> VM<'h> {
             print_writer,
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
+            gen_activations: snapshot.gen_activations,
             scheduler: snapshot.scheduler,
             // A raise never spans a suspension: it is parked only while an
             // error unwinds out of a nested `run()`, which cannot yield.
@@ -928,6 +955,7 @@ impl<'h> VM<'h> {
             frames: self.frames.iter().map(CallFrame::serialize).collect(),
             exception_stack: mem::take(&mut self.exception_stack),
             instruction_ip: self.instruction_ip,
+            gen_activations: mem::take(&mut self.gen_activations),
             scheduler: mem::take(&mut self.scheduler),
             pending_os_effect: self.pending_os_effect.take(),
         }
@@ -1549,6 +1577,27 @@ impl<'h> VM<'h> {
                     let Value::Ref(heap_id) = *self.peek() else {
                         return Err(RunError::internal("ForIter: expected iterator ref on stack"));
                     };
+                    // A generator runs its step on the VM's own frame stack
+                    // rather than through `py_next`, so a `for` loop over one
+                    // can suspend to the host mid-step.
+                    if self.is_sync_generator(heap_id) {
+                        let loop_end = jump_target(cached_frame.ip, offset);
+                        self.current_frame_mut().ip = cached_frame.ip;
+                        match self.generator_resume_op(heap_id, ResumeMode::ForIter { loop_end }, Value::None) {
+                            Ok(true) => reload_cache!(self, cached_frame),
+                            Ok(false) => {
+                                let iter = self.pop();
+                                iter.drop_with(self);
+                                cached_frame.ip = loop_end;
+                            }
+                            Err(e) => {
+                                let iter = self.pop();
+                                iter.drop_with(self);
+                                catch_sync!(self, cached_frame, e);
+                            }
+                        }
+                        continue;
+                    }
                     let mut iter = self.heap.read(heap_id);
 
                     match iter.py_next(Some(heap_id), self) {
@@ -1814,6 +1863,17 @@ impl<'h> VM<'h> {
                 // Return - reload cache after popping frame
                 Opcode::ReturnValue => {
                     let value = self.pop();
+                    // A generator's own `return` ends the generator rather than
+                    // the frame stack: the mode that drove the step decides
+                    // what its value means.
+                    if self.at_generator_frame() {
+                        match self.finish_generator(value) {
+                            Ok(Some(value)) => return Ok(FrameExit::Return(value)),
+                            Ok(None) => reload_cache!(self, cached_frame),
+                            Err(e) => catch_sync!(self, cached_frame, e),
+                        }
+                        continue;
+                    }
                     if self.frames.len() == 1 {
                         // Last frame - check if this is main task or spawned task
                         let is_main_task = self.is_main_task();
@@ -1887,6 +1947,45 @@ impl<'h> VM<'h> {
                     }
                     // Reload cache from parent frame
                     reload_cache!(self, cached_frame);
+                }
+                // Generators
+                Opcode::Yield => {
+                    let flags = cached_frame.fetch_u8();
+                    // The generator resumes at the instruction after this one.
+                    self.current_frame_mut().ip = cached_frame.ip;
+                    let yielded = self.pop();
+                    match self.suspend_generator(yielded, flags & YIELD_DELEGATING != 0) {
+                        GeneratorYield::Resumed => reload_cache!(self, cached_frame),
+                        GeneratorYield::ExitNestedRun(value) => return Ok(FrameExit::Return(value)),
+                    }
+                }
+                Opcode::SendIter => {
+                    let offset = cached_frame.fetch_i16();
+                    let loop_end = jump_target(cached_frame.ip, offset);
+                    self.current_frame_mut().ip = cached_frame.ip;
+                    match self.exec_send_iter(loop_end) {
+                        Ok(true) => reload_cache!(self, cached_frame),
+                        Ok(false) => cached_frame.ip = loop_end,
+                        Err(e) => catch_sync!(self, cached_frame, e),
+                    }
+                }
+                Opcode::EndAsyncFor => {
+                    let offset = cached_frame.fetch_i16();
+                    if self.exec_end_async_for() {
+                        jump_relative!(cached_frame.ip, offset);
+                    } else {
+                        let raised = self.exception_stack.last().map(|exc| exc.clone_with_heap(self.heap));
+                        let error = match &raised {
+                            Some(exc) => self.make_exception(exc, true),
+                            None => {
+                                SimpleException::new_msg(ExcType::RuntimeError, "No active exception to reraise").into()
+                            }
+                        };
+                        if let Some(result) = self.handle_exception_with_value(error, raised) {
+                            return Err(result);
+                        }
+                        reload_cache!(self, cached_frame);
+                    }
                 }
                 // Async/Await
                 Opcode::Await => {
@@ -2177,13 +2276,16 @@ impl<'h> VM<'h> {
             .for_each(|value| value.drop_with(&mut *self.heap));
     }
 
-    /// Cleans up all frames and stack values for the current task.
+    /// Cleans up every frame and stack value of the current task.
     ///
-    /// Used when a task completes or fails and we need to switch to another task.
-    /// Drains the stack with proper `drop_with` for each value (since locals
-    /// are inlined on the stack), then cleans up each frame's cell references.
+    /// Used when a task completes or fails and another is about to be switched
+    /// in. All three of the VM's stacks belong to the task that is ending, the
+    /// exception stack included: a task that dies inside a `try` still has its
+    /// handler entries parked there, and the task swapped in next would
+    /// otherwise inherit them.
     pub(super) fn cleanup_current_task(&mut self) {
         self.stack.drain(..).drop_with(self.heap);
+        self.exception_stack.drain(..).drop_with(self.heap);
         self.frames.clear();
     }
 

@@ -314,8 +314,9 @@ first, e.g. return a `dict` of the fields.
     diverges for one that does.
 - `__next__` is looked up on the class only, never the instance `__dict__`, and
   a `StopIteration` raised anywhere inside it ends the iteration, including one
-  that propagates out of a nested call, where CPython's PEP 479 protections
-  apply only to generators, which Monty does not have.
+  that propagates out of a nested call. CPython's PEP 479 protections cover
+  generators rather than a hand-written `__next__`, and Monty does not
+  implement them for its own generators either (see ./iter.md).
 
 - Attribute-access hooks are **never** dispatched: `__getattr__`,
   `__getattribute__`, `__setattr__`, `__delattr__`, and `__del__`. A missing

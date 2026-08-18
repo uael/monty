@@ -26,7 +26,7 @@ const MAGIC: &[u8; 6] = b"MONTY\0";
 /// rejected instead of decoding as their neighbour. That covers the
 /// interpreter's own types *and* everything reachable from [`Dump`] — notably
 /// `TypeCheckingConfig` in `monty-types`.
-pub const DUMP_VERSION: u16 = 6;
+pub const DUMP_VERSION: u16 = 7;
 
 /// Number of bytes before the postcard payload.
 const HEADER_LEN: usize = MAGIC.len() + size_of::<u16>();
@@ -191,12 +191,12 @@ mod tests {
     fn serialized_components_match_dump_version() {
         assert_eq!(
             opcode_fingerprint(),
-            0x9bb1_9e6a_5108_1fe2,
+            0x8670_0d3f_fce8_e26d,
             "opcodes changed for dump version {DUMP_VERSION}"
         );
         assert_eq!(
             static_strings_fingerprint(),
-            0xa76c_0d50_869d_2d7d,
+            0x2441_07b2_429b_3cb1,
             "static strings changed for dump version {DUMP_VERSION}"
         );
         assert_eq!(

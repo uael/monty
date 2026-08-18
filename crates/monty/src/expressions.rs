@@ -7,7 +7,7 @@ use crate::{
     fstring::FStringPart,
     intern::{BytesId, LongIntId, StringId},
     namespace::NamespaceId,
-    parse::{CodeRange, ParsedSignature, Try},
+    parse::{CodeRange, ParseNode, ParsedSignature, Try},
     tstring::ParsedTemplate,
     value::{EitherStr, Marker, Value},
 };
@@ -346,6 +346,8 @@ pub enum Expr {
         signature: ParsedSignature,
         /// The lambda body expression (not yet prepared).
         body: Box<ExprLoc>,
+        /// Whether the body contains a `yield`, making the lambda a generator.
+        is_generator: bool,
     },
     /// Lambda expression: `lambda args: body` (prepared form).
     ///
@@ -357,6 +359,37 @@ pub enum Expr {
         /// The prepared function definition containing signature, body, and closure info.
         /// The body is wrapped as `[Node::Return(body_expr)]` during preparation.
         func_def: Box<PreparedFunctionDef>,
+    },
+    /// `yield` or `yield value`, an expression whose result is the value a
+    /// later `send()` supplies (`None` for a plain `__next__` step).
+    Yield(Option<Box<ExprLoc>>),
+    /// `yield from iterable`, whose value is the delegate's return value.
+    YieldFrom(Box<ExprLoc>),
+    /// Raw generator expression from the parser, before preparation.
+    ///
+    /// The parser has already desugared the comprehension clauses into the
+    /// loop body of a synthetic generator function taking the outermost
+    /// iterator as its only parameter; preparation turns `body` into that
+    /// function. `iter` stays in the enclosing scope because Python evaluates
+    /// the outermost iterable eagerly, at the expression itself.
+    GeneratorExpRaw {
+        /// Signature of the synthetic function: one positional-only `.0`.
+        signature: ParsedSignature,
+        /// The desugared loop nest ending in a `yield`.
+        body: Vec<ParseNode>,
+        /// The outermost iterable, evaluated where the expression appears.
+        iter: Box<ExprLoc>,
+    },
+    /// Generator expression: `(elt for target in iter ...)` (prepared form).
+    ///
+    /// Compiles to building the synthetic generator function and calling it
+    /// with `iter(<outermost iterable>)`, so nothing in the body runs until
+    /// the resulting generator is stepped.
+    GeneratorExp {
+        /// The synthetic generator function.
+        func_def: Box<PreparedFunctionDef>,
+        /// The outermost iterable, evaluated at the expression.
+        iter: Box<ExprLoc>,
     },
     /// Named expression (walrus operator): `(target := value)`
     ///
@@ -668,6 +701,9 @@ pub enum Node<F> {
         iter: ExprLoc,
         body: Vec<Self>,
         or_else: Vec<Self>,
+        /// `async for`: each step goes through `__aiter__`/`__anext__` and is
+        /// awaited, and `StopAsyncIteration` ends the loop.
+        is_async: bool,
     },
     /// While loop statement: `while test: body [else: orelse]`
     ///
@@ -790,6 +826,8 @@ pub enum Node<F> {
         target: Option<UnpackTarget>,
         body: Vec<Self>,
         position: CodeRange,
+        /// `async with`: `__aenter__`/`__aexit__` are called and awaited.
+        is_async: bool,
     },
     /// Import statement (e.g., `import sys`, `import sys, os`, `import sys as s`).
     ///
@@ -867,6 +905,11 @@ pub struct PreparedFunctionDef {
     /// When true, calling this function creates a `Coroutine` object instead of
     /// immediately pushing a frame.
     pub is_async: bool,
+    /// Whether the body contains a `yield`.
+    ///
+    /// When true, calling this function binds its arguments and hands back a
+    /// paused `Generator` instead of running the body.
+    pub is_generator: bool,
 }
 
 /// Type alias for prepared AST nodes (output of prepare phase).

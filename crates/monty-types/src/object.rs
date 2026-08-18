@@ -852,6 +852,11 @@ pub enum MontyType {
     /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
     #[strum(serialize = "typing.TypeAliasType")]
     TypeAliasType,
+    /// A paused `def` containing `yield`.
+    Generator,
+    /// A paused `async def` containing `yield`.
+    #[strum(serialize = "async_generator")]
+    AsyncGenerator,
 }
 
 impl fmt::Display for MontyType {

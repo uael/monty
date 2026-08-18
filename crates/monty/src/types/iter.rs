@@ -7,7 +7,7 @@ use monty_types::{ResourceError, ResourceTracker};
 
 use crate::{
     args::{ArgValues, FromArgs},
-    bytecode::VM,
+    bytecode::{VM, stop_iteration_with},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{DropGuard, DropWithContext, HeapData},
@@ -186,15 +186,21 @@ pub fn collect_iterable_bounded(value: &Value, limit: usize, vm: &mut VM<'_>) ->
 /// Implements Python's `next(iterator[, default])` semantics.
 pub fn iterator_next(iter_value: &Value, default: Option<Value>, vm: &mut VM<'_>) -> RunResult<Value> {
     let mut default_guard = DropGuard::new(default, vm);
-    let vm = default_guard.ctx();
+    let (default, vm) = default_guard.as_parts_mut();
 
     let Value::Ref(iter_id) = iter_value else {
         return Err(ExcType::type_error_not_iterator(&iter_value.py_type_name(vm)));
     };
     match vm.heap.read(*iter_id).py_next(Some(*iter_id), vm)? {
         Some(item) => Ok(item),
-        None => match default_guard.into_inner() {
+        None => match default.take() {
             Some(default) => Ok(default),
+            // A generator that `return`ed a value parked it, and `next()` is
+            // the one consumer CPython shows it to.
+            None if matches!(vm.heap.get(*iter_id), HeapData::Generator(_)) => {
+                let value = vm.take_generator_result(*iter_id);
+                Err(stop_iteration_with(value, vm))
+            }
             None => Err(ExcType::stop_iteration()),
         },
     }

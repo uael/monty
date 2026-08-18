@@ -11,7 +11,7 @@ use crate::{
         NameScope, Node, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
     },
     fstring::{FStringPart, FormatSpec},
-    intern::{InternerBuilder, StringId},
+    intern::{InternerBuilder, StaticStrings, StringId},
     name_map::{NameMap, namespace_overflow},
     namespace::NamespaceId,
     parse::{CodeRange, ExceptHandler, ParseError, ParseNode, ParseResult, ParsedSignature, RawFunctionDef, Try},
@@ -824,12 +824,13 @@ impl<'i, 'g> Prepare<'i, 'g> {
                             signature,
                             body,
                             is_async,
+                            is_generator,
                         },
                 } => {
                     // The value thunk is prepared first (it is a nested scope, so
                     // it captures the *pre*-binding state) and the alias name
                     // binds afterwards, like any other assignment.
-                    let value = self.prepare_function_def(value_name, &signature, body, is_async)?;
+                    let value = self.prepare_function_def(value_name, &signature, body, is_async, is_generator)?;
                     self.names_assigned_in_order.insert(name.name_id);
                     let name = self.get_id(name)?;
                     if self.is_class_scope {
@@ -842,6 +843,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     iter,
                     body,
                     or_else,
+                    is_async,
                 } => {
                     // Prepare target with normal scoping (not comprehension isolation)
                     let target = self.prepare_unpack_target(target)?;
@@ -850,6 +852,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                         iter: self.prepare_expression(iter)?,
                         body: self.prepare_nodes(body)?,
                         or_else: self.prepare_nodes(or_else)?,
+                        is_async,
                     });
                 }
                 Node::Break { position } => {
@@ -878,6 +881,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                             signature,
                             body,
                             is_async,
+                            is_generator,
                         },
                     decorators,
                 } => {
@@ -888,7 +892,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                         .into_iter()
                         .map(|d| self.prepare_expression(d))
                         .collect::<Result<Vec<_>, ParseError>>()?;
-                    let func = self.prepare_function_def(name, &signature, body, is_async)?;
+                    let func = self.prepare_function_def(name, &signature, body, is_async, is_generator)?;
                     // In a class body, the method name becomes a bound member
                     // only now — its own parameter defaults (evaluated in class
                     // scope, above) must see the pre-binding state.
@@ -992,6 +996,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     target,
                     body,
                     position,
+                    is_async,
                 } => {
                     let context = self.prepare_expression(context)?;
                     let target = match target {
@@ -1004,6 +1009,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                         target,
                         body,
                         position,
+                        is_async,
                     });
                 }
                 Node::Import { names } => {
@@ -1249,10 +1255,19 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 name_id,
                 signature,
                 body,
+                is_generator,
             } => {
                 // Convert the raw lambda into a prepared lambda expression
-                return self.prepare_lambda(name_id, &signature, &body, position);
+                return self.prepare_lambda(name_id, &signature, &body, position, is_generator);
             }
+            Expr::GeneratorExpRaw { signature, body, iter } => {
+                return self.prepare_generator_expression(&signature, body, *iter, position);
+            }
+            Expr::GeneratorExp { .. } => {
+                unreachable!("Expr::GeneratorExp should not exist before prepare phase")
+            }
+            Expr::Yield(value) => Expr::Yield(value.map(|v| self.prepare_expression(*v)).transpose()?.map(Box::new)),
+            Expr::YieldFrom(value) => Expr::YieldFrom(Box::new(self.prepare_expression(*value)?)),
             Expr::Lambda { .. } => {
                 // Lambda should only be created during prepare, never during parsing
                 unreachable!("Expr::Lambda should not exist before prepare phase")
@@ -1631,6 +1646,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
         parsed_sig: &ParsedSignature,
         body: Vec<ParseNode>,
         is_async: bool,
+        is_generator: bool,
     ) -> Result<PreparedFunctionDef, ParseError> {
         // A `def` (top-level, nested, or method — class bodies are function scopes
         // too) binds its name in the enclosing scope.
@@ -1766,6 +1782,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             cell_param_indices,
             default_exprs,
             is_async,
+            is_generator,
         })
     }
 
@@ -1922,6 +1939,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             cell_param_indices,
             default_exprs: Vec::new(),
             is_async: false,
+            is_generator: false,
         };
 
         Ok(Node::ClassDef {
@@ -1948,26 +1966,74 @@ impl<'i, 'g> Prepare<'i, 'g> {
         parsed_sig: &ParsedSignature,
         body: &ExprLoc,
         position: CodeRange,
+        is_generator: bool,
     ) -> Result<ExprLoc, ParseError> {
-        // Create a synthetic <lambda> name identifier (not registered in scope)
-        let lambda_name = Identifier::new_with_scope(
-            lambda_name_id,
+        // Wrap the body expression as a return statement for scope analysis
+        let body_nodes: Vec<ParseNode> = vec![Node::Return(Some(body.clone()))];
+        let func_def =
+            self.prepare_synthetic_function(lambda_name_id, parsed_sig, body_nodes, position, is_generator)?;
+        Ok(ExprLoc::new(
             position,
-            // Slot 0 is the trivial placeholder; the lambda name never lands
-            // in a namespace because lambdas don't have a binding name.
+            Expr::Lambda {
+                func_def: Box::new(func_def),
+            },
+        ))
+    }
+
+    /// Prepares a generator expression.
+    ///
+    /// The outermost iterable is prepared in *this* scope, because Python
+    /// evaluates it where the expression is written; everything else has
+    /// already been desugared by the parser into the body of a synthetic
+    /// generator function taking that iterable's iterator as its only argument.
+    fn prepare_generator_expression(
+        &mut self,
+        signature: &ParsedSignature,
+        body: Vec<ParseNode>,
+        iter: ExprLoc,
+        position: CodeRange,
+    ) -> Result<ExprLoc, ParseError> {
+        let iter = self.prepare_expression(iter)?;
+        let func_def =
+            self.prepare_synthetic_function(StaticStrings::GenexprName.into(), signature, body, position, true)?;
+        Ok(ExprLoc::new(
+            position,
+            Expr::GeneratorExp {
+                func_def: Box::new(func_def),
+                iter: Box::new(iter),
+            },
+        ))
+    }
+
+    /// Prepares a function the source never named: a lambda or the function a
+    /// generator expression desugars into.
+    ///
+    /// Same scope analysis as [`Self::prepare_function_def`], minus the name
+    /// binding: neither construct binds anything in the enclosing scope, so the
+    /// name identifier carries a placeholder slot and exists only for
+    /// tracebacks and `repr`.
+    fn prepare_synthetic_function(
+        &mut self,
+        name_id: StringId,
+        parsed_sig: &ParsedSignature,
+        body_nodes: Vec<ParseNode>,
+        position: CodeRange,
+        is_generator: bool,
+    ) -> Result<PreparedFunctionDef, ParseError> {
+        let lambda_name = Identifier::new_with_scope(
+            name_id,
+            position,
+            // Slot 0 is the trivial placeholder; the name never lands in a
+            // namespace because the construct has no binding name.
             NamespaceId::new(0).expect("slot 0 fits in u16"),
             NameScope::Local,
         );
 
-        // Wrap the body expression as a return statement for scope analysis
-        let body_as_node: ParseNode = Node::Return(Some(body.clone()));
-        let body_nodes = vec![body_as_node];
-
         // Extract param names from the parsed signature for scope analysis
         let param_names: Vec<StringId> = parsed_sig.param_names().collect();
 
-        // Pass 1: Collect scope information from the lambda body
-        // (Lambdas can't have global/nonlocal declarations, but can have nested functions)
+        // Pass 1: Collect scope information from the body
+        // (Neither construct can have global/nonlocal declarations, but both can nest functions)
         let scope_info = collect_function_scope_info(&body_nodes, &param_names, self.interner);
 
         // Build enclosing_locals: names that are local to this scope or
@@ -2071,8 +2137,8 @@ impl<'i, 'g> Prepare<'i, 'g> {
             }
         }
 
-        // Create the prepared function definition (lambdas are never async)
-        let func_def = PreparedFunctionDef {
+        // Neither a lambda nor a generator expression can be `async def`.
+        Ok(PreparedFunctionDef {
             name: lambda_name,
             signature,
             body: prepared_body,
@@ -2083,14 +2149,8 @@ impl<'i, 'g> Prepare<'i, 'g> {
             cell_param_indices,
             default_exprs,
             is_async: false,
-        };
-
-        Ok(ExprLoc::new(
-            position,
-            Expr::Lambda {
-                func_def: Box::new(func_def),
-            },
-        ))
+            is_generator,
+        })
     }
 
     /// Resolves an identifier to its namespace index and scope, creating a new entry if needed.
@@ -2501,6 +2561,7 @@ fn collect_scope_info_from_node(
             iter,
             body,
             or_else,
+            is_async: _,
         } => {
             // For loop target is assigned - collect all names from the target
             collect_assigned_names_from_unpack_target(target, assigned_names, interner);
@@ -2673,6 +2734,18 @@ fn collect_assigned_names_from_expr(
             assigned_names.insert(target.name_id);
             // Also scan the value expression
             collect_assigned_names_from_expr(value, assigned_names, interner);
+        }
+        Expr::Yield(value) => {
+            if let Some(value) = value {
+                collect_assigned_names_from_expr(value, assigned_names, interner);
+            }
+        }
+        Expr::YieldFrom(value) => collect_assigned_names_from_expr(value, assigned_names, interner),
+        // A generator expression is its own scope, like a lambda; only its
+        // outermost iterable is evaluated here.
+        Expr::GeneratorExpRaw { iter, .. } => collect_assigned_names_from_expr(iter, assigned_names, interner),
+        Expr::GeneratorExp { .. } => {
+            unreachable!("Expr::GeneratorExp should not exist during scope analysis")
         }
         // Recurse into sub-expressions
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
@@ -2913,6 +2986,7 @@ fn collect_cell_vars_from_node(
             iter,
             body,
             or_else,
+            is_async: _,
         } => {
             collect_cell_vars_from_unpack_target(target, our_locals, cell_vars, interner);
             collect_cell_vars_from_expr(iter, our_locals, cell_vars, interner);
@@ -3162,6 +3236,21 @@ fn collect_cell_vars_from_expr(
 ) {
     use crate::expressions::Expr;
     match &expr.expr {
+        Expr::Yield(value) => {
+            if let Some(value) = value {
+                collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
+            }
+        }
+        Expr::YieldFrom(value) => collect_cell_vars_from_expr(value, our_locals, cell_vars, interner),
+        Expr::GeneratorExpRaw { signature, body, iter } => {
+            // The desugared body is a nested function scope, exactly like a
+            // `def`; the outermost iterable is evaluated in ours.
+            collect_cell_vars_from_function(signature, body, our_locals, cell_vars, interner);
+            collect_cell_vars_from_expr(iter, our_locals, cell_vars, interner);
+        }
+        Expr::GeneratorExp { .. } => {
+            unreachable!("Expr::GeneratorExp should not exist during scope analysis")
+        }
         Expr::LambdaRaw { signature, body, .. } => {
             // This lambda's *default* expressions are evaluated in OUR scope at
             // definition time, not inside the lambda — so any name they
@@ -3469,6 +3558,7 @@ fn collect_referenced_names_from_node(
             iter,
             body,
             or_else,
+            is_async: _,
         } => {
             collect_referenced_names_from_unpack_target(target, referenced, interner);
             collect_referenced_names_from_expr(iter, referenced, interner);
@@ -3695,6 +3785,21 @@ fn collect_referenced_names_from_expr(expr: &ExprLoc, referenced: &mut AHashSet<
             key, value, generators, ..
         } => {
             collect_referenced_names_from_comprehension(generators, None, Some((key, value)), referenced, interner);
+        }
+        Expr::Yield(value) => {
+            if let Some(value) = value {
+                collect_referenced_names_from_expr(value, referenced, interner);
+            }
+        }
+        Expr::YieldFrom(value) => collect_referenced_names_from_expr(value, referenced, interner),
+        Expr::GeneratorExpRaw { signature, body, iter } => {
+            // Free names of the desugared body propagate outward like any
+            // nested function's; the outermost iterable is read here.
+            collect_nested_function_references(signature, body, referenced, interner);
+            collect_referenced_names_from_expr(iter, referenced, interner);
+        }
+        Expr::GeneratorExp { .. } => {
+            unreachable!("Expr::GeneratorExp should not exist during scope analysis")
         }
         Expr::LambdaRaw { signature, body, .. } => {
             // Build set of parameter names (these are local to the lambda, not free variables)

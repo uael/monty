@@ -27,9 +27,8 @@ Not implemented (raise `AttributeError`):
 the whole `asyncio.subprocess` / `asyncio.streams` / `asyncio.protocols`
 surface.
 
-`asyncio.timeout()` / `asyncio.timeout_at()` would be unreachable in any
-case: they are async context managers, and `async with` is rejected at parse
-time (see ./language.md).
+`async with` works, so an async context manager written in Python is usable;
+what is missing above is the `asyncio` objects themselves, `Lock` included.
 
 ## `async def` / `await`
 
@@ -38,14 +37,42 @@ time (see ./language.md).
   raises `RuntimeError`. Store the *result*, not the coroutine, if you need
   it again.
 - `await` on a non-awaitable raises `TypeError`.
-- `async for` and `async with` are **rejected at parse time** (see
-  ./language.md). Async iteration and async context-manager
-  protocols do not exist.
 - Async comprehensions (`[x async for x in ...]`) are rejected at parse
-  time.
+  time. The `async for` *statement* is supported.
 - There is no `__await__` protocol. Awaitables are only the things Monty
-  knows internally: coroutines from `async def`, gather futures, and external
-  function call futures returned by host bindings.
+  knows internally: coroutines from `async def`, async generators, gather
+  futures, and external function call futures returned by host bindings.
+
+## `async for` and `async with`
+
+- `async for` drives `__aiter__` / `__anext__` and ends on
+  `StopAsyncIteration`; `async with` drives `__aenter__` / `__aexit__` and
+  awaits both. Both are ordinary attribute calls, so they work on any class
+  that defines the methods.
+- **`async for` over a non-async-iterable reports the wrong exception.**
+  Monty raises `AttributeError: 'list' object has no attribute '__aiter__'`
+  where CPython raises `TypeError: 'async for' requires an object with
+  __aiter__ method, got list`. The type is different, not only the wording,
+  so `except TypeError` does not catch it.
+- `__aexit__` receives `(type(exc), exc, None)`: Monty has no traceback
+  objects, so the third argument is always `None`.
+
+## Async generators
+
+An `async def` whose body contains `yield` is an async generator, driven by
+`async for`. `await` inside the body works. Beyond that:
+
+- **No `asend()` / `athrow()` / `aclose()`.** Only `__aiter__` / `__anext__`
+  exist, so an async generator cannot be resumed with a value, have an
+  exception thrown in, or be closed early. A `finally` in its body runs only
+  when the body itself finishes or raises.
+- `__anext__()` returns the async generator itself rather than CPython's
+  `async_generator_asend` object. Awaiting the result of `__anext__()` twice
+  therefore advances the generator twice instead of replaying one step.
+- `agen.__anext__` is the only attribute; `ag_running`, `ag_frame`,
+  `ag_code` and the rest are absent.
+- `type(agen).__name__` is `'async_generator'`, and `repr()` omits CPython's
+  memory address: `<async_generator object ticks>`.
 
 ## Concurrency model
 
