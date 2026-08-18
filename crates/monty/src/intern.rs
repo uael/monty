@@ -1112,6 +1112,10 @@ pub enum StaticStrings {
     Func,
     /// `initial` keyword argument of `itertools.accumulate()`.
     Initial,
+
+    // ==========================
+    /// The `builtins` module name, whose namespace `vars()` exposes.
+    Builtins,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

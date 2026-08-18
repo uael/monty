@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub(crate) mod asyncio;
+pub(crate) mod builtins;
 pub(crate) mod collections;
 pub(crate) mod contextlib;
 pub(crate) mod contextvars;
@@ -81,6 +82,8 @@ pub(crate) enum StandardLib {
     Contextlib,
     /// The `operator` module providing `attrgetter`.
     Operator,
+    /// The `builtins` module, the namespace a bare name resolves against.
+    Builtins,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -114,6 +117,7 @@ impl StandardLib {
             StaticStrings::Contextvars => Some(Self::Contextvars),
             StaticStrings::Contextlib => Some(Self::Contextlib),
             StaticStrings::Operator => Some(Self::Operator),
+            StaticStrings::Builtins => Some(Self::Builtins),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -145,6 +149,7 @@ impl StandardLib {
             Self::Contextvars => contextvars::create_module(vm),
             Self::Contextlib => contextlib::create_module(vm),
             Self::Operator => operator::create_module(vm),
+            Self::Builtins => builtins::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

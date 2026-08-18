@@ -40,6 +40,7 @@ ALLOWED_FUNCTIONS = {
     'round',
     'sorted',
     'sum',
+    'vars',
 }
 
 # Whitelisted builtin classes (from crates/monty/src/types/ and exception_private.rs)

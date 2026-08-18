@@ -35,6 +35,7 @@ mod sorted;
 mod sum;
 mod super_;
 mod type_;
+mod vars;
 mod zip;
 
 use std::{fmt, fmt::Write, str::FromStr};
@@ -169,6 +170,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Sum => sum::builtin_sum(vm, args),
             Self::Super => super_::builtin_super(vm, args),
             Self::Type => type_::builtin_type(vm, args),
+            Self::Vars => vars::builtin_vars(vm, args),
             Self::Zip => zip::builtin_zip(vm, args),
         };
         r.map(CallResult::Value)

@@ -1,7 +1,7 @@
 //! [`BuiltinsFunctions`] — the name-level identity of every interpreter-native
 //! Python builtin, carried by [`MontyObject::BuiltinFunction`](crate::object::MontyObject).
 
-use strum::{Display, EnumString, FromRepr, IntoStaticStr};
+use strum::{Display, EnumIter, EnumString, FromRepr, IntoStaticStr};
 /// Enumerates every interpreter-native Python builtin function.
 ///
 /// Listed alphabetically per <https://docs.python.org/3/library/functions.html>
@@ -16,6 +16,7 @@ use strum::{Display, EnumString, FromRepr, IntoStaticStr};
     Clone,
     Copy,
     Display,
+    EnumIter,
     EnumString,
     FromRepr,
     IntoStaticStr,
@@ -96,7 +97,10 @@ pub enum BuiltinsFunctions {
     Super,
     // tuple - handled by Type enum
     Type,
-    // Vars,
     Zip,
     // __import__ - not planned
+    // Appended out of alphabetical order: the discriminant is a bytecode
+    // operand (`emit_call_builtin_function`) and so is baked into dumps, which
+    // makes every position but the end unavailable.
+    Vars,
 }

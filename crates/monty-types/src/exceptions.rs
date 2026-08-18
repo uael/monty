@@ -9,7 +9,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumString, IntoStaticStr};
+use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
 use crate::format::StringRepr;
 
@@ -274,7 +274,19 @@ fn frames_are_identical(a: &StackFrame, b: &StackFrame) -> bool {
 /// Uses strum derives for automatic `Display`, `FromStr`, and `Into<&'static str>` implementations.
 /// The string representation matches the variant name exactly (e.g., `ValueError` -> "ValueError").
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Display, EnumString, IntoStaticStr, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Display,
+    EnumIter,
+    EnumString,
+    IntoStaticStr,
+    Serialize,
+    Deserialize,
 )]
 pub enum ExcType {
     /// primary exception class - matches any exception in isinstance checks.
@@ -398,15 +410,62 @@ pub enum ExcType {
     GeneratorExit,
 }
 impl ExcType {
-    /// Checks if this exception type is a subclass of another exception type.
+    /// Whether this class lives in the `builtins` namespace, and so is
+    /// reachable as a bare name and listed by `vars(builtins)`.
+    ///
+    /// Matched exhaustively so a new variant must choose. The four that are not
+    /// builtins belong to a module instead, which their names say.
+    #[must_use]
+    pub fn is_builtin(self) -> bool {
+        match self {
+            Self::FrozenInstanceError | Self::JsonDecodeError | Self::UnsupportedOperation | Self::RePatternError => {
+                false
+            }
+            Self::Exception
+            | Self::BaseException
+            | Self::SystemExit
+            | Self::KeyboardInterrupt
+            | Self::ArithmeticError
+            | Self::OverflowError
+            | Self::ZeroDivisionError
+            | Self::LookupError
+            | Self::IndexError
+            | Self::KeyError
+            | Self::RuntimeError
+            | Self::NotImplementedError
+            | Self::RecursionError
+            | Self::AttributeError
+            | Self::NameError
+            | Self::UnboundLocalError
+            | Self::ValueError
+            | Self::UnicodeDecodeError
+            | Self::UnicodeEncodeError
+            | Self::ImportError
+            | Self::ModuleNotFoundError
+            | Self::OSError
+            | Self::FileNotFoundError
+            | Self::FileExistsError
+            | Self::IsADirectoryError
+            | Self::NotADirectoryError
+            | Self::PermissionError
+            | Self::TimeoutError
+            | Self::AssertionError
+            | Self::MemoryError
+            | Self::StopIteration
+            | Self::StopAsyncIteration
+            | Self::GeneratorExit
+            | Self::SyntaxError
+            | Self::TypeError => true,
+        }
+    }
+
+    /// Returns true if `self` would be caught by `except handler_type:`.
     ///
     /// Implements Python's exception hierarchy for try/except matching:
     /// - `Exception` is the base class for all standard exceptions
     /// - `LookupError` is the base for `KeyError` and `IndexError`
     /// - `ArithmeticError` is the base for `ZeroDivisionError` and `OverflowError`
     /// - `RuntimeError` is the base for `RecursionError` and `NotImplementedError`
-    ///
-    /// Returns true if `self` would be caught by `except handler_type:`.
     #[must_use]
     pub fn is_subclass_of(self, handler_type: Self) -> bool {
         if self == handler_type {

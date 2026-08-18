@@ -9,7 +9,7 @@ Python.
 `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`,
 `getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `iter`, `len`, `map`,
 `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`, `repr`,
-`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
+`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `vars`, `zip`.
 
 ## Implemented type constructors (also builtins)
 
@@ -23,7 +23,8 @@ These raise `NameError`:
 
 - **Code execution**: `eval`, `exec`, `compile`, `__import__`. Deliberate:
   sandboxed code must not be able to compile new code at runtime.
-- **Namespace introspection**: `globals`, `locals`, `vars`, `dir`.
+- **Namespace introspection**: `globals`, `locals`, `dir`. `vars` *is*
+  implemented, but only for modules; see below.
 - **Interactive**: `input`, `breakpoint`, `help`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `property`,
   `super`. (`@property` on functions is not recognized; use a method.)
@@ -33,6 +34,43 @@ These raise `NameError`:
 
 `super()` is the biggest practical omission: with no class inheritance either
 (see ./classes.md), there is no inheritance mechanism at all.
+
+## `vars()`
+
+`vars(module)` returns the module's namespace as a `dict`, which is what makes
+a value-to-name reverse lookup possible:
+
+```python
+import builtins
+
+def name_of(value):
+    for name, got in vars(builtins).items():
+        if got is value:
+            return name
+```
+
+`builtins` is importable for exactly this reason. Its namespace is assembled
+from the same three sources a bare name resolves against, so it holds every
+builtin function, type constructor, builtin exception class, and the
+singletons `None`, `True`, `False`, `Ellipsis` and `NotImplemented`. The
+exception classes that belong to a module rather than to builtins
+(`json.JSONDecodeError`, `io.UnsupportedOperation`, `re.PatternError`,
+`dataclasses.FrozenInstanceError`) are absent, as in CPython.
+
+Divergences:
+
+- **The result is a copy, not the live mapping.** A module owns its namespace
+  inline, so there is no second reference to hand out. Writing to the returned
+  dict therefore does not change the module, where in CPython
+  `vars(m)['x'] = 1` sets `m.x`. Reading is identical.
+- **Only modules have a `__dict__`.** Every other object raises
+  `TypeError: vars() argument must have __dict__ attribute`, including class
+  objects and instances — CPython returns a `mappingproxy` for a class and the
+  instance dict for an instance (see ./classes.md, which lists `__dict__` as
+  unavailable).
+- **`vars()` with no argument raises** `NotImplementedError` rather than
+  returning the calling frame's `locals()`, which Monty cannot build. Returning
+  an empty dict would be worse: it would look like a frame with no names.
 
 ## Behavioural divergences
 

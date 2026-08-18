@@ -9,6 +9,7 @@ and no way for sandboxed code to load additional modules.
 | Module         | See              |
 | -------------- | ---------------- |
 | `asyncio`      | ./asyncio.md     |
+| `builtins`     | ./builtins.md    |
 | `collections`  | ./collections.md |
 | `contextlib`   | ./contextlib.md  |
 | `contextvars`  | ./contextvars.md |

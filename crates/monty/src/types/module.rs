@@ -62,6 +62,18 @@ impl Module {
         self.attrs.set(key, value, vm).unwrap();
     }
 
+    /// Sets an attribute under a key that is not an interned name.
+    ///
+    /// The `builtins` module needs this: most builtin names never appear in a
+    /// program's source, and the intern table is frozen after prepare, so their
+    /// keys are heap strings.
+    ///
+    /// # Panics
+    /// Panics if `key` is unhashable, which no string is.
+    pub fn set_attr_value(&mut self, key: Value, value: Value, vm: &mut VM<'_>) {
+        self.attrs.set(key, value, vm).expect("string keys are hashable");
+    }
+
     /// Returns whether this module has any heap references in its attributes.
     pub fn has_refs(&self) -> bool {
         self.attrs.has_refs()
