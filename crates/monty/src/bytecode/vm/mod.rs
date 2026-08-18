@@ -2058,11 +2058,21 @@ impl<'h> VM<'h> {
     }
 
     /// Loads a built-in module and pushes it onto the stack.
+    ///
+    /// A module is built on its first import and cached on the heap, so every
+    /// later import of the same name pushes that same object: `import sys`
+    /// twice binds one module, and an attribute set through one name is read
+    /// through the other.
     fn load_module(&mut self, module_id: u8) {
+        if let Some(cached) = self.heap.get_module(module_id) {
+            self.push(cached);
+            return;
+        }
         let module = StandardLib::from_repr(module_id).expect("unknown module id");
 
         // Create the module on the heap using pre-interned strings
         let heap_id = module.create(self);
+        self.heap.set_module(module_id, heap_id);
         self.push(Value::Ref(heap_id));
     }
 

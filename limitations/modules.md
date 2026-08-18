@@ -50,6 +50,13 @@ CPython says `True`. Module attributes are all read-only builtins, so the
 copies never disagree about a value; only identity and `is` comparisons
 diverge.
 
+Each module is built once and cached, as CPython's `sys.modules` does, so every
+import of a name hands back that one object: `import sys` twice, or
+`import sys` beside `import sys as s`, gives `sys is s`. The cache belongs to
+the interpreter state rather than to one execution, so the identity holds
+across the snippets of a REPL session and across a session dump and restore.
+The `sys.modules` mapping itself is not exposed.
+
 A `gc` module exposing `collect()` / `enable()` / `disable()` is compiled
 in only under the `test-hooks` Cargo feature, for Monty's own test suite;
 production sandboxes never see it.

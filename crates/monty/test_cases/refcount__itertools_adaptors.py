@@ -257,4 +257,4 @@ except TypeError:
     pass
 
 len('done')
-# ref-counts={'itertools': 1, 'live': 1, 'primed': 1, 'cyclic': 2, 'paired': 1, 'sliced': 1, 'chained': 1, 'cycled': 1, 'replaying': 1, 'Boom': 2, 'erroring': 1, 'spent_source': 1, 'spent_pairwise': 1, 'stopped_source': 1, 'stopped_islice': 1, 'drained_source': 1, 'drained_islice': 1, 'chain_drained_source': 1, 'chain_drained': 1, 'chain_unreached_source': 1, 'chain_failed': 1, 'running': 1, 'seeded': 1, 'folded': 1, 'acc_drained_source': 1, 'acc_drained': 1, 'acc_erroring': 1}
+# ref-counts={'itertools': 2, 'live': 1, 'primed': 1, 'cyclic': 2, 'paired': 1, 'sliced': 1, 'chained': 1, 'cycled': 1, 'replaying': 1, 'Boom': 2, 'erroring': 1, 'spent_source': 1, 'spent_pairwise': 1, 'stopped_source': 1, 'stopped_islice': 1, 'drained_source': 1, 'drained_islice': 1, 'chain_drained_source': 1, 'chain_drained': 1, 'chain_unreached_source': 1, 'chain_failed': 1, 'running': 1, 'seeded': 1, 'folded': 1, 'acc_drained_source': 1, 'acc_drained': 1, 'acc_erroring': 1}

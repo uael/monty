@@ -870,16 +870,32 @@ pub(crate) struct Heap {
     ///
     /// Uses `BTreeMap` to avoid large residual capacity from spikes of `ExtFunction` allocations.
     ext_function_cache: BTreeMap<Arc<str>, HeapId>,
+    /// Imported modules, keyed by their `StandardLib` discriminant: Monty's
+    /// `sys.modules`.
+    ///
+    /// A module is created once and every later `import` of the same name
+    /// hands back that object, so `import sys` twice is one object and an
+    /// attribute set on a module is seen by every importer, as in CPython.
+    /// Each entry owns a refcount, which is what makes a module outlive the
+    /// names bound to it; the cycle collector resurrects the entry from that
+    /// reference rather than needing the cache enrolled as a root.
+    ///
+    /// Lives on the heap rather than the VM because the object's identity must
+    /// hold for as long as its attributes do: across feeds of a repl session
+    /// and across a dump/load, both of which carry the heap and neither of
+    /// which carries a VM.
+    modules: BTreeMap<u8, HeapId>,
 }
 
 impl serde::Serialize for Heap {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Heap", 5)?;
+        let mut state = serializer.serialize_struct("Heap", 6)?;
         state.serialize_field("entries", &self.entries)?;
         state.serialize_field("tracker", &self.tracker)?;
         state.serialize_field("purple_count", &self.purple_count)?;
         state.serialize_field("allocations_since_gc", &self.allocations_since_gc.get())?;
         state.serialize_field("timezone_utc", &self.timezone_utc)?;
+        state.serialize_field("modules", &self.modules)?;
         state.end()
     }
 }
@@ -896,6 +912,8 @@ impl<'de> serde::Deserialize<'de> for Heap {
             allocations_since_gc: u32,
             #[serde(default)]
             timezone_utc: Option<HeapId>,
+            #[serde(default)]
+            modules: BTreeMap<u8, HeapId>,
         }
         let fields = HeapFields::deserialize(deserializer)?;
         let mut entries = fields.entries;
@@ -917,6 +935,7 @@ impl<'de> serde::Deserialize<'de> for Heap {
             gc_disabled: false,
             timezone_utc: fields.timezone_utc,
             ext_function_cache,
+            modules: fields.modules,
         })
     }
 }
@@ -950,6 +969,7 @@ impl Heap {
             gc_disabled: false,
             timezone_utc: None,
             ext_function_cache: BTreeMap::new(),
+            modules: BTreeMap::new(),
         };
 
         // The empty-tuple singleton starts with refcount = 1 — that single ref *is* the
@@ -1064,6 +1084,33 @@ impl Heap {
             self.timezone_utc = Some(id);
             Value::Ref(id)
         }
+    }
+
+    /// Returns the already-imported module for `module_id`, or `None` on the
+    /// first import of that module.
+    ///
+    /// The returned `Value::Ref` has its refcount incremented so the caller can
+    /// drop it normally; the module itself is kept alive by the cache's own
+    /// reference.
+    pub fn get_module(&self, module_id: u8) -> Option<Value> {
+        let id = *self.modules.get(&module_id)?;
+        self.inc_ref(id);
+        Some(Value::Ref(id))
+    }
+
+    /// Records `id` as the one object every later import of `module_id` returns,
+    /// taking a refcount of its own so the module outlives the names bound to it.
+    pub fn set_module(&mut self, module_id: u8, id: HeapId) {
+        self.inc_ref(id);
+        let previous = self.modules.insert(module_id, id);
+        debug_assert!(previous.is_none(), "a module is created once and cached forever");
+    }
+
+    /// Every module the cache holds, for callers that must account for a
+    /// heap-owned reference no Python name explains.
+    #[cfg(feature = "ref-count-return")]
+    pub fn module_ids(&self) -> impl Iterator<Item = HeapId> + '_ {
+        self.modules.values().copied()
     }
 
     /// Increments the reference count for an existing heap entry.

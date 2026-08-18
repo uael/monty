@@ -272,6 +272,24 @@ fn repl_dump_load_survives_between_snippets() {
     assert_eq!(output, MontyObject::Int(42));
 }
 
+/// A module is one object for the life of the session, so a name bound to it in
+/// an earlier snippet still refers to what a later `import` produces, and a
+/// dump carries that identity, since the cache travels with the heap.
+#[test]
+fn repl_imports_one_module_object_per_name() {
+    let (mut repl, _) = init_repl("import sys\nfirst = sys");
+    assert_eq!(
+        feed_run_print(&mut repl, "import sys as again\nagain is first").unwrap(),
+        MontyObject::Bool(true)
+    );
+
+    let mut loaded = round_trip_repl(&repl);
+    assert_eq!(
+        feed_run_print(&mut loaded, "import sys as after_load\nafter_load is first").unwrap(),
+        MontyObject::Bool(true)
+    );
+}
+
 #[test]
 fn repl_dump_load_preserves_heap_aliasing() {
     let (mut repl, _) = init_repl("a = []\nb = a");

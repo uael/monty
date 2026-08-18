@@ -482,6 +482,10 @@ impl Executor {
             if let Ok(FrameExit::Return(Value::Ref(id))) = &frame_exit_result {
                 roots.push(*id);
             }
+            // An imported module is owned by the heap's module cache for the life of the
+            // heap, exactly as CPython's `sys.modules` owns it, so it is live whether or
+            // not a name still refers to it.
+            roots.extend(vm.heap.module_ids());
             // Those are the only roots: locals are gone once the module frame exits, so
             // anything still live must hang off a name or the result to not be a leak.
             let unreachable: Vec<String> = vm
