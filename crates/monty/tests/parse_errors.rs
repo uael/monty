@@ -608,10 +608,13 @@ fn run_and_get_err(code: &str) -> MontyException {
 }
 
 #[test]
-fn matrix_multiplication_returns_not_implemented_error() {
-    // The @ operator (matrix multiplication) is not supported at runtime
+fn matrix_multiplication_returns_type_error() {
+    // No builtin type implements `@`, which in Python is not a missing feature
+    // but an unsupported operand pair, so it reports the same TypeError every
+    // other operator does. `test_cases/matmul__unsupported.py` pins the text
+    // against CPython.
     let err = run_and_get_err("1 @ 2");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
+    assert_eq!(err.exc_type(), ExcType::TypeError);
 }
 
 #[test]

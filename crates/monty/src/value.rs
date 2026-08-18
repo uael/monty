@@ -1032,13 +1032,25 @@ impl<'h> PyTrait<'h> for Value {
     }
 
     /// One-sided implementation of matrix multiplication.
-    fn py_matmul_impl(&self, _other: &Self, _vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        Err(ExcType::not_implemented("matrix multiplication (@) is not supported").into())
+    ///
+    /// No builtin type defines `@`, so this reports "unsupported" rather than
+    /// raising: the caller's fallback is CPython's `TypeError`, and a program
+    /// catching that must be able to catch this.
+    fn py_matmul_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_matmul_impl(other, vm)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Reflected implementation of matrix multiplication.
-    fn py_rmatmul_impl(&self, _other: &Self, _vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        Ok(None)
+    fn py_rmatmul_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
+        if let Self::Ref(id) = self {
+            vm.heap.read(*id).py_rmatmul_impl(other, vm)
+        } else {
+            Ok(None)
+        }
     }
 
     fn py_getitem(&self, key: &Self, vm: &mut VM<'_>) -> RunResult<Self> {
