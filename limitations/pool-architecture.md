@@ -230,14 +230,21 @@ properties that real CPython does not provide, per the caveat above.
   the session changes, so a host can classify input before deciding to run it
   without carrying a second Python parser.
 - **`session.probe(expr)` evaluates one expression against the session's
-  namespace** and returns its value, binding nothing. Anything that could bind
-  is refused with `MontySyntaxError` rather than quietly leaving the session
+  namespace** and returns its value. Anything the expression itself binds is
+  refused with `MontySyntaxError` rather than quietly leaving the session
   changed: a statement, several statements, or an expression containing `:=`.
-  What the expression *calls* can of course still mutate what it reaches;
-  the guarantee is that the probe itself binds no name. Suspensions are
-  answered from `external_lookup` / `os` exactly as `feed_run`'s are, and a
-  probe's traceback frames are named `<probe-N>` rather than
-  `<python-input-N>`.
+  A comprehension is allowed, since its target binds into the comprehension's
+  own scope; a `:=` inside one is still refused, because PEP 572 says that
+  reaches out. What the expression *calls* can of course still mutate what it
+  reaches. Suspensions are answered from `external_lookup` / `os` exactly as
+  `feed_run`'s are, and a probe's traceback frames are named `<probe-N>`
+  rather than `<python-input-N>`.
+- **A name a probe resolves through `external_lookup` stays bound.** The
+  resolution is cached into the namespace slot, as it is for a feed, so the
+  name is a global from then on and a later probe of the same name reads the
+  cached value instead of asking again. A host that answers lookups during a
+  probe should therefore treat the names it supplies as reserved, and expect
+  them to appear in the session afterwards.
 - **Typing errors** (`checkout(type_check=True)`) raise `MontyTypingError`
   whose diagnostics were rendered *in the worker*, so the format is a
   checkout argument (`type_check_format=`, `type_check_color=`; JS

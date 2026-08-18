@@ -103,8 +103,32 @@ fn bindings_in_a_nested_scope_are_not_module_level() {
         "class A:\n    x = 1",
         "f = lambda: (x := 1)",
         "def f():\n    for x in xs:\n        pass",
+        // A comprehension is a scope of its own, and Monty's compiler already
+        // gives it one: after `[x for x in xs]` the name is undefined, exactly
+        // as in CPython.
+        "ys = [x for x in xs]",
+        "ys = {x for x in xs}",
+        "ys = {x: 1 for x in xs}",
+        "ys = list(x for x in xs)",
+        "ys = [a for b in xs for x in b]",
+        "ys = [a for b in xs if all(x for x in b)]",
     ] {
         assert_eq!(binds(code, &["x"]), Vec::<String>::new(), "{code:?}");
+    }
+}
+
+/// The one name a comprehension does write into the enclosing scope: PEP 572
+/// says a walrus reaches out of it, wherever in the clause it stands.
+#[test]
+fn a_walrus_inside_a_comprehension_binds_at_module_level() {
+    for code in [
+        "ys = [(x := y) for y in items]",
+        "ys = [y for y in items if (x := y)]",
+        "ys = [y for y in (x := items)]",
+        "ys = {(x := y): y for y in items}",
+        "ys = list((x := y) for y in items)",
+    ] {
+        assert_eq!(binds(code, &["x"]), vec!["x".to_owned()], "{code:?}");
     }
 }
 

@@ -3230,6 +3230,17 @@ impl<'a> Visitor<'a> for ModuleBindings<'a> {
         walk_except_handler(self, handler);
     }
 
+    /// Everything a comprehension clause holds except its target, which binds
+    /// into the comprehension's own scope — as Monty's compiler already gives
+    /// it. A walrus in the same clause still reaches the enclosing scope (PEP
+    /// 572), so only the target is skipped, not the whole clause.
+    fn visit_comprehension(&mut self, comprehension: &'a ast::Comprehension) {
+        self.visit_expr(&comprehension.iter);
+        for expr in &comprehension.ifs {
+            self.visit_expr(expr);
+        }
+    }
+
     fn visit_expr(&mut self, expr: &'a AstExpr) {
         match expr {
             AstExpr::Name(name) if name.ctx.is_store() => {
