@@ -1173,16 +1173,6 @@ pub enum StaticStrings {
     /// `typing.runtime_checkable()`.
     #[strum(serialize = "runtime_checkable")]
     RuntimeCheckable,
-    /// `__origin__`, the class a `types.GenericAlias` subscripted.
-    #[strum(serialize = "__origin__")]
-    DunderOrigin,
-    /// `__args__`, the subscript of a `types.GenericAlias` or the members of a
-    /// `typing.Union`.
-    #[strum(serialize = "__args__")]
-    DunderArgs,
-    /// `__class_getitem__`, the hook a class defines to be subscriptable.
-    #[strum(serialize = "__class_getitem__")]
-    DunderClassGetitem,
 
     // ==========================
     // `collections.abc` names. The family reuses the existing typing strings
