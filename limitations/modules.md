@@ -98,8 +98,18 @@ type-checks here: `math.fsum`, `re.subn`, `typing.cast` and
 `AttributeError` or `ImportError` when the code runs. Each module's page below
 lists what is actually implemented; the stub is not that list. The narrowed
 modules (`asyncio`, `collections`, `contextlib`, `contextvars`, `functools`,
-`itertools`, `operator`, `os`, `sys`, `unicodedata`) have no such gap, and
-`crates/monty-typeshed/custom/` is where a module joins them.
+`itertools`, `operator`, `os`, `sys`, `unicodedata`) are cut down to the
+implemented surface, and `crates/monty-typeshed/custom/` is where a module
+joins them.
 
-Two builtin *names* diverge the same way, `object` and `UnicodeError`; see
-./builtins.md.
+What survives the narrowing is a handful of *type* names a stub needs in order
+to describe something, but which are not module attributes at runtime:
+`asyncio.Timeout` (what `asyncio.timeout()` returns), `contextvars.Token`
+(what `ContextVar.set()` returns), `os.PathLike` and `os.stat_result`, and the
+`collections.abc` names `collections`'s own stub pulls in. Three of them name
+something a program really holds (`type(asyncio.timeout(5)).__name__` is
+`'Timeout'`, a `Token` comes back from `set()`, a `StatResult` from `stat()`),
+and reaching it *through the module* is what raises `AttributeError`;
+`os.PathLike` describes a protocol Monty does not dispatch at all (see
+./os.md). Two builtin names diverge the same way, `object` and `UnicodeError`;
+see ./builtins.md.
