@@ -1,11 +1,18 @@
 error: lifetime may not live long enough
-   --> crates/monty/src/heap/../../tests/heap_reader_compile_fail_cases/cases.rs:155:36
+   --> crates/monty/src/heap/../../tests/heap_reader_compile_fail_cases/cases.rs:156:13
     |
-155 |         |reader, (interns, print)| VM::new(Vec::new(), reader, *interns, print.reborrow(), 120),
-    |          ------                  - ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
-    |          |                       |
-    |          |                       return type of closure is VM<'2>
-    |          has type `&'1 mut heap::HeapReader<'1>`
+155 |           |reader, (interns, print)| {
+    |            ------                  - return type of closure is VM<'2>
+    |            |
+    |            has type `&'1 mut heap::HeapReader<'1>`
+156 | /             VM::new(
+157 | |                 crate::namespaces::Scopes::new(),
+158 | |                 reader,
+159 | |                 *interns,
+160 | |                 print.reborrow(),
+161 | |                 120,
+162 | |             )
+    | |_____________^ returning this value requires that `'1` must outlive `'2`
     |
     = note: requirement occurs because of the type `VM<'_>`, which makes the generic argument `'_` invariant
     = note: the struct `VM<'h>` is invariant over the parameter `'h`
@@ -18,8 +25,10 @@ error: lifetime may not live long enough
 152 | /     HeapReader::with(
 153 | |         heap,
 154 | |         &mut (interns, monty_types::PrintWriter::Disabled),
-155 | |         |reader, (interns, print)| VM::new(Vec::new(), reader, *interns, print.reborrow(), 120),
-156 | |     )
+155 | |         |reader, (interns, print)| {
+...   |
+163 | |         },
+164 | |     )
     | |_____^ returning this value requires that `'1` must outlive `'static`
     |
     = note: requirement occurs because of the type `VM<'_>`, which makes the generic argument `'_` invariant

@@ -18,6 +18,8 @@ use crate::{
     defer_drop,
     exception_private::{ExcTypeExt, RunError},
     heap::{DropWithContext, Heap, HeapData, HeapReader},
+    namespace::ScopeId,
+    namespaces::Scopes,
     object_bridge::MontyObjectExt,
     parse::check_probe_expression,
     program::Program,
@@ -62,12 +64,11 @@ pub struct MontyRepl {
     options: CompileOptions,
     /// Persistent heap across snippets.
     heap: Heap,
-    /// Persistent global variable values across snippets.
-    ///
-    /// Indexed by `NamespaceId` slots from `global_names`. Between snippet
-    /// executions these are the only VM values that persist — stack and frames
-    /// are transient.
-    globals: Vec<Value>,
+    /// Every global namespace this session holds, each indexed by the slot
+    /// map in `program`, and which of them a feed or probe that names none
+    /// acts on. Between snippet executions these are the only VM values that
+    /// persist — stack and frames are transient.
+    scopes: Scopes,
 }
 
 impl MontyRepl {
@@ -87,7 +88,7 @@ impl MontyRepl {
             sources: AHashMap::new(),
             options,
             heap,
-            globals: Vec::new(),
+            scopes: Scopes::new(),
         }
     }
 
@@ -225,7 +226,7 @@ impl MontyRepl {
             &mut (&this.program, &executor, print),
             |reader, (program, executor, print)| {
                 let mut vm = VM::new(
-                    mem::take(&mut this.globals),
+                    mem::take(&mut this.scopes),
                     reader,
                     &program.interns,
                     print.reborrow(),
@@ -234,7 +235,7 @@ impl MontyRepl {
 
                 // Inject inputs with VM alive
                 if let Err(error) = inject_inputs_into_vm(executor, input_values, &mut vm) {
-                    this.globals = vm.take_globals();
+                    this.scopes = vm.take_scopes();
                     return Err(error);
                 }
 
@@ -245,7 +246,7 @@ impl MontyRepl {
                 let vm_state = if converted.needs_snapshot() {
                     Some(vm.snapshot())
                 } else {
-                    this.globals = vm.take_globals();
+                    this.scopes = vm.take_scopes();
                     None
                 };
                 Ok((converted, vm_state))
@@ -321,7 +322,7 @@ impl MontyRepl {
             &mut (&self.program, &executor, print),
             |reader, (program, executor, print)| {
                 let mut vm = VM::new(
-                    mem::take(&mut self.globals),
+                    mem::take(&mut self.scopes),
                     reader,
                     &program.interns,
                     print.reborrow(),
@@ -329,7 +330,7 @@ impl MontyRepl {
                 );
 
                 if let Err(e) = inject_inputs_into_vm(executor, input_values, &mut vm) {
-                    self.globals = vm.take_globals();
+                    self.scopes = vm.take_scopes();
                     return Err(e);
                 }
 
@@ -337,7 +338,7 @@ impl MontyRepl {
                 let returned = vm.module_returned();
 
                 // Reclaim globals before cleanup.
-                self.globals = vm.take_globals();
+                self.scopes = vm.take_scopes();
                 Ok((result, returned))
             },
         )?;
@@ -384,7 +385,7 @@ impl MontyRepl {
             &mut (&self.program.interns, print),
             |reader, (interns, print)| {
                 let vm = &mut VM::new(
-                    mem::take(&mut self.globals),
+                    mem::take(&mut self.scopes),
                     reader,
                     interns,
                     print.reborrow(),
@@ -397,7 +398,7 @@ impl MontyRepl {
                 let arg_values = match convert_args(args, vm) {
                     Ok(av) => av,
                     Err(e) => {
-                        self.globals = vm.take_globals();
+                        self.scopes = vm.take_scopes();
                         return Err(e);
                     }
                 };
@@ -421,7 +422,7 @@ impl MontyRepl {
                     })),
                 };
 
-                self.globals = vm.take_globals();
+                self.scopes = vm.take_scopes();
 
                 result
             },
@@ -449,19 +450,104 @@ impl MontyRepl {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        probe_scoped_in(
+        self.probe_scoped_in(None, expr, bindings, print)
+    }
+
+    /// Evaluates one expression against a named namespace, leaving the
+    /// selected one alone. `None` means the selected one.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, a rejected
+    /// expression, one that raises, or one that reaches a name the bindings do
+    /// not supply.
+    pub fn probe_scoped_in(
+        &mut self,
+        target: Option<ScopeId>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        let selected = self.scopes.current;
+        let result = probe_scoped_in(
             SessionParts {
                 program: &mut self.program,
                 heap: &mut self.heap,
-                globals: &mut self.globals,
+                scopes: &mut self.scopes,
             },
+            target,
             expr,
             bindings,
             print,
             &self.script_name,
             self.options,
             &self.sources,
-        )
+        );
+        // A probe reads; it does not move the session. Put the selection back
+        // whether it answered or raised.
+        if self.scopes.current != selected {
+            self.scopes = mem::take(&mut self.scopes)
+                .reinstall(selected)
+                .expect("the namespace that was selected is still held");
+        }
+        result
+    }
+
+    /// The namespace a feed or probe that names none acts on.
+    #[must_use]
+    pub fn namespace(&self) -> ScopeId {
+        self.scopes.current
+    }
+
+    /// Adds an empty namespace over this session's heap.
+    ///
+    /// It shares the session's slot map, so a name any namespace has ever
+    /// bound already has a slot here; this one simply binds none of them.
+    ///
+    /// # Errors
+    /// Returns `MontyException` when the session already holds as many
+    /// namespaces as a handle can address.
+    pub fn create_namespace(&mut self) -> Result<ScopeId, MontyException> {
+        self.scopes
+            .create()
+            .ok_or_else(|| MontyException::runtime_error("too many namespaces"))
+    }
+
+    /// Adds a namespace holding the same values as `parent`: a shallow copy.
+    ///
+    /// The new namespace gets its own name-to-value map pointing at the
+    /// parent's live objects. So a rebinding through either is invisible to
+    /// the other, while a mutation of an object both name is seen by both.
+    ///
+    /// # Errors
+    /// Returns `MontyException` when `parent` names no namespace, or when the
+    /// session already holds as many as a handle can address.
+    pub fn dress_namespace(&mut self, parent: ScopeId) -> Result<ScopeId, MontyException> {
+        if self.scopes.get(parent).is_none() {
+            return Err(MontyException::runtime_error("no such namespace"));
+        }
+        self.scopes
+            .dress(parent, &self.heap)
+            .ok_or_else(|| MontyException::runtime_error("too many namespaces"))
+    }
+
+    /// Makes `id` the namespace subsequent feeds and probes act on.
+    ///
+    /// # Errors
+    /// Returns `MontyException` when `id` names no namespace.
+    pub fn select_namespace(&mut self, id: ScopeId) -> Result<(), MontyException> {
+        self.scopes = mem::take(&mut self.scopes)
+            .reinstall(id)
+            .ok_or_else(|| MontyException::runtime_error("no such namespace"))?;
+        Ok(())
+    }
+
+    /// Drops a namespace, releasing every value it alone held.
+    ///
+    /// An object another namespace still names outlives it, which is the
+    /// point of sharing. Returns `false` for a handle naming nothing, and for
+    /// the selected namespace, which a session always needs.
+    pub fn release_namespace(&mut self, id: ScopeId) -> bool {
+        self.scopes.release(id, &mut self.heap)
     }
 
     /// Pins the value bound to `name` and hands back the reference that names
@@ -491,7 +577,7 @@ impl MontyRepl {
             .get_string_id_by_name(name)
             .and_then(|name_id| self.program.globals.get(name_id))?
             .index();
-        if !matches!(self.globals.get(slot), Some(value) if !matches!(value, Value::Undefined)) {
+        if !matches!(self.scopes.globals.get(slot), Some(value) if !matches!(value, Value::Undefined)) {
             return None;
         }
         let assert_repr_max_bytes = self.options.assert_message_annotations.max_bytes();
@@ -500,7 +586,7 @@ impl MontyRepl {
             &mut (&self.program.interns, print),
             |reader, (interns, print)| {
                 let vm = &mut VM::new(
-                    mem::take(&mut self.globals),
+                    mem::take(&mut self.scopes),
                     reader,
                     interns,
                     print.reborrow(),
@@ -530,7 +616,7 @@ impl MontyRepl {
                     // in the heap to pin, and it crosses losslessly by value.
                     ref value => MontyObject::from_value(value, vm),
                 };
-                self.globals = vm.take_globals();
+                self.scopes = vm.take_scopes();
                 Some(exported)
             },
         )
@@ -585,7 +671,7 @@ impl MontyRepl {
             .iter()
             .filter_map(|(ns_id, name_id)| {
                 let idx = ns_id.index();
-                if idx < self.globals.len() && is_callable(&self.globals[idx], &self.heap) {
+                if idx < self.scopes.globals.len() && is_callable(&self.scopes.globals[idx], &self.heap) {
                     Some(self.program.interns.get_str(name_id))
                 } else {
                     None
@@ -602,7 +688,7 @@ impl MontyRepl {
         };
         self.program.globals.get(name_id).is_some_and(|ns_id| {
             let idx = ns_id.index();
-            idx < self.globals.len() && is_callable(&self.globals[idx], &self.heap)
+            idx < self.scopes.globals.len() && is_callable(&self.scopes.globals[idx], &self.heap)
         })
     }
 
@@ -611,10 +697,7 @@ impl MontyRepl {
     /// Newly introduced slots are initialized to `Undefined` to keep slot
     /// alignment with the compiler's global-name map.
     fn ensure_globals_size(&mut self) {
-        let slots = self.program.globals.len();
-        if self.globals.len() < slots {
-            self.globals.resize_with(slots, || Value::Undefined);
-        }
+        self.scopes.ensure_slots(self.program.globals.len());
     }
 
     /// Returns the generated filename for the next interactive snippet.
@@ -650,7 +733,7 @@ impl MontyRepl {
 
 impl Drop for MontyRepl {
     fn drop(&mut self) {
-        self.globals.drain(..).drop_with(&mut self.heap);
+        mem::take(&mut self.scopes).drop_with(&mut self.heap);
     }
 }
 
@@ -781,12 +864,34 @@ impl ReplProgress {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
+        self.probe_in(None, expr, bindings, print)
+    }
+
+    /// Evaluates one expression against a named namespace, whatever the
+    /// progress state. `None` reads the namespace the snippet is suspended in,
+    /// which is what [`probe`](Self::probe) does.
+    ///
+    /// This is what lets a host read one namespace while another is stopped
+    /// mid-call: nothing is running, so every namespace in the session is
+    /// readable, not only the one that asked.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, a rejected
+    /// expression, one that raises, or one reaching a name `bindings` does not
+    /// supply. The progress is untouched either way.
+    pub fn probe_in(
+        &mut self,
+        target: Option<ScopeId>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
         match self {
-            Self::FunctionCall(call) => call.probe(expr, bindings, print),
-            Self::OsCall(call) => call.probe(expr, bindings, print),
-            Self::ResolveFutures(state) => state.probe(expr, bindings, print),
-            Self::NameLookup(lookup) => lookup.probe(expr, bindings, print),
-            Self::Complete { repl, .. } => repl.probe_scoped(expr, bindings, print),
+            Self::FunctionCall(call) => call.probe_in(target, expr, bindings, print),
+            Self::OsCall(call) => call.probe_in(target, expr, bindings, print),
+            Self::ResolveFutures(state) => state.probe_in(target, expr, bindings, print),
+            Self::NameLookup(lookup) => lookup.probe_in(target, expr, bindings, print),
+            Self::Complete { repl, .. } => repl.probe_scoped_in(target, expr, bindings, print),
         }
     }
 
@@ -875,7 +980,23 @@ impl ReplFunctionCall {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        self.snapshot.probe_scoped(expr, bindings, print)
+        self.snapshot.probe_scoped(None, expr, bindings, print)
+    }
+
+    /// Evaluates one expression against a named namespace; `None` is the
+    /// suspended snippet's own. See [`ReplProgress::probe_in`].
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, a rejected
+    /// expression, or one that raises.
+    pub fn probe_in(
+        &mut self,
+        target: Option<ScopeId>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.probe_scoped(target, expr, bindings, print)
     }
 
     /// Extracts the REPL session, discarding the in-flight execution state.
@@ -953,7 +1074,23 @@ impl ReplOsCall {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        self.snapshot.probe_scoped(expr, bindings, print)
+        self.snapshot.probe_scoped(None, expr, bindings, print)
+    }
+
+    /// Evaluates one expression against a named namespace; `None` is the
+    /// suspended snippet's own. See [`ReplProgress::probe_in`].
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, a rejected
+    /// expression, or one that raises.
+    pub fn probe_in(
+        &mut self,
+        target: Option<ScopeId>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.probe_scoped(target, expr, bindings, print)
     }
 
     /// Extracts the REPL session, discarding the in-flight execution state.
@@ -1040,7 +1177,23 @@ impl ReplNameLookup {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        self.snapshot.probe_scoped(expr, bindings, print)
+        self.snapshot.probe_scoped(None, expr, bindings, print)
+    }
+
+    /// Evaluates one expression against a named namespace; `None` is the
+    /// suspended snippet's own. See [`ReplProgress::probe_in`].
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, a rejected
+    /// expression, or one that raises.
+    pub fn probe_in(
+        &mut self,
+        target: Option<ScopeId>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.probe_scoped(target, expr, bindings, print)
     }
 
     /// Extracts the REPL session, discarding the in-flight execution state.
@@ -1089,7 +1242,7 @@ impl ReplNameLookup {
                         let value = match obj.to_value(&mut vm) {
                             Ok(v) => v,
                             Err(e) => {
-                                repl.globals = vm.take_globals();
+                                repl.scopes = vm.take_scopes();
                                 return Err(MontyException::runtime_error(format!(
                                     "invalid name lookup result: {e}"
                                 )));
@@ -1122,7 +1275,7 @@ impl ReplNameLookup {
                 let vm_state = if converted.needs_snapshot() {
                     Some(vm.snapshot())
                 } else {
-                    repl.globals = vm.take_globals();
+                    repl.scopes = vm.take_scopes();
                     None
                 };
                 Ok((converted, vm_state))
@@ -1181,12 +1334,29 @@ impl ReplResolveFutures {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
+        self.probe_in(None, expr, bindings, print)
+    }
+
+    /// Evaluates one expression against a named namespace while this snippet
+    /// stays suspended; `None` means the suspended snippet's own.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, a rejected
+    /// expression, or one that raises.
+    pub fn probe_in(
+        &mut self,
+        target: Option<ScopeId>,
+        expr: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
         probe_scoped_in(
             SessionParts {
                 program: &mut self.repl.program,
                 heap: &mut self.repl.heap,
-                globals: &mut self.vm_state.globals,
+                scopes: &mut self.vm_state.scopes,
             },
+            target,
             expr,
             bindings,
             print,
@@ -1205,7 +1375,7 @@ impl ReplResolveFutures {
     #[must_use]
     pub fn into_repl(self) -> MontyRepl {
         let Self { mut repl, vm_state, .. } = self;
-        repl.globals = vm_state.globals;
+        repl.scopes = vm_state.scopes;
         repl
     }
 
@@ -1254,7 +1424,7 @@ impl ReplResolveFutures {
                 );
 
                 if let Some(call_id) = invalid_call_id {
-                    repl.globals = vm.take_globals();
+                    repl.scopes = vm.take_scopes();
                     return Err(MontyException::runtime_error(format!(
                         "unknown call_id {call_id}, expected one of: {pending_call_ids:?}"
                     )));
@@ -1267,7 +1437,7 @@ impl ReplResolveFutures {
                 let vm_state = if converted.needs_snapshot() {
                     Some(vm.snapshot())
                 } else {
-                    repl.globals = vm.take_globals();
+                    repl.scopes = vm.take_scopes();
                     None
                 };
                 Ok((converted, vm_state))
@@ -1387,7 +1557,7 @@ impl ReplSnapshot {
     /// can be used for further snippets.
     fn into_repl(self) -> MontyRepl {
         let Self { mut repl, vm_state, .. } = self;
-        repl.globals = vm_state.globals;
+        repl.scopes = vm_state.scopes;
         repl
     }
 
@@ -1405,6 +1575,7 @@ impl ReplSnapshot {
     /// is asking, which is the only moment some questions can be asked at all.
     fn probe_scoped(
         &mut self,
+        target: Option<ScopeId>,
         expr: &str,
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
@@ -1413,8 +1584,9 @@ impl ReplSnapshot {
             SessionParts {
                 program: &mut self.repl.program,
                 heap: &mut self.repl.heap,
-                globals: &mut self.vm_state.globals,
+                scopes: &mut self.vm_state.scopes,
             },
+            target,
             expr,
             bindings,
             print,
@@ -1469,7 +1641,7 @@ impl ReplSnapshot {
                 let vm_state = if converted.needs_snapshot() {
                     Some(vm.snapshot())
                 } else {
-                    repl.globals = vm.take_globals();
+                    repl.scopes = vm.take_scopes();
                     None
                 };
                 (converted, vm_state)
@@ -1516,7 +1688,7 @@ fn inject_inputs_into_vm(
 struct SessionParts<'a> {
     program: &'a mut Program,
     heap: &'a mut Heap,
-    globals: &'a mut Vec<Value>,
+    scopes: &'a mut Scopes,
 }
 
 /// Evaluates one expression against `parts`, with `bindings` visible to it and
@@ -1535,6 +1707,7 @@ struct SessionParts<'a> {
 /// nowhere to go. Anything the expression needs is a binding.
 fn probe_scoped_in(
     parts: SessionParts<'_>,
+    target: Option<ScopeId>,
     expr: &str,
     bindings: Vec<(String, MontyObject)>,
     print: PrintWriter<'_>,
@@ -1542,18 +1715,25 @@ fn probe_scoped_in(
     options: CompileOptions,
     sources: &AHashMap<String, String>,
 ) -> Result<MontyObject, MontyException> {
-    let SessionParts { program, heap, globals } = parts;
+    let SessionParts { program, heap, scopes } = parts;
     check_probe_expression(expr, script_name)?;
+    // Move the named namespace into place before anything compiles, so a
+    // handle naming nothing fails before the program has been extended.
+    if let Some(target) = target {
+        *scopes = mem::take(scopes)
+            .reinstall(target)
+            .ok_or_else(|| MontyException::runtime_error("no such namespace"))?;
+    }
     let (binding_names, binding_values): (Vec<_>, Vec<_>) = bindings.into_iter().unzip();
     let executor = Executor::new_repl_snippet(expr.to_owned(), script_name, program, &binding_names, options)?;
-    globals.resize_with(globals.len().max(program.globals.len()), || Value::Undefined);
+    scopes.ensure_slots(program.globals.len());
 
     let result = HeapReader::with(
         heap,
         &mut (&*program, &executor, print),
         |reader, (program, executor, print)| {
             let vm = &mut VM::new(
-                mem::take(globals),
+                mem::take(scopes),
                 reader,
                 &program.interns,
                 print.reborrow(),
@@ -1579,7 +1759,7 @@ fn probe_scoped_in(
                 let injected = mem::replace(&mut vm.globals[slot.index()], old);
                 injected.drop_with(vm);
             }
-            *globals = vm.take_globals();
+            *scopes = vm.take_scopes();
             result
         },
     );
@@ -1717,7 +1897,7 @@ fn convert_args(args: Vec<MontyObject>, vm: &mut VM<'_>) -> Result<ArgValues, Mo
 /// which are callable but not what a host means by "a function it can invoke".
 fn is_callable(value: &Value, heap: &Heap) -> bool {
     match value {
-        Value::Builtin(_) | Value::ModuleFunction(_) | Value::DefFunction(_) => true,
+        Value::Builtin(_) | Value::ModuleFunction(_) | Value::DefFunction(..) => true,
         // A `Class`, `NamedTupleClass`, or `BoundMethod` is also callable but is
         // not a function, so keep only the function-like heap variants.
         Value::Ref(id) => matches!(

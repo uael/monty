@@ -31,3 +31,33 @@ impl NamespaceId {
         self.0.into()
     }
 }
+
+/// Identifies one global namespace among the several a session can hold over
+/// one heap.
+///
+/// Distinct from [`NamespaceId`], which is a slot *within* a namespace. Every
+/// namespace over a session's heap shares the program's slot map, so
+/// `NamespaceId(k)` names the same variable in all of them and `ScopeId` says
+/// which of them is being read or written. A namespace that never bound slot
+/// `k` holds `Undefined` there, which reads as the `NameError` it should.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScopeId(u32);
+
+impl ScopeId {
+    /// The namespace a session starts with, and the one every API that does
+    /// not name a namespace acts on.
+    pub(crate) const ROOT: Self = Self(0);
+
+    /// Builds a handle from a raw index. Only the owning collection should
+    /// mint these; a handle for a namespace that does not exist is refused
+    /// where it is used, not here.
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index).ok().map(Self)
+    }
+
+    /// The index this handle addresses.
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}

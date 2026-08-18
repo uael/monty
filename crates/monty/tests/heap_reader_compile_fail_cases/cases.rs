@@ -152,7 +152,15 @@ fn smuggle_vm(heap: &mut Heap, interns: &crate::intern::Interns) -> VM<'static> 
     HeapReader::with(
         heap,
         &mut (interns, monty_types::PrintWriter::Disabled),
-        |reader, (interns, print)| VM::new(Vec::new(), reader, *interns, print.reborrow(), 120),
+        |reader, (interns, print)| {
+            VM::new(
+                crate::namespaces::Scopes::new(),
+                reader,
+                *interns,
+                print.reborrow(),
+                120,
+            )
+        },
     )
 }
 

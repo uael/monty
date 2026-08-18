@@ -1097,7 +1097,7 @@ mod tests {
 
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let mut vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -1136,7 +1136,7 @@ mod tests {
 
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let mut vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -1172,7 +1172,7 @@ mod tests {
 
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let mut vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,

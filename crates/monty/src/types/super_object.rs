@@ -223,7 +223,7 @@ pub(crate) fn defining_class(instance_id: HeapId, func_id: FunctionId, vm: &VM<'
 /// descriptor wrappers a method can be stored behind.
 fn function_id_of(value: &Value, vm: &VM<'_>) -> Option<FunctionId> {
     match value {
-        Value::DefFunction(id) => Some(*id),
+        Value::DefFunction(id, _) => Some(*id),
         Value::Ref(id) => match vm.heap.get(*id) {
             HeapData::Closure(closure) => Some(closure.func_id),
             HeapData::FunctionDefaults(fd) => Some(fd.func_id),

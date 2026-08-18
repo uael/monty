@@ -25,6 +25,7 @@ use crate::{
     generator::{Generator, GeneratorState},
     heap::{ContainsHeap, DropWithContext, HeapData, HeapId, HeapReadOutput},
     intern::FunctionId,
+    namespace::ScopeId,
     types::PyTrait,
     value::Value,
 };
@@ -243,11 +244,12 @@ impl VM<'_> {
         let HeapReadOutput::Generator(mut generator) = self.heap.read(gen_id) else {
             unreachable!("splice_in called with a non-generator heap id")
         };
-        let (func_id, ip, instruction_ip, mut stack, mut exception_stack) = {
+        let (func_id, scope, ip, instruction_ip, mut stack, mut exception_stack) = {
             let generator = generator.get_mut(self.heap);
             generator.state = GeneratorState::Running;
             (
                 generator.func_id,
+                generator.scope,
                 generator.ip,
                 generator.instruction_ip,
                 mem::take(&mut generator.stack),
@@ -261,11 +263,20 @@ impl VM<'_> {
 
         let func = self.interns.get_function(func_id);
         let locals_count = u16::try_from(func.namespace_size).expect("generator namespace size exceeds u16");
-        let mut frame = CallFrame::new_function(&func.code, stack_base, locals_count, exc_base, func_id, call_offset);
+        let mut frame = CallFrame::new_function(
+            &func.code,
+            stack_base,
+            locals_count,
+            exc_base,
+            func_id,
+            call_offset,
+            scope,
+        );
         frame.ip = ip;
         // A native step must stop unwinding at the generator boundary rather
         // than tearing into the Rust consumer's caller.
         frame.should_return = matches!(mode, ResumeMode::Native);
+        self.enter_scope(scope);
         self.frames.push(frame);
 
         self.instruction_ip = instruction_ip;
@@ -761,10 +772,11 @@ pub(crate) fn stop_iteration_with(value: Value, vm: &mut VM<'_>) -> RunError {
 /// binding the call's arguments.
 pub(crate) fn allocate_generator(
     func_id: FunctionId,
+    scope: ScopeId,
     namespace: Vec<Value>,
     is_async: bool,
     vm: &mut VM<'_>,
 ) -> Value {
-    let generator = Generator::new(func_id, namespace, is_async);
+    let generator = Generator::new(func_id, scope, namespace, is_async);
     Value::Ref(vm.heap.allocate(HeapData::Generator(Box::new(generator))))
 }

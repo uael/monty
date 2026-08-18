@@ -1229,7 +1229,7 @@ fn call_member_bound(
 /// unbound.
 fn is_method_value(value: &Value, vm: &VM<'_>) -> bool {
     match value {
-        Value::DefFunction(_) => true,
+        Value::DefFunction(..) => true,
         // The default methods a natively provided base contributes stand in for
         // functions CPython writes in Python, so they bind like one.
         Value::ModuleFunction(func) => func.binds_as_method(),

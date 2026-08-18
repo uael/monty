@@ -22,14 +22,14 @@ use crate::{
         collections::defaultdict::defaultdict_missing,
         dataclasses::{DataclassField, DataclassParams},
     },
+    namespace::ScopeId,
     types::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
         FrozenSet, GenericAlias, HostRef, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt,
-        MethodDescriptor,
-        Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range, RangeIterator, ReMatch,
-        RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, Tuple, TupleIterator,
-        Type, TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive,
+        MethodDescriptor, Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range,
+        RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress,
+        Template, Tuple, TupleIterator, Type, TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive,
         callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, generic_alias::class_subscript,
         instance_subscript, list::ListIterator, str::allocate_string, timedelta, timezone,
     },
@@ -481,6 +481,10 @@ impl Deref for CellValue {
 pub(crate) struct Closure {
     /// The function definition being captured.
     pub func_id: FunctionId,
+    /// The global namespace the `def` ran in, which its body resolves globals
+    /// against wherever it is later called.
+    #[serde(default)]
+    pub scope: ScopeId,
     /// Captured cells from enclosing scopes.
     pub cells: Vec<HeapId>,
     /// Evaluated default parameter values (if any).
@@ -496,6 +500,9 @@ pub(crate) struct Closure {
 pub(crate) struct FunctionDefaults {
     /// The function definition being captured.
     pub func_id: FunctionId,
+    /// The global namespace the `def` ran in. See [`Closure::scope`].
+    #[serde(default)]
+    pub scope: ScopeId,
     /// Evaluated default parameter values (if any).
     pub defaults: Vec<Value>,
 }

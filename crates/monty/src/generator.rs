@@ -15,6 +15,7 @@ use std::iter;
 use crate::{
     heap::{ContainsHeap, DropWithContext, HeapId, HeapItem},
     intern::FunctionId,
+    namespace::ScopeId,
     types::Type,
     value::Value,
 };
@@ -51,6 +52,10 @@ pub(crate) enum GeneratorState {
 pub(crate) struct Generator {
     /// Function whose body this generator runs.
     pub func_id: FunctionId,
+    /// The global namespace the `def` ran in, which each step resolves its
+    /// globals against however far the resuming code is from that namespace.
+    #[serde(default)]
+    pub scope: ScopeId,
     /// Lifecycle phase; see [`GeneratorState`].
     pub state: GeneratorState,
     /// Bytecode offset to resume at, `0` before the first step.
@@ -80,9 +85,10 @@ pub(crate) struct Generator {
 impl Generator {
     /// Creates an unstarted generator over `namespace`, the bound-argument
     /// frame region built by the caller.
-    pub fn new(func_id: FunctionId, namespace: Vec<Value>, is_async: bool) -> Self {
+    pub fn new(func_id: FunctionId, scope: ScopeId, namespace: Vec<Value>, is_async: bool) -> Self {
         Self {
             func_id,
+            scope,
             state: GeneratorState::Created,
             ip: 0,
             instruction_ip: 0,

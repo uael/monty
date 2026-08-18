@@ -22,6 +22,7 @@ use crate::{
     identity::Identity,
     intern::{BytesId, FunctionId, Interns, LongIntId, StaticStrings, StringId},
     modules::{ModuleFunctions, dataclasses},
+    namespace::ScopeId,
     resource_checks::check_pow_size,
     types::{
         Bytes, BytesIterator, CmpOrder, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
@@ -79,8 +80,10 @@ pub(crate) enum Value {
     /// A function from a module (not a global builtin).
     /// Module functions require importing a module to access (e.g., `asyncio.gather`).
     ModuleFunction(ModuleFunctions),
-    /// A function defined in the module (not a closure, doesn't capture any variables)
-    DefFunction(FunctionId),
+    /// A function defined in the module (not a closure, doesn't capture any
+    /// variables), and the global namespace it was defined in — which is the
+    /// one its body resolves globals against, wherever it is called from.
+    DefFunction(FunctionId, ScopeId),
     /// A marker value representing special objects like sys.stdout/stderr.
     /// These exist but have minimal functionality in the sandboxed environment.
     Marker(Marker),
@@ -257,7 +260,7 @@ impl<'h> PyTrait<'h> for Value {
             Self::InternBytes(_) => Type::Bytes,
             Self::Builtin(c) => c.py_type(),
             Self::ModuleFunction(_) => Type::BuiltinFunction,
-            Self::DefFunction(_) => Type::Function,
+            Self::DefFunction(..) => Type::Function,
             Self::Marker(m) => m.py_type(),
             Self::Property(_) => Type::Property,
             Self::Ref(id) => vm.heap.read(*id).py_type(vm),
@@ -310,8 +313,8 @@ impl<'h> PyTrait<'h> for Value {
                 Self::ModuleFunction(o) => Some(mf == o),
                 _ => None,
             }),
-            Self::DefFunction(f) => Ok(match other {
-                Self::DefFunction(o) => Some(f == o),
+            Self::DefFunction(f, scope) => Ok(match other {
+                Self::DefFunction(o, other_scope) => Some(f == o && scope == other_scope),
                 _ => None,
             }),
             Self::Marker(m) => Ok(match other {
@@ -465,7 +468,7 @@ impl<'h> PyTrait<'h> for Value {
             // InternLongInt is always truthy (if it were zero, it would fit in i64).
             Self::InternLongInt(_) => Ok(true),
             Self::Builtin(_) | Self::ModuleFunction(_) => Ok(true),
-            Self::DefFunction(_) => Ok(true),
+            Self::DefFunction(..) => Ok(true),
             Self::Marker(_) | Self::Property(_) => Ok(true),
             Self::InternString(string_id) => Ok(!vm.interns.get_str(*string_id).is_empty()),
             Self::InternBytes(bytes_id) => Ok(!vm.interns.get_bytes(*bytes_id).is_empty()),
@@ -498,7 +501,7 @@ impl<'h> PyTrait<'h> for Value {
                 defer_drop!(py_id, vm);
                 Ok(mf.py_repr_fmt(f, PythonIdDisplay::new(py_id, vm.heap))?)
             }
-            Self::DefFunction(f_id) => {
+            Self::DefFunction(f_id, _) => {
                 let py_id = self.id().into_value(vm.heap);
                 defer_drop!(py_id, vm);
                 Ok(interns
@@ -1314,7 +1317,7 @@ impl Value {
             Self::InternString(_) => Type::Str,
             Self::InternBytes(_) => Type::Bytes,
             Self::Builtin(_) => Type::BuiltinFunction,
-            Self::ModuleFunction(_) | Self::DefFunction(_) => Type::Function,
+            Self::ModuleFunction(_) | Self::DefFunction(..) => Type::Function,
             Self::Marker(_) => Type::SpecialForm,
             Self::Property(_) => Type::Property,
             Self::Ref(_) => Type::NoneType, // callers should resolve Ref via HeapData::py_type()
@@ -1535,7 +1538,7 @@ impl Value {
             Self::Builtin(b) => Ok(Some(hash_one(b))),
             Self::ModuleFunction(mf) => Ok(Some(hash_one(mf))),
             // Hash functions based on function ID
-            Self::DefFunction(f_id) => Ok(Some(hash_one(f_id))),
+            Self::DefFunction(f_id, scope) => Ok(Some(hash_one((f_id, scope)))),
             // Markers are hashable based on their discriminant
             Self::Marker(m) => Ok(Some(hash_one(m))),
             // Properties are hashable based on their OS function discriminant
@@ -1924,7 +1927,7 @@ impl Value {
             Self::Float(v) => Self::Float(*v),
             Self::Builtin(b) => Self::Builtin(*b),
             Self::ModuleFunction(mf) => Self::ModuleFunction(*mf),
-            Self::DefFunction(f) => Self::DefFunction(*f),
+            Self::DefFunction(f, scope) => Self::DefFunction(*f, *scope),
             Self::InternString(s) => Self::InternString(*s),
             Self::InternBytes(b) => Self::InternBytes(*b),
             Self::InternLongInt(bi) => Self::InternLongInt(*bi),
@@ -2059,7 +2062,7 @@ impl Value {
     /// `debug_assert!`s in dispatch's "not callable" arms.
     pub(crate) fn is_callable(&self, heap: &Heap) -> bool {
         match self {
-            Self::Builtin(_) | Self::ModuleFunction(_) | Self::DefFunction(_) => true,
+            Self::Builtin(_) | Self::ModuleFunction(_) | Self::DefFunction(..) => true,
             Self::Ref(id) => heap.get(*id).is_callable(),
             _ => false,
         }
@@ -2514,7 +2517,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2535,7 +2538,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2558,7 +2561,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2581,7 +2584,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2603,7 +2606,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2624,7 +2627,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2645,7 +2648,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2667,7 +2670,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,
@@ -2689,7 +2692,7 @@ mod tests {
         let mut interns = create_test_interns();
         let result = HeapReader::with(&mut heap, &mut interns, |reader, interns| {
             let vm = VM::new(
-                Vec::new(),
+                crate::namespaces::Scopes::new(),
                 reader,
                 interns,
                 PrintWriter::Disabled,

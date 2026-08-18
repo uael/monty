@@ -177,6 +177,11 @@ pub(crate) struct SerializedTaskFrame {
     pub stack_base: usize,
     /// Number of local variable slots (0 for module-level frames).
     pub locals_count: u16,
+    /// Which global namespace this frame resolves its globals against, so a
+    /// task parked in one namespace resumes in it however many tasks in other
+    /// namespaces ran in between. See `CallFrame.scope`.
+    #[serde(default)]
+    pub scope: crate::namespace::ScopeId,
     /// Base index into the VM-wide `exception_stack` for this frame.
     /// See `CallFrame.exception_stack_base`.
     pub exception_stack_base: usize,

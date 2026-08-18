@@ -21,6 +21,7 @@ mod intern;
 mod modules;
 mod name_map;
 mod namespace;
+mod namespaces;
 mod object_bridge;
 mod os_dispatch;
 mod parse;
@@ -43,6 +44,7 @@ mod value;
 pub use crate::run::RefCountOutput;
 pub use crate::{
     dump_format::{DUMP_VERSION, Dump, DumpError, Session, SessionRef, dump},
+    namespace::ScopeId,
     parse::parse_facts,
     repl::{
         MontyRepl, ReplContinuationMode, ReplFunctionCall, ReplNameLookup, ReplOsCall, ReplProgress,

@@ -15,6 +15,7 @@ use crate::{
     exception_private::RunError,
     heap::{ContainsHeap, DropWithContext, HeapId},
     intern::FunctionId,
+    namespace::ScopeId,
     value::{EitherStr, Value},
 };
 
@@ -104,6 +105,10 @@ pub(crate) enum CoroutineState {
 pub(crate) struct Coroutine {
     /// The async function to execute.
     pub func_id: FunctionId,
+    /// The global namespace the `async def` ran in, which its body resolves
+    /// globals against whichever task ends up driving it.
+    #[serde(default)]
+    pub scope: ScopeId,
     /// Pre-bound namespace values (sized to function namespace).
     /// Contains bound parameters, captured cells, and uninitialized locals.
     pub namespace: Vec<Value>,
@@ -117,9 +122,10 @@ impl Coroutine {
     /// # Arguments
     /// * `func_id` - The async function to execute
     /// * `namespace` - Pre-bound namespace with parameters and captured variables
-    pub fn new(func_id: FunctionId, namespace: Vec<Value>) -> Self {
+    pub fn new(func_id: FunctionId, scope: ScopeId, namespace: Vec<Value>) -> Self {
         Self {
             func_id,
+            scope,
             namespace,
             state: CoroutineState::New,
         }

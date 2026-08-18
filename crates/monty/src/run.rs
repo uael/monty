@@ -14,13 +14,13 @@ use crate::{
     heap::{DropWithContext, Heap, HeapReader},
     intern::{InternerBuilder, Interns},
     namespace::NamespaceId,
+    namespaces::Scopes,
     object_bridge::MontyObjectExt,
     parse::{CodeRange, parse, parse_with_interner},
     prepare::{prepare, prepare_with_existing_names},
     program::Program,
     run_progress::{RunProgress, build_run_progress, check_snapshot_from_converted, convert_frame_exit},
     types::str::StringRepr,
-    value::Value,
 };
 
 /// Primary interface for running Monty code.
@@ -538,13 +538,16 @@ impl Executor {
     }
 }
 
-/// Creates an empty globals vector with one `Undefined` per slot the program has.
+/// The namespaces a one-shot run starts from: one, with an `Undefined` per
+/// slot the program has.
 ///
-/// Used to initialize global storage before input population. The VM is created
-/// with these empty globals, then [`populate_inputs`] fills the input slots
-/// while the VM is alive.
-pub(crate) fn empty_globals(program: &Program) -> Vec<Value> {
-    (0..program.globals.len()).map(|_| Value::Undefined).collect()
+/// A `MontyRun` compiles once and executes once, so it never needs a second
+/// namespace; the collection exists so that path and a session's share one VM.
+/// [`populate_inputs`] fills the input slots afterwards, with the VM alive.
+pub(crate) fn empty_globals(program: &Program) -> Scopes {
+    let mut scopes = Scopes::new();
+    scopes.ensure_slots(program.globals.len());
+    scopes
 }
 
 /// Converts `MontyObject` inputs to `Value`s and writes them into the VM's globals.

@@ -21,6 +21,7 @@ use crate::{
     heap_data::CellValue,
     intern::{FunctionId, StaticStrings, StringId},
     modules::dataclasses,
+    namespace::ScopeId,
     os_dispatch::{PendingOsEffect, release_pending_effect},
     types::{
         Dict, Instance, PyTrait, Type, attrgetter,
@@ -485,9 +486,9 @@ impl VM<'_> {
         match callable {
             Value::Builtin(builtin) => builtin.call(self, args),
             Value::ModuleFunction(mf) => mf.call(self, args),
-            Value::DefFunction(func_id) => {
+            Value::DefFunction(func_id, scope) => {
                 // Defined function without defaults or captured variables
-                self.call_def_function(*func_id, &[], &[], args)
+                self.call_def_function(*func_id, *scope, &[], &[], args)
             }
             Value::Ref(heap_id) => {
                 // Could be a closure or function with defaults - check heap
@@ -514,7 +515,7 @@ impl VM<'_> {
         // its captured `self`. Both are dispatched before the closure/defaults
         // path because they don't fit the `(func_id, cells, defaults)` shape.
 
-        let (func_id, cells, defaults) = match self.heap.get(heap_id) {
+        let (func_id, scope, cells, defaults) = match self.heap.get(heap_id) {
             HeapData::Class(_) => return self.instantiate_class(heap_id, args),
             // Calling a host object is the host's own `__call__`.
             HeapData::HostRef(_) => return Ok(host_ref_call(heap_id, args, self)),
@@ -534,11 +535,11 @@ impl VM<'_> {
             HeapData::Closure(closure) => {
                 let cloned_cells = closure.cells.clone();
                 let cloned_defaults: Vec<Value> = closure.defaults.iter().map(|v| v.clone_with_heap(self)).collect();
-                (closure.func_id, cloned_cells, cloned_defaults)
+                (closure.func_id, closure.scope, cloned_cells, cloned_defaults)
             }
             HeapData::FunctionDefaults(fd) => {
                 let cloned_defaults: Vec<Value> = fd.defaults.iter().map(|v| v.clone_with_heap(self)).collect();
-                (fd.func_id, Vec::new(), cloned_defaults)
+                (fd.func_id, fd.scope, Vec::new(), cloned_defaults)
             }
             HeapData::ExtFunction(function) => {
                 let name = function.clone_name();
@@ -572,7 +573,7 @@ impl VM<'_> {
 
         let this = self;
         defer_drop!(defaults, this);
-        this.call_def_function(func_id, &cells, defaults, args)
+        this.call_def_function(func_id, scope, &cells, defaults, args)
     }
 
     /// Calls a function with unpacked args tuple and optional kwargs dict.
@@ -778,6 +779,7 @@ impl VM<'_> {
     fn call_def_function(
         &mut self,
         func_id: FunctionId,
+        scope: ScopeId,
         cells: &[HeapId],
         defaults: &[Value],
         args: ArgValues,
@@ -785,11 +787,11 @@ impl VM<'_> {
         let func = self.interns.get_function(func_id);
 
         if func.is_generator {
-            self.create_generator(func_id, cells, defaults, args)
+            self.create_generator(func_id, scope, cells, defaults, args)
         } else if func.is_async {
-            self.create_coroutine(func_id, cells, defaults, args)
+            self.create_coroutine(func_id, scope, cells, defaults, args)
         } else {
-            self.call_sync_function(func_id, cells, defaults, args)
+            self.call_sync_function(func_id, scope, cells, defaults, args)
         }
     }
 
@@ -801,6 +803,7 @@ impl VM<'_> {
     fn create_generator(
         &mut self,
         func_id: FunctionId,
+        scope: ScopeId,
         cells: &[HeapId],
         defaults: &[Value],
         args: ArgValues,
@@ -817,7 +820,7 @@ impl VM<'_> {
 
         let (namespace, this) = namespace_guard.into_parts();
         Ok(CallResult::Value(allocate_generator(
-            func_id, namespace, is_async, this,
+            func_id, scope, namespace, is_async, this,
         )))
     }
 
@@ -827,6 +830,7 @@ impl VM<'_> {
     fn create_coroutine(
         &mut self,
         func_id: FunctionId,
+        scope: ScopeId,
         cells: &[HeapId],
         defaults: &[Value],
         args: ArgValues,
@@ -846,7 +850,7 @@ impl VM<'_> {
 
         // 4. Create Coroutine on heap
         let (namespace, this) = namespace_guard.into_parts();
-        let coroutine = Coroutine::new(func_id, namespace);
+        let coroutine = Coroutine::new(func_id, scope, namespace);
         let coroutine_id = this.heap.allocate(HeapData::Coroutine(coroutine));
 
         Ok(CallResult::Value(Value::Ref(coroutine_id)))
@@ -897,6 +901,7 @@ impl VM<'_> {
     fn call_sync_function(
         &mut self,
         func_id: FunctionId,
+        scope: ScopeId,
         cells: &[HeapId],
         defaults: &[Value],
         args: ArgValues,
@@ -945,6 +950,7 @@ impl VM<'_> {
             exc_stack_base,
             func_id,
             call_offset,
+            scope,
         ))?;
 
         Ok(CallResult::FramePushed)
@@ -1090,7 +1096,7 @@ impl VM<'_> {
     /// in CPython and therefore bind an instance when looked up as a class member.
     fn is_function_value(&self, value: &Value) -> bool {
         match value {
-            Value::DefFunction(_) => true,
+            Value::DefFunction(..) => true,
             Value::Ref(id) => matches!(self.heap.get(*id), HeapData::Closure(_) | HeapData::FunctionDefaults(_)),
             _ => false,
         }
@@ -1103,7 +1109,7 @@ impl VM<'_> {
     /// to decide whether `__init__` can run as a suspendable initializer frame.
     fn is_plain_sync_function(&self, value: &Value) -> bool {
         match value {
-            Value::DefFunction(func_id) => !self.interns.get_function(*func_id).is_async,
+            Value::DefFunction(func_id, _) => !self.interns.get_function(*func_id).is_async,
             Value::Ref(id) => match self.heap.get(*id) {
                 HeapData::Closure(closure) => !self.interns.get_function(closure.func_id).is_async,
                 HeapData::FunctionDefaults(fd) => !self.interns.get_function(fd.func_id).is_async,

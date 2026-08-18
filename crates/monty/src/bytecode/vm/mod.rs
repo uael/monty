@@ -41,6 +41,8 @@ use crate::{
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
     modules::{StandardLib, json::JsonStringCache, re::RePatternCache},
+    namespace::ScopeId,
+    namespaces::Scopes,
     object_bridge::MontyObjectExt,
     os_dispatch::{PendingOsEffect, listdir_names, release_pending_effect},
     parse::CodeRange,
@@ -368,6 +370,13 @@ pub struct CallFrame<'code> {
     /// For function frames, this equals `func.namespace_size`.
     locals_count: u16,
 
+    /// The global namespace this frame's `LoadGlobal`/`StoreGlobal` resolve
+    /// against: the one the function was defined in, not the one that called
+    /// it. Carried on the frame because that is what makes scoping lexical —
+    /// a child namespace rebinding a name does not change what a function the
+    /// parent defined reads, which is the rebinding that must not cross.
+    scope: ScopeId,
+
     /// Base of this frame's entries in the VM-wide `exception_stack`.
     /// Recorded region depths are relative to this index, keeping caller
     /// exceptions intact when abandoned handlers are unwound.
@@ -400,12 +409,13 @@ impl<'code> CallFrame<'code> {
     ///
     /// Module frames have `locals_count = 0` because module-level variables
     /// are stored in the VM's `globals` vec, not in the stack.
-    pub fn new_module(code: &'code Code, exception_stack_base: usize) -> Self {
+    pub fn new_module(code: &'code Code, exception_stack_base: usize, scope: ScopeId) -> Self {
         Self {
             code,
             ip: 0,
             stack_base: 0,
             locals_count: 0,
+            scope,
             exception_stack_base,
             function_id: None,
             call_offset: None,
@@ -429,12 +439,14 @@ impl<'code> CallFrame<'code> {
         exception_stack_base: usize,
         function_id: FunctionId,
         call_offset: Option<u32>,
+        scope: ScopeId,
     ) -> Self {
         Self {
             code,
             ip: 0,
             stack_base,
             locals_count,
+            scope,
             exception_stack_base,
             function_id: Some(function_id),
             call_offset,
@@ -565,6 +577,11 @@ pub struct SerializedFrame {
     /// Number of local variable slots (0 for module-level frames).
     locals_count: u16,
 
+    /// Which global namespace this frame resolves its globals against. See
+    /// `CallFrame.scope`.
+    #[serde(default)]
+    scope: ScopeId,
+
     /// Base index into the VM-wide `exception_stack` for this frame.
     /// See `CallFrame.exception_stack_base`.
     exception_stack_base: usize,
@@ -595,6 +612,7 @@ impl CallFrame<'_> {
             ip: self.ip,
             stack_base: self.stack_base,
             locals_count: self.locals_count,
+            scope: self.scope,
             exception_stack_base: self.exception_stack_base,
             call_offset: self.call_offset,
             is_initializer: self.is_initializer,
@@ -621,8 +639,8 @@ pub struct VMSnapshot {
     /// with operands pushed above.
     pub(crate) stack: Vec<Value>,
 
-    /// Module-level (global) variable storage.
-    pub(crate) globals: Vec<Value>,
+    /// Every global namespace, and which one was installed.
+    pub(crate) scopes: Scopes,
 
     /// Call frames (serializable form — stores FunctionId, not &Code).
     frames: Vec<SerializedFrame>,
@@ -669,12 +687,26 @@ pub struct VM<'h> {
     /// because globals are stored separately.
     pub(crate) stack: Vec<Value>,
 
-    /// Module-level (global) variable storage.
+    /// The installed namespace's variable storage.
     ///
     /// Indexed by slot number from `LoadGlobal`/`StoreGlobal` opcodes.
     /// Separated from the stack because globals persist across function calls
-    /// and are accessed via dedicated opcodes.
+    /// and are accessed via dedicated opcodes, and held flat rather than
+    /// through `parked` so those opcodes stay a single index.
     pub(crate) globals: Vec<Value>,
+
+    /// Every namespace this VM is not currently running in, with a hole where
+    /// the installed one was taken from.
+    pub(crate) parked: crate::namespaces::Namespaces,
+
+    /// Which namespace `globals` holds.
+    ///
+    /// Equal to the top frame's `scope` at every point a frame is running: a
+    /// call into a function defined elsewhere swaps the vectors on the way in
+    /// and back on the way out, which is what makes a global lookup resolve
+    /// against the namespace the function was defined in rather than the one
+    /// that called it.
+    pub(crate) scope: ScopeId,
 
     /// Call stack — function frames (each frame has its own IP).
     frames: Vec<CallFrame<'h>>,
@@ -838,15 +870,22 @@ pub struct VM<'h> {
 impl<'h> VM<'h> {
     /// Creates a new VM with the given runtime context.
     pub fn new(
-        globals: Vec<Value>,
+        scopes: Scopes,
         heap: &'h mut HeapReader<'h>,
         interns: &'h Interns,
         print_writer: PrintWriter<'h>,
         assert_repr_max_bytes: u32,
     ) -> Self {
+        let Scopes {
+            globals,
+            parked,
+            current,
+        } = scopes;
         Self {
             stack: Vec::with_capacity(64),
             globals,
+            parked,
+            scope: current,
             frames: Vec::with_capacity(16),
             heap,
             interns,
@@ -907,6 +946,7 @@ impl<'h> VM<'h> {
                     ip: sf.ip,
                     stack_base: sf.stack_base,
                     locals_count: sf.locals_count,
+                    scope: sf.scope,
                     exception_stack_base: sf.exception_stack_base,
                     function_id: sf.function_id,
                     call_offset: sf.call_offset,
@@ -921,9 +961,16 @@ impl<'h> VM<'h> {
         // non-root frame, so it must start matching the restored frame count.
         let current_frame_depth = frames.len().saturating_sub(1); // root frame doesn't contribute to depth
 
+        let Scopes {
+            globals,
+            parked,
+            current,
+        } = snapshot.scopes;
         Self {
             stack: snapshot.stack,
-            globals: snapshot.globals,
+            globals,
+            parked,
+            scope: current,
             frames,
             heap,
             interns,
@@ -979,7 +1026,11 @@ impl<'h> VM<'h> {
             // Move values directly — no clone, no refcount increment needed
             // (the VM owned them, now the snapshot owns them)
             stack: mem::take(&mut self.stack),
-            globals: mem::take(&mut self.globals),
+            scopes: Scopes {
+                globals: mem::take(&mut self.globals),
+                parked: mem::take(&mut self.parked),
+                current: self.scope,
+            },
             frames: self.frames.iter().map(CallFrame::serialize).collect(),
             exception_stack: mem::take(&mut self.exception_stack),
             instruction_ip: self.instruction_ip,
@@ -994,12 +1045,13 @@ impl<'h> VM<'h> {
         // Store module code for restoring main task frames during task switching
         self.module_code = Some(code);
         let exc_stack_base = self.exception_stack.len();
+        let scope = self.scope;
         // Module frames have locals_count = 0 (globals live in self.globals)
         // and no frame-level comprehension region — comp targets are pushed
         // onto the operand stack at each comprehension's entry and popped
         // at its exit, so they share the same address space as ordinary
         // operand values.
-        self.push_frame(CallFrame::new_module(code, exc_stack_base))?;
+        self.push_frame(CallFrame::new_module(code, exc_stack_base, scope))?;
         self.run_external()
     }
 
@@ -1024,13 +1076,36 @@ impl<'h> VM<'h> {
         self.scheduler.root_ids()
     }
 
-    /// Takes ownership of the globals vector, replacing it with an empty vec.
+    /// Takes ownership of every namespace, leaving the VM with none.
     ///
-    /// Used by the REPL to reclaim globals after VM execution completes.
-    /// Must be called before the VM is dropped, since `Drop` will clean up
-    /// any remaining globals with `drop_with`.
-    pub fn take_globals(&mut self) -> Vec<Value> {
-        mem::take(&mut self.globals)
+    /// Used by the session to reclaim its namespaces after execution
+    /// completes. Must be called before the VM is dropped, since `Drop` will
+    /// otherwise release them all with `drop_with`.
+    pub fn take_scopes(&mut self) -> Scopes {
+        Scopes {
+            globals: mem::take(&mut self.globals),
+            parked: mem::take(&mut self.parked),
+            current: self.scope,
+        }
+    }
+
+    /// Installs `scope`, parking whatever was installed before it.
+    ///
+    /// A no-op when it is already installed, which is every call that does not
+    /// cross a namespace boundary. A `scope` this VM does not hold leaves the
+    /// installed namespace alone: the frame then resolves its globals against
+    /// the caller's namespace, which is wrong but bounded, and cannot happen
+    /// for a function value the session itself minted.
+    pub(super) fn enter_scope(&mut self, scope: ScopeId) {
+        if scope == self.scope {
+            return;
+        }
+        let Some(incoming) = self.parked.take(scope) else {
+            return;
+        };
+        let outgoing = mem::replace(&mut self.globals, incoming);
+        self.parked.put(self.scope, outgoing);
+        self.scope = scope;
     }
 
     /// Allocates a new `CallId` for an external function call.
@@ -1780,18 +1855,21 @@ impl<'h> VM<'h> {
                     let (func_idx, defaults_count) = cached_frame.fetch_u16_u8();
                     let func_id = FunctionId::from_index(func_idx);
                     let defaults_count = defaults_count as usize;
+                    let scope = self.scope;
 
                     if defaults_count == 0 {
                         // No defaults - use inline Value::Function (no heap allocation)
-                        self.push(Value::DefFunction(func_id));
+                        self.push(Value::DefFunction(func_id, self.scope));
                     } else {
                         // Pop default values from stack (drain maintains order: first pushed = first in vec)
                         let defaults = self.pop_n(defaults_count);
 
                         // Create FunctionDefaults on heap and push reference
-                        let heap_id = self
-                            .heap
-                            .allocate(HeapData::FunctionDefaults(FunctionDefaults { func_id, defaults }));
+                        let heap_id = self.heap.allocate(HeapData::FunctionDefaults(FunctionDefaults {
+                            func_id,
+                            scope,
+                            defaults,
+                        }));
                         self.push(Value::Ref(heap_id));
                     }
                 }
@@ -1832,6 +1910,7 @@ impl<'h> VM<'h> {
                     // Create Closure on heap and push reference
                     let heap_id = self.heap.allocate(HeapData::Closure(Closure {
                         func_id,
+                        scope: self.scope,
                         cells,
                         defaults,
                     }));
@@ -2397,6 +2476,7 @@ impl<'h> VM<'h> {
             self.cleanup_frame_state(&frame);
             return Err(e.into());
         }
+        self.enter_scope(frame.scope);
         self.frames.push(frame);
 
         Ok(())
@@ -2416,6 +2496,8 @@ impl<'h> VM<'h> {
         // target the correct frame after returning from a nested run() call.
         if let Some(parent) = self.frames.last() {
             self.instruction_ip = parent.ip;
+            let parent_scope = parent.scope;
+            self.enter_scope(parent_scope);
         }
         // Decrement recursion depth if this wasn't the root frame
         if !self.frames.is_empty() {
@@ -2820,10 +2902,10 @@ impl ContainsHeap for VM<'_> {
 
 /// Ensures proper reference-counting cleanup when the VM goes out of scope.
 ///
-/// Drains exception stack, operand stack, globals, scheduler state, and JSON
-/// string cache — all of which may hold heap references that need their
-/// ref-counts decremented. Fields that were already emptied (e.g. by
-/// `take_globals`) are harmlessly drained as empty.
+/// Drains exception stack, operand stack, every namespace, scheduler state,
+/// and JSON string cache — all of which may hold heap references that need
+/// their ref-counts decremented. Fields that were already emptied (e.g. by
+/// `take_scopes`) are harmlessly drained as empty.
 impl Drop for VM<'_> {
     fn drop(&mut self) {
         release_pending_effect(self.pending_os_effect.take(), self.heap);
@@ -2835,6 +2917,7 @@ impl Drop for VM<'_> {
         self.cleanup_current_task();
         self.scheduler.cleanup(self.heap);
         self.globals.drain(..).drop_with(self.heap);
+        mem::take(&mut self.parked).drop_with(self.heap);
         self.json_string_cache.drop_all(self.heap);
     }
 }

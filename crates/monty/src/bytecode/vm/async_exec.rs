@@ -27,6 +27,7 @@ use crate::{
     hash::identity_hash,
     heap::{ContainsHeap, DropWithContext, HeapData, HeapId, HeapRead, HeapReadOutput},
     intern::{FunctionId, StaticStrings},
+    namespace::ScopeId,
     object_bridge::MontyObjectExt,
     run_progress::{ExtFunctionResult, ExtFunctionResultExt},
     types::{
@@ -201,6 +202,7 @@ impl<'h> VM<'h> {
             return Err(ExcType::cannot_reuse_already_awaited_coroutine());
         }
         let func_id = coro.get(self.heap).func_id;
+        let scope = coro.get(self.heap).scope;
         let namespace_values: Vec<Value> = coro
             .get(self.heap)
             .namespace
@@ -209,7 +211,7 @@ impl<'h> VM<'h> {
             .collect();
         coro.get_mut(self.heap).state = CoroutineState::Running;
         drop(coro);
-        self.start_coroutine_frame(func_id, namespace_values)?;
+        self.start_coroutine_frame(func_id, scope, namespace_values)?;
         Ok(AwaitResult::FramePushed)
     }
 
@@ -716,6 +718,7 @@ impl<'h> VM<'h> {
                 ip: f.ip,
                 stack_base: f.stack_base,
                 locals_count: f.locals_count,
+                scope: f.scope,
                 exception_stack_base: f.exception_stack_base,
                 call_offset: f.call_offset,
                 is_initializer: f.is_initializer,
@@ -757,6 +760,7 @@ impl<'h> VM<'h> {
                     ip: sf.ip,
                     stack_base: sf.stack_base,
                     locals_count: sf.locals_count,
+                    scope: sf.scope,
                     exception_stack_base: sf.exception_stack_base,
                     function_id: sf.function_id,
                     call_offset: sf.call_offset,
@@ -765,6 +769,13 @@ impl<'h> VM<'h> {
                 }
             })
             .collect();
+
+        // A task carries which namespace it runs in, so a loop whose tasks
+        // belong to different ones resolves each task's globals against its
+        // own however many others ran in between.
+        if let Some(scope) = self.frames.last().map(|frame| frame.scope) {
+            self.enter_scope(scope);
+        }
     }
 
     /// Brings `task_id` into the VM, starting it if it has not run yet.
@@ -844,6 +855,7 @@ impl<'h> VM<'h> {
             panic!("task coroutine id is not a coroutine")
         };
         let func_id = coro.get(self.heap).func_id;
+        let scope = coro.get(self.heap).scope;
         let namespace_values: Vec<Value> = coro
             .get(self.heap)
             .namespace
@@ -866,12 +878,18 @@ impl<'h> VM<'h> {
             func_id,
             // No call site: the coroutine is this task's root frame.
             None,
+            scope,
         ))?;
         Ok(())
     }
 
     /// Starts a coroutine as a frame above the awaiting one.
-    fn start_coroutine_frame(&mut self, func_id: FunctionId, namespace_values: Vec<Value>) -> Result<(), RunError> {
+    fn start_coroutine_frame(
+        &mut self,
+        func_id: FunctionId,
+        scope: ScopeId,
+        namespace_values: Vec<Value>,
+    ) -> Result<(), RunError> {
         let call_offset = self.current_offset();
         let func = self.interns.get_function(func_id);
         let locals_count = u16::try_from(namespace_values.len()).expect("coroutine namespace size exceeds u16");
@@ -885,6 +903,7 @@ impl<'h> VM<'h> {
             exc_stack_base,
             func_id,
             call_offset,
+            scope,
         ))?;
         Ok(())
     }

@@ -50,7 +50,7 @@ pub(crate) enum Identity {
     /// Identity of a standard-library function.
     ModuleFunction(ModuleFunctions),
     /// Identity of a sandbox-defined function.
-    DefFunction(usize),
+    DefFunction(usize, usize),
     /// Identity of an interpreter marker.
     Marker(Marker),
     /// Identity of an interpreter property descriptor.
@@ -75,7 +75,7 @@ impl Identity {
             Value::InternLongInt(id) => Self::InternLongInt(id.index()),
             Value::Builtin(builtin) => Self::Builtin(*builtin),
             Value::ModuleFunction(function) => Self::ModuleFunction(*function),
-            Value::DefFunction(id) => Self::DefFunction(id.index()),
+            Value::DefFunction(id, scope) => Self::DefFunction(id.index(), scope.index()),
             Value::Marker(marker) => Self::Marker(*marker),
             Value::Property(property) => Self::Property(*property),
             Value::Ref(id) => Self::Heap(id.index()),
@@ -96,7 +96,7 @@ impl Identity {
             Self::InternString(index)
             | Self::InternBytes(index)
             | Self::InternLongInt(index)
-            | Self::DefFunction(index)
+            | Self::DefFunction(index, _)
             | Self::Heap(index) => u128::try_from(*index).expect("usize fits in u128"),
             Self::Builtin(value) => fixed_serde_payload(value),
             Self::ModuleFunction(value) => fixed_serde_payload(value),
@@ -122,7 +122,7 @@ impl Identity {
             Self::InternLongInt(_) => 9,
             Self::Builtin(_) => 10,
             Self::ModuleFunction(_) => 11,
-            Self::DefFunction(_) => 12,
+            Self::DefFunction(..) => 12,
             Self::Marker(_) => 14,
             Self::Property(_) => 15,
             Self::Heap(_) => 16,
