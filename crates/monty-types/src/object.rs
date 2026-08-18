@@ -874,6 +874,10 @@ pub enum MontyType {
     /// `itertools.accumulate`.
     #[strum(serialize = "itertools.accumulate")]
     ItertoolsAccumulate,
+    /// `functools.partialmethod`. Bare, like CPython's `tp_name` for a
+    /// pure-Python class.
+    #[strum(serialize = "partialmethod")]
+    PartialMethod,
 }
 
 impl fmt::Display for MontyType {

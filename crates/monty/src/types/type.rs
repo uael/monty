@@ -18,7 +18,7 @@ use crate::{
         dict::{DictKind, dict_fromkeys},
         instance::class_name,
         long_int::INT_MAX_STR_DIGITS,
-        property,
+        partialmethod, property,
         str::StringRepr,
         suppress, timedelta,
     },
@@ -253,6 +253,11 @@ pub enum Type {
     AttrGetter,
     #[strum(serialize = "itertools.accumulate")]
     ItertoolsAccumulate,
+    /// `functools.partialmethod`. Bare rather than dotted for the same reason
+    /// as [`Self::Suppress`]: CPython's is a pure-Python class, so its
+    /// `tp_name` carries no module and its error messages say `'partialmethod'`.
+    #[strum(serialize = "partialmethod")]
+    PartialMethod,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -546,6 +551,7 @@ impl Type {
             Self::ContextVar => contextvars::init(vm, args),
             Self::Suppress => suppress::init(vm, args),
             Self::AttrGetter => attrgetter::init(vm, args),
+            Self::PartialMethod => partialmethod::init(vm, args),
 
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),

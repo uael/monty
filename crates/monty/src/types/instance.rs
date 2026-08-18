@@ -1212,7 +1212,12 @@ fn call_member_bound(
 fn is_method_value(value: &Value, vm: &VM<'_>) -> bool {
     match value {
         Value::DefFunction(_) => true,
-        Value::Ref(id) => matches!(vm.heap.get(*id), HeapData::Closure(_) | HeapData::FunctionDefaults(_)),
+        // A `partialmethod` binds `self` like a function does — that binding is
+        // the whole of what makes it a method (see `types::partialmethod`).
+        Value::Ref(id) => matches!(
+            vm.heap.get(*id),
+            HeapData::Closure(_) | HeapData::FunctionDefaults(_) | HeapData::PartialMethod(_)
+        ),
         _ => false,
     }
 }

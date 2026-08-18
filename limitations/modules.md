@@ -15,6 +15,7 @@ and no way for sandboxed code to load additional modules.
 | `contextvars`  | ./contextvars.md |
 | `dataclasses`  | ./dataclasses.md |
 | `datetime`     | ./datetime.md    |
+| `functools`    | ./functools.md   |
 | `itertools`    | ./itertools.md   |
 | `json`         | ./json.md        |
 | `math`         | ./math.md        |
@@ -57,7 +58,7 @@ production sandboxes never see it.
 
 Common modules that are *not* importable in Monty (non-exhaustive):
 `abc`, `argparse`, `array`, `base64`, `bisect`, `copy`, `csv`,
-`ctypes`, `decimal`, `enum`, `fractions`, `functools`,
+`ctypes`, `decimal`, `enum`, `fractions`,
 `hashlib`, `heapq`, `hmac`, `http`, `inspect`, `io`,
 `logging`, `multiprocessing`, `pickle`, `queue`, `random`,
 `socket`, `struct`, `subprocess`, `tempfile`, `threading`,
@@ -69,8 +70,8 @@ Common modules that are *not* importable in Monty (non-exhaustive):
 submodule is; see above.
 
 `socket`, `subprocess`, `multiprocessing`, `threading` and `ctypes` are
-excluded because they would breach the sandbox. Others (`functools`, `enum`)
-are unimplemented and may appear over time.
+excluded because they would breach the sandbox. Others (`enum`, `copy`) are
+unimplemented and may appear over time.
 
 Some available modules cover only part of their CPython surface: `itertools`
 implements just `count` and `repeat` so far, and `collections` only the four

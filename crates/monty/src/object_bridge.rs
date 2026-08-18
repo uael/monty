@@ -615,6 +615,7 @@ impl MontyTypeExt for MontyType {
             Self::Suppress => Some(Type::Suppress),
             Self::AttrGetter => Some(Type::AttrGetter),
             Self::ItertoolsAccumulate => Some(Type::ItertoolsAccumulate),
+            Self::PartialMethod => Some(Type::PartialMethod),
         }
     }
 
@@ -717,6 +718,7 @@ impl MontyTypeExt for MontyType {
             Type::Suppress => Self::Suppress,
             Type::AttrGetter => Self::AttrGetter,
             Type::ItertoolsAccumulate => Self::ItertoolsAccumulate,
+            Type::PartialMethod => Self::PartialMethod,
         }
     }
 

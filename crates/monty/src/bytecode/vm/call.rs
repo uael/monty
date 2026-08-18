@@ -28,7 +28,7 @@ use crate::{
         class::class_exc_base,
         construct_namedtuple,
         instance::{class_member, class_name},
-        instance_call,
+        instance_call, partialmethod,
         str::call_str_method,
         super_object::set_exception_args,
     },
@@ -543,6 +543,8 @@ impl VM<'_> {
             // A getter walks attributes, which re-enters attribute lookup, so
             // it takes its own id rather than a read handle.
             HeapData::AttrGetter(_) => return attrgetter::call(heap_id, self, args).map(CallResult::Value),
+            // Likewise: applying a partialmethod calls the function it wraps.
+            HeapData::PartialMethod(_) => return partialmethod::call(heap_id, self, args).map(CallResult::Value),
             _ => {
                 // Coupling check: dispatch rejected this Ref, so the heap-side
                 // callability predicate must agree (see `HeapData::is_callable`).

@@ -1116,6 +1116,15 @@ pub enum StaticStrings {
     // ==========================
     /// The `builtins` module name, whose namespace `vars()` exposes.
     Builtins,
+
+    // ==========================
+    // `functools` module strings.
+    /// The `functools` module name.
+    Functools,
+    /// The `functools.partialmethod` descriptor.
+    Partialmethod,
+    /// `partialmethod.keywords` attribute.
+    Keywords,
 }
 
 /// Computes an FNV-1a hash over static-string identities and serialization.

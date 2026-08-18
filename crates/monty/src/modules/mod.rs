@@ -22,6 +22,7 @@ pub(crate) mod contextlib;
 pub(crate) mod contextvars;
 pub(crate) mod dataclasses;
 pub(crate) mod datetime;
+pub(crate) mod functools;
 #[cfg(feature = "test-hooks")]
 pub(crate) mod gc;
 pub(crate) mod itertools;
@@ -84,6 +85,8 @@ pub(crate) enum StandardLib {
     Operator,
     /// The `builtins` module, the namespace a bare name resolves against.
     Builtins,
+    /// The `functools` module providing `partialmethod`.
+    Functools,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -118,6 +121,7 @@ impl StandardLib {
             StaticStrings::Contextlib => Some(Self::Contextlib),
             StaticStrings::Operator => Some(Self::Operator),
             StaticStrings::Builtins => Some(Self::Builtins),
+            StaticStrings::Functools => Some(Self::Functools),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -150,6 +154,7 @@ impl StandardLib {
             Self::Contextlib => contextlib::create_module(vm),
             Self::Operator => operator::create_module(vm),
             Self::Builtins => builtins::create_module(vm),
+            Self::Functools => functools::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

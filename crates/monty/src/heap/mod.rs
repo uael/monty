@@ -36,10 +36,10 @@ use crate::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
         FrozenSet, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module, NamedTuple,
-        NamedTupleClass, OpenFile, Path, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str,
-        StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator, TypeAliasType, UserProperty,
-        callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator, timedelta,
-        timezone,
+        NamedTupleClass, OpenFile, PartialMethod, Path, Range, RangeIterator, ReMatch, RePattern, Set, SetIterator,
+        Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator, TypeAliasType,
+        UserProperty, callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator,
+        timedelta, timezone,
     },
     value::Value,
 };
@@ -284,6 +284,7 @@ pub enum HeapReadOutput<'a> {
     ContextToken(HeapRead<'a, ContextToken>),
     Suppress(HeapRead<'a, Suppress>),
     AttrGetter(HeapRead<'a, AttrGetter>),
+    PartialMethod(HeapRead<'a, PartialMethod>),
 }
 
 pub struct HeapRead<'a, T: ?Sized> {
@@ -726,6 +727,7 @@ impl<'a> HeapPtr<'a> {
             HeapData::ContextToken(token) => HeapReadOutput::ContextToken(heap_read(base, token, readers)),
             HeapData::Suppress(suppress) => HeapReadOutput::Suppress(heap_read(base, suppress, readers)),
             HeapData::AttrGetter(getter) => HeapReadOutput::AttrGetter(heap_read(base, getter, readers)),
+            HeapData::PartialMethod(partial) => HeapReadOutput::PartialMethod(heap_read_boxed(base, partial, readers)),
         }
     }
 }
@@ -1913,6 +1915,11 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(*id);
             }
         }),
+        HeapData::PartialMethod(partial) => partial.for_each_owned_value(|value| {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }),
         // Leaf types with no heap references
         _ => {}
     }
@@ -2032,6 +2039,7 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::ContextVar(var) => var.py_dec_ref_ids(stack),
         HeapData::ContextToken(token) => token.py_dec_ref_ids(stack),
         HeapData::Suppress(suppress) => suppress.py_dec_ref_ids(stack),
+        HeapData::PartialMethod(partial) => partial.py_dec_ref_ids(stack),
         // other types have no nested heap references
         _ => {}
     }
