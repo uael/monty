@@ -48,25 +48,32 @@ plain Python class rather than a validating constructor:
 A class the interpreter provides (see ./typing.md for that family), so it can
 be named as a base, subscripted, and asked about:
 
-- **It cannot be used as a base class.** A base must be a class defined in the
-  sandbox or a builtin exception (see ./classes.md), and this is neither: it is
-  a marker with no namespace of its own, so `class C(AbstractContextManager)`
-  is refused. Nothing is lost by leaving it out — defining `__enter__` and
-  `__exit__` on a plain class makes it a working context manager, and CPython's
-  base contributes only a default `__enter__` returning `self` and an
-  `__exit__` returning `None`.
-- **Subscripting yields the base itself.** `AbstractContextManager[T]` is a
-  `types.GenericAlias` in CPython; Monty has no alias object, so the parameter
-  is dropped rather than recorded and `AbstractContextManager['X'] is
-  AbstractContextManager` holds. The form is accepted so that annotations and
-  base-class expressions parse and type-check.
-- `isinstance(x, AbstractContextManager)` raises `TypeError: isinstance() arg 2
-  must be a type, a tuple of types, or a union`. CPython answers it structurally
-  through `__subclasshook__`, which needs the abc machinery Monty does not have.
+```python
+class Session(AbstractContextManager['Session']):
+    def __exit__(self, exc_type, exc, tb):
+        return False
+```
+
+It contributes the two methods CPython's does: an `__enter__` returning the
+receiver and an `__exit__` returning `None`, either of which a subclass may
+override. `isinstance` answers structurally, as CPython's `__subclasshook__`
+does: any object whose class defines both methods is an instance, `suppress`
+included.
+
+- **`__exit__` is not abstract.** CPython marks it `@abstractmethod`, so a
+  subclass that defines neither method cannot be instantiated; Monty names an
+  abstract base without enforcing abstractness (see ./typing.md), so such a
+  subclass instantiates and inherits an
+  `__exit__` that swallows nothing. A subclass that defines `__exit__`, which is
+  what CPython requires anyway, behaves identically in both.
 
 ## Not implemented
 
-`contextmanager` and `asynccontextmanager` (both need generators, which Monty
-does not have), `ExitStack`, `AsyncExitStack`, `closing`, `aclosing`,
-`redirect_stdout`, `redirect_stderr`, `chdir`, `nullcontext`,
-`AbstractAsyncContextManager`, and `ContextDecorator`.
+`contextmanager`, `asynccontextmanager`, `ExitStack`, `AsyncExitStack`,
+`closing`, `aclosing`, `redirect_stdout`, `redirect_stderr`, `chdir`,
+`nullcontext`, `AbstractAsyncContextManager`, and `ContextDecorator`. The
+names are absent from the module namespace rather than stubbed, so they fail
+type checking as well as raising `AttributeError`.
+
+Generators and async generators do exist (see ./iter.md and ./asyncio.md), so
+`contextmanager` and `asynccontextmanager` are absent rather than blocked.

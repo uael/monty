@@ -60,9 +60,9 @@ storage do not exist. A variable's value lives on the variable itself, so:
   the given count all match; only CPython's `PyArg_ParseTupleAndKeywords`
   phrasing for a positional-only parameter is not reproduced.
 - **`ContextVar` is not subscriptable at runtime.** `ContextVar[int]` is
-  accepted by the type checker (the stub is generic) but raises
-  `TypeError: 'type' object is not subscriptable` if evaluated, so it belongs
-  in an annotation, not in an expression.
+  accepted by the type checker (the stub is generic) but raises `TypeError:
+  type '_contextvars.ContextVar' is not subscriptable` if evaluated, so it
+  belongs in an annotation, not in an expression.
 - **Assigning `v.name` reports the generic attribute error**
   (`'_contextvars.ContextVar' object has no attribute 'name' and no __dict__
   for setting new attributes`), where CPython says `readonly attribute`. Both

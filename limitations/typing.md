@@ -123,9 +123,15 @@ Divergences:
   sandbox class cannot declare itself a `Sequence` after the fact — name the
   base instead.
 - **`Generator`, `AsyncIterable`, `AsyncIterator`, `AsyncGenerator` and
-  `Buffer` match no builtin object**, since Monty has no generator, async
-  iterator or buffer of its own; a sandbox class still matches them
-  structurally.
+  `Buffer` match no builtin object.** Monty has generators and async
+  generators (see ./iter.md and ./asyncio.md), but neither is in the
+  registration table these classes answer from, so `isinstance(gen,
+  Generator)` and `isinstance(agen, AsyncIterator)` are `False` where CPython
+  says `True`. A generator does match `Iterable` and `Iterator`, which have
+  `__subclasshook__`s it satisfies structurally, and a coroutine matches
+  `Awaitable` and `Coroutine`. `bytes` is not registered against `Buffer`
+  either, where CPython 3.14 answers `True`. A sandbox class still matches
+  every one of them structurally.
 - **Abstractness is not enforced**: a class naming an abstract base is
   instantiable even when it implements none of the abstract methods, where
   CPython raises. Only `Protocol` refuses instantiation.

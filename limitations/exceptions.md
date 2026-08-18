@@ -30,7 +30,7 @@ is the builtin `TimeoutError` re-exported, which is what it has been since
 ## Exception classes NOT implemented
 
 `Warning` and all its subclasses (`DeprecationWarning`, etc.),
-`BufferError`, `EOFError`, `FloatingPointError`, `GeneratorExit`,
+`BufferError`, `EOFError`, `FloatingPointError`,
 `ConnectionError` and subclasses (`ConnectionAbortedError`,
 `ConnectionRefusedError`, `ConnectionResetError`,
 `BrokenPipeError`), `BlockingIOError`, `ChildProcessError`,

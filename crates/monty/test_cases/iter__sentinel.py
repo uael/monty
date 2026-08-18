@@ -114,3 +114,21 @@ stop_calls[0] = 0
 stop_it = iter(stops, 99)
 assert (next(stop_it), next(stop_it)) == (1, 2)
 assert next(stop_it, 'done') == 'done'
+
+
+# === any callable works, including an instance with `__call__` ===
+# `__call__` is one of the dunders dispatched for sandbox classes, so an
+# instance is as good a first argument here as a lambda.
+class Counter:
+    def __init__(self):
+        self.n = 0
+
+    def __call__(self):
+        self.n += 1
+        return self.n
+
+
+assert list(iter(Counter(), 4)) == [1, 2, 3]
+bounded = iter(Counter(), 2)
+assert next(bounded) == 1
+assert next(bounded, 'STOPPED') == 'STOPPED'

@@ -3,9 +3,10 @@
 Named tuples can be constructed with `collections.namedtuple` (see
 ./collections.md), and also enter the sandbox as
 `sys.version_info` and as values passed in from the host via the `MontyObject`
-API. `typing.NamedTuple` is a marker only; subscripting it or inheriting from
-it does not produce a type, since there is no class inheritance (see
-./classes.md).
+API. `typing.NamedTuple` does not exist: it is absent from the module
+namespace rather than stubbed, so `from typing import NamedTuple` raises
+`ImportError`, `typing.NamedTuple` raises `AttributeError`, and neither
+subscripting nor inheriting from it has anything to name.
 
 Instances behave as CPython named tuples: integer indexing, attribute access,
 `len`/iteration/`bool`, equality and hashing against equivalent plain tuples,

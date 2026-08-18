@@ -32,17 +32,20 @@ Matches CPython:
 
 ### Divergences
 
-- **It binds through Monty's class-member mechanism, not `__get__`.** Monty has
-  no descriptor protocol (see ./classes.md); a `partialmethod` in a class body
-  binds its receiver because the class-member path treats it as a method, the
-  same way it treats a plain function. The observable behaviour is CPython's,
+- **It binds through Monty's class-member mechanism, not `__get__`.** Only
+  `property`, `staticmethod` and `classmethod` are descriptors class-attribute
+  lookup invokes, and a `__get__` written in the sandbox is never called (see
+  ./classes.md); a `partialmethod` in a class body binds its receiver because
+  the class-member path treats it as a method, the same way it treats a plain
+  function. The observable behaviour is CPython's,
   but `pm.__get__` raises `AttributeError` where CPython returns a
   `functools.partial`, and a `partialmethod` stored anywhere other than a class
   body is never bound. Nesting one inside another still behaves as CPython's
   does, even though CPython reaches that by flattening at construction and
   Monty by ordinary call chaining.
-- **CPython also accepts a descriptor as `func`.** Monty has none, so only a
-  callable is accepted; the rejection message is CPython's either way.
+- **CPython also accepts a descriptor as `func`.** Monty accepts only a
+  callable, so a `property` or a `classmethod` object is rejected; the message
+  is CPython's either way.
 - **`__isabstractmethod__`, `__doc__` and `__name__` are absent** on the
   descriptor, as they are on every Monty function (see ./language.md).
 - `repr(functools.partialmethod)` renders `<class 'partialmethod'>` where

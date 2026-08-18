@@ -154,8 +154,10 @@ An `async def` whose body contains `yield` is an async generator, driven by
 - `__anext__()` returns the async generator itself rather than CPython's
   `async_generator_asend` object. Awaiting the result of `__anext__()` twice
   therefore advances the generator twice instead of replaying one step.
-- `agen.__anext__` is the only attribute; `ag_running`, `ag_frame`,
-  `ag_code` and the rest are absent.
+- **No attribute is readable.** `agen.__anext__()` can be called, but reading
+  it (`agen.__anext__`, `hasattr(agen, '__aiter__')`) raises `AttributeError`
+  and answers `False`, as for every builtin type in Monty (see ./language.md).
+  `ag_running`, `ag_frame`, `ag_code` and the rest are absent outright.
 - `type(agen).__name__` is `'async_generator'`, and `repr()` omits CPython's
   memory address: `<async_generator object ticks>`.
 

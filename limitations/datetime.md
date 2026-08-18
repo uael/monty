@@ -48,7 +48,9 @@ Class methods supported: `now(tz=None)`, `strptime(date_string, format)`,
 - `combine()`, `fromtimestamp()`, `fromordinal()`, `utcfromtimestamp()`
   are not implemented.
 
-Subclassing `datetime` is not possible, since there is no class inheritance
+Subclassing `datetime` is not possible: a base must be a class defined in the
+sandbox or a builtin exception, so `class D(datetime)` raises
+`NotImplementedError` when the class statement runs
 (see ./classes.md).
 
 `datetime.replace()` and `date.replace()` accept **only keyword

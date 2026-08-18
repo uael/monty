@@ -77,15 +77,29 @@ excluded because they would breach the sandbox. Others (`enum`, `copy`) are
 unimplemented and may appear over time.
 
 Some available modules cover only part of their CPython surface: `itertools`
-implements just `count` and `repeat` so far, and `collections` only the four
-types above. The absent names are missing from the module namespace rather than
-stubbed, so they fail type checking as well as raising `AttributeError` at
+implements eight of its adaptors, `collections` only the four types above,
+`functools` only `partialmethod` and `operator` only `attrgetter`. For these
+the absent names are missing from the module namespace *and* from the vendored
+stub, so they fail type checking as well as raising `AttributeError` at
 runtime; see each module's page for the specifics.
 
-## Modules the type checker resolves but the runtime does not
+## Where the type checker is wider than the runtime
 
-`abc`, `typing_extensions`, `_collections_abc`, `builtins` and `_typeshed` back
-the vendored stubs (e.g. `@abstractmethod` on protocol members), so they have
-to resolve during type checking. Importing them therefore type-checks clean but
-still raises `ModuleNotFoundError` at runtime — which for `builtins` also means
-`vars(builtins)` has no way to be written.
+`abc`, `typing_extensions`, `_collections_abc` and `_typeshed` back the
+vendored stubs (e.g. `@abstractmethod` on protocol members), so they have to
+resolve during type checking. Importing one therefore type-checks clean and
+still raises `ModuleNotFoundError` at runtime.
+
+The same gap exists a level down, per name. `math`, `re`, `json`, `datetime`,
+`pathlib`, `dataclasses`, `typing` and `types` are vendored from upstream
+typeshed verbatim rather than narrowed, so every name CPython's module has
+type-checks here: `math.fsum`, `re.subn`, `typing.cast` and
+`dataclasses.make_dataclass` all pass `monty -t` and then raise
+`AttributeError` or `ImportError` when the code runs. Each module's page below
+lists what is actually implemented; the stub is not that list. The narrowed
+modules (`asyncio`, `collections`, `contextlib`, `contextvars`, `functools`,
+`itertools`, `operator`, `os`, `sys`, `unicodedata`) have no such gap, and
+`crates/monty-typeshed/custom/` is where a module joins them.
+
+Two builtin *names* diverge the same way, `object` and `UnicodeError`; see
+./builtins.md.

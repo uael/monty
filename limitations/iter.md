@@ -2,8 +2,7 @@
 
 - `iter(callable, sentinel)` runs `callable` synchronously, so one that calls an external/OS function cannot suspend and raises `NotImplementedError`. Same limitation as `map`/`filter`/`sorted(key=...)`.
 - `iter(callable, sentinel)` compares `result == sentinel`, where CPython compares `sentinel == result`; only observable if the two sides have asymmetric `__eq__`.
-- A `StopIteration` raised by `callable` propagates; CPython treats it as clean exhaustion and stops iterating.
-- A user instance defining `__call__` is rejected as not callable, since `__call__` is not dispatched (see ./classes.md).
+- A user instance defining `__call__` works, `__call__` being one of the dunders dispatched for sandbox classes (see ./classes.md); like every callable Monty drives itself, it cannot suspend on an external or OS call.
 - The vendored type stub is upstream typeshed's verbatim, so `-t` accepts `iter(obj)` for an object with only `__getitem__`; Monty has no `__getitem__` iteration fallback and raises `TypeError` at runtime.
 - `-t` accepts `for x in obj` (though not `a, b = obj`) for a class that opts out of iteration with `__iter__ = None`, which raises `TypeError` at runtime as it does in CPython.
 - Iterator `repr()` values omit CPython's process-local memory address: `<list_iterator object>` rather than `<list_iterator object at 0x...>`.
@@ -43,6 +42,10 @@ expressions are lazy and single-shot. Divergences:
   finalizers, so a suspended generator that simply goes out of scope is
   discarded without being closed; CPython closes it when it is collected. Call
   `close()` explicitly to run cleanup.
+- **The protocol methods are call-only.** `gen.send(1)` and `gen.close()`
+  work, but reading one without calling it (`m = gen.send`, `hasattr(gen,
+  '__next__')`) raises `AttributeError` and answers `False`, as it does for
+  every builtin type in Monty (see ./language.md).
 - Generator `repr()` omits CPython's process-local memory address:
   `<generator object counter>` rather than `<generator object counter at
   0x...>`.

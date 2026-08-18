@@ -1,8 +1,9 @@
 # `with` statement (context managers)
 
 Monty supports the `with` statement for built-in types that implement
-`__enter__` / `__exit__` (currently just file objects produced by `open()`,
-see ./open.md) **and for user-defined classes** that define the two
+`__enter__` / `__exit__` (file objects produced by `open()`, see ./open.md,
+and `contextlib.suppress`, see ./contextlib.md) **and for user-defined
+classes** that define the two
 dunders. Semantics follow CPython for the supported subset: `__enter__` runs
 before the body, `__exit__` runs on every exit path (normal completion,
 exception, `return`, `break`, `continue`), and a truthy return from
@@ -32,10 +33,10 @@ explicit `obj.__enter__()` call, which is an ordinary method call.
 
 ## Not supported
 
-- **Async `with`** (`async with EXPR:`) is rejected at parse time with
-  `SyntaxError: async context managers (async with) is not yet implemented`.
-- **`contextlib`** (`@contextmanager`, `ExitStack`, etc.) — the module is not
-  available; only the language-level `with` statement is.
+- **Most of `contextlib`** (`@contextmanager`, `ExitStack`, ...). The module
+  itself is available and provides `suppress` and `AbstractContextManager`;
+  see ./contextlib.md for the rest. `async with` is supported and drives
+  `__aenter__` / `__aexit__`; see ./asyncio.md.
 
 ## Behavioural divergences
 
@@ -74,10 +75,11 @@ explicit `obj.__enter__()` call, which is an ordinary method call.
 
 ## Current implementers of the protocol
 
-| Type           | Notes                                                     |
-| -------------- | --------------------------------------------------------- |
-| `open()`       | Closes the file on exit; see ./open.md for details.       |
-| user classes   | Class must define `__exit__` (and `__enter__`); see above. |
+| Type                   | Notes                                                     |
+| ---------------------- | --------------------------------------------------------- |
+| `open()`               | Closes the file on exit; see ./open.md for details.       |
+| `contextlib.suppress`  | Swallows the exception types it was built with; see ./contextlib.md. |
+| user classes           | Class must define `__exit__` (and `__enter__`); see above. |
 
 Adding a new context-manager-capable built-in takes three pieces on the
 type's `HeapRead` impl:

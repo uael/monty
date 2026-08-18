@@ -11,7 +11,7 @@ any code runs.
   `__init__`/`__repr__`/`__str__`, class variables of arbitrary expressions,
   one base class). Rejected at parse time: metaclass keywords
   (`class Foo(metaclass=M):`) and class-body statements other than `def`, a
-  simple `name [: T] = <expr>` assignment, `type X = ...`, `pass`, or a
+  simple `name [: T] = <expr>` assignment, `type X = ...`, `pass`, `...`, or a
   docstring. Inheritance is single only, and the dunder protocol is a fixed
   set rather than a general one. See ./classes.md.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
@@ -21,8 +21,9 @@ any code runs.
   generator expression`, as in CPython. Monty rejects it for the whole
   expression, including the outermost iterable (`(x for x in (yield))`), which
   CPython accepts.
-- **Wildcard imports** (`from m import *`) — raises `ImportError:
-  "Wildcard imports (\`from ... import *\`) are not supported"`.
+- **Wildcard imports** (`from m import *`) — raises `NotImplementedError:
+  "Wildcard imports (\`from ... import *\`) are not supported"`, without the
+  parser's usual "does not yet support" prefix.
 
 ## `match` statements
 
@@ -225,6 +226,27 @@ This bounds what a decorator can do: it can call, wrap, store or replace the
 function it receives, but cannot ask the function about itself, so
 `functools.wraps`-style metadata copying, registries keyed by `fn.__name__`, and
 attribute tagging for later discovery all have no equivalent.
+
+## Methods of builtin types are call-only
+
+`obj.method(...)` works, but reading the method without calling it does not:
+`[1].append`, `'a'.upper`, `{}.get`, `deque().append`, `re.compile('a').search`
+and `ContextVar('v').get` each raise `AttributeError: '<type>' object has no
+attribute '<name>'`, and `hasattr` for the same name answers `False`. Monty has
+no bound-method object for a builtin to hand out, so such a method exists only
+as the call that reaches it. The same holds through the type
+(`str.lower` raises `AttributeError: 'type' object has no attribute 'lower'`),
+and for named tuples, generators and async generators.
+
+The consequence is that a builtin method cannot be passed where a callable is
+expected: `sorted(xs, key=str.lower)` and `map(d.get, keys)` have no spelling
+here, so pass a `lambda` instead. A method of a *sandbox* class is an ordinary
+value and can be read, passed and stored; see ./classes.md for what a bound
+method does and does not carry.
+
+Dunders differ per type rather than following one rule: a builtin iterator
+refuses even `it.__next__()` (see ./iter.md), while `__enter__` / `__exit__`
+are dispatched for a direct call (see ./with.md).
 
 ## Ordering comparisons
 

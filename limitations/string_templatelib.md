@@ -45,8 +45,8 @@ from a `t"..."` literal.
   `Template + str`; Monty raises
   `TypeError: unsupported operand type(s) for +: 'string.templatelib.Template' and ...`.
 - **The type objects are not subscriptable.** CPython's `__class_getitem__`
-  makes `Template[Any]` a `types.GenericAlias`; in Monty it raises
-  `TypeError: 'type' object is not subscriptable`.
+  makes `Template[Any]` a `types.GenericAlias`; in Monty it raises `TypeError:
+  type 'string.templatelib.Template' is not subscriptable`.
 - **Crossing the host boundary loses the object.** A `Template` or
   `Interpolation` returned to the host arrives as its `repr()` text
   (`Template(strings=('a',), interpolations=())`), not as a host

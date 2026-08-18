@@ -330,7 +330,8 @@ host that wants to construct instances asks the sandbox to.
   `__name__`: a class body may not contain a class, so nothing here is nested
   and there is nothing to qualify.
 - Class-body statements other than a `def`, a simple `name [: T] = <expr>`
-  variable assignment, `pass`, `...`, or a docstring, e.g. `if`/`for`/`while`
+  variable assignment, a `type X = ...` alias, `pass`, `...`, or a docstring,
+  e.g. `if`/`for`/`while`
   in the class body, or tuple/multiple assignment targets (rejected at parse
   time).
 - Assignment expressions (`:=`) that bind in the class-body scope: in
