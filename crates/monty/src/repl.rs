@@ -2135,7 +2135,7 @@ impl ReplSnapshot {
 ///
 /// Converts each `MontyObject` to a `Value` while the VM is alive, then
 /// stores it at the namespace slot the compile pre-resolved for the
-/// corresponding input name. Each store is O(1) — the per-input name → slot
+/// corresponding input name. Each store is O(1): the per-input name to slot
 /// lookup happens once at snippet construction, not here on the call path.
 fn inject_inputs_into_vm(
     input_slots: &[NamespaceId],

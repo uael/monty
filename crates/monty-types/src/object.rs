@@ -1006,6 +1006,13 @@ pub enum MontyType {
     /// the same class. What a reference stands for is on the reference.
     #[strum(serialize = "hostref")]
     HostRef,
+    /// `object`, the root of the class hierarchy, which is not `type`: inside a
+    /// session the two answer differently to `__name__` and are not identical,
+    /// so telling a host they are the same value loses what the session knows.
+    ///
+    /// Last rather than beside [`Type`](Self::Type), where it reads best,
+    /// because the variant order is a serialized discriminant.
+    Object,
 }
 
 impl fmt::Display for MontyType {

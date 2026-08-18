@@ -17,7 +17,8 @@ use crate::{
     heap::{DropGuard, Heap, HeapData, HeapId, HeapReadOutput},
     intern::Interns,
     types::{
-        Dataclass, HostRef, Instance, LongInt, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type, allocate_tuple,
+        Dataclass, HostRef, Instance, LongInt, NamedTuple, NativeClass, OpenFile, Path, PyTrait, TimeZone, Type,
+        allocate_tuple,
         bytes::Bytes,
         date as date_type, datetime as datetime_type,
         dict::Dict,
@@ -588,6 +589,7 @@ impl MontyTypeExt for MontyType {
             Self::Ellipsis => Some(Type::Ellipsis),
             Self::NotImplementedType => Some(Type::NotImplementedType),
             Self::Type => Some(Type::Type),
+            Self::Object => Some(Type::Native(NativeClass::Object)),
             Self::NoneType => Some(Type::NoneType),
             Self::Bool => Some(Type::Bool),
             Self::Int => Some(Type::Int),
@@ -783,6 +785,10 @@ impl MontyTypeExt for MontyType {
             // The runtime type forms have no host counterpart and degrade to
             // `type`, the family they belong to: a value of one of them crosses
             // as its `repr` (`list[int]`, `int | str`), like a class object.
+            // `object` is a type the boundary names for itself; every other
+            // native class is one the host has no counterpart for, so it
+            // crosses as the generic type object a class object does.
+            Type::Native(NativeClass::Object) => Self::Object,
             Type::GenericAlias | Type::Union | Type::Native(_) | Type::TypeVar => Self::Type,
             Type::HostRef => Self::HostRef,
         }

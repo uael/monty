@@ -109,6 +109,47 @@ fn the_handle_wears_a_mapping_surface() {
     assert_eq!(feed(&mut repl, "ns['x'] == 1"), t(true));
 }
 
+/// A handle the host holds keeps its whole mapping surface when it is handed
+/// back in: it is a reference to the namespace, not a copy of what it held.
+#[test]
+fn a_handle_the_host_holds_reads_and_binds_when_it_comes_back() {
+    let mut repl = session();
+    repl.set_cross_by_reference(true);
+    feed(&mut repl, "x = 1\nspare = None\nns = namespace({'x': x})");
+    let held = repl.export_global("ns", PrintWriter::Stdout).expect("`ns` is bound");
+    let MontyObject::SessionRef { id, .. } = held else {
+        panic!("a namespace crosses as a reference, got {held:?}");
+    };
+    let handed = |repr: &str| {
+        vec![(
+            "held".to_owned(),
+            MontyObject::SessionRef {
+                id,
+                repr: repr.to_owned(),
+            },
+        )]
+    };
+
+    // The whole surface answers through the reference, reads and binds alike.
+    assert_eq!(
+        repl.probe_scoped("(len(held), held['x'], 'x' in held, sorted(held))", handed(""), PrintWriter::Stdout)
+            .unwrap(),
+        MontyObject::Tuple(vec![
+            MontyObject::Int(1),
+            MontyObject::Int(1),
+            t(true),
+            MontyObject::List(vec![MontyObject::String("x".to_owned())]),
+        ])
+    );
+    repl.run_scoped_in(None, "held['spare'] = 7", handed(""), PrintWriter::Stdout)
+        .unwrap();
+    assert!(repl.release(id));
+
+    // And the bind landed in the namespace itself, which the session's own
+    // code reads through the handle it still has.
+    assert_eq!(feed(&mut repl, "ns['spare'] == 7 and len(ns) == 2"), t(true));
+}
+
 #[test]
 fn a_name_no_code_ever_mentioned_cannot_be_bound() {
     let mut repl = session();

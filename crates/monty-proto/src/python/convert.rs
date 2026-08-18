@@ -281,6 +281,7 @@ fn round_trip_type_table(py: Python<'_>) -> PyResult<&'static Vec<(Py<PyAny>, Mo
             MontyType::Range,
             MontyType::Slice,
             MontyType::Type,
+            MontyType::Object,
             MontyType::Property,
             MontyType::Date,
             MontyType::DateTime,
