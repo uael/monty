@@ -207,6 +207,7 @@ fn a_task_runs_in_the_loop_and_calls_out_to_the_host() {
                     "log.append(ask('from the task'))\n'done'",
                     vec![],
                     None,
+                    None,
                     PrintWriter::Stdout,
                 )
                 .unwrap();
@@ -237,7 +238,7 @@ fn a_written_return_is_told_apart_from_falling_off_the_end() {
         if turn == 0 {
             for code in ["x = 1\nreturn 'said'", "x = 2\n'trailing'", "x = 3"] {
                 let task = progress
-                    .feed_task_in(None, code, vec![], None, PrintWriter::Stdout)
+                    .feed_task_in(None, code, vec![], None, None, PrintWriter::Stdout)
                     .unwrap();
                 enqueue(progress, &task);
             }
@@ -267,6 +268,7 @@ fn a_return_out_of_a_try_is_still_a_return() {
                     "marks = []\ntry:\n    return 'early'\nfinally:\n    marks.append('cleaned')\n",
                     vec![],
                     None,
+                    None,
                     PrintWriter::Stdout,
                 )
                 .unwrap();
@@ -288,7 +290,7 @@ fn an_exception_reaches_whoever_awaits_the_task() {
         if turn == 0 {
             for code in ["raise ValueError('by hand')", "'after'"] {
                 let task = progress
-                    .feed_task_in(None, code, vec![], None, PrintWriter::Stdout)
+                    .feed_task_in(None, code, vec![], None, None, PrintWriter::Stdout)
                     .unwrap();
                 enqueue(progress, &task);
             }
@@ -317,13 +319,13 @@ fn what_a_task_binds_is_the_namespace_afterwards() {
     let mut run = drive(repl, |progress, turn| {
         if turn == 0 {
             let task = progress
-                .feed_task_in(None, "made = 7\nreturn made", vec![], None, PrintWriter::Stdout)
+                .feed_task_in(None, "made = 7\nreturn made", vec![], None, None, PrintWriter::Stdout)
                 .unwrap();
             enqueue(progress, &task);
         }
         if turn == 1 {
             let task = progress
-                .feed_task_in(None, "made * 6", vec![], None, PrintWriter::Stdout)
+                .feed_task_in(None, "made * 6", vec![], None, None, PrintWriter::Stdout)
                 .unwrap();
             enqueue(progress, &task);
         }
@@ -349,7 +351,14 @@ fn a_task_runs_in_the_namespace_it_was_compiled_against() {
     let mut run = drive(repl, |progress, turn| {
         if turn == 0 {
             let task = progress
-                .feed_task_in(Some(other), "mine = who\nreturn who", vec![], None, PrintWriter::Stdout)
+                .feed_task_in(
+                    Some(other),
+                    "mine = who\nreturn who",
+                    vec![],
+                    None,
+                    None,
+                    PrintWriter::Stdout,
+                )
                 .unwrap();
             enqueue(progress, &task);
         }
@@ -379,6 +388,7 @@ fn inputs_are_the_namespace_the_task_runs_in() {
                     "supplied * 2",
                     vec![("supplied".to_owned(), MontyObject::Int(21))],
                     None,
+                    None,
                     PrintWriter::Stdout,
                 )
                 .unwrap();
@@ -399,7 +409,7 @@ fn a_task_for_a_namespace_the_session_does_not_have_is_refused() {
     assert!(repl.release_namespace(gone));
 
     let err = repl
-        .feed_task_in(Some(gone), "1", vec![], None, PrintWriter::Stdout)
+        .feed_task_in(Some(gone), "1", vec![], None, None, PrintWriter::Stdout)
         .unwrap_err()
         .to_string();
     assert!(err.contains("no such namespace"), "got {err}");
@@ -411,7 +421,7 @@ fn a_task_for_a_namespace_the_session_does_not_have_is_refused() {
 fn source_that_does_not_compile_is_refused_at_once() {
     let mut repl = session();
     let err = repl
-        .feed_task_in(None, "def (:", vec![], None, PrintWriter::Stdout)
+        .feed_task_in(None, "def (:", vec![], None, None, PrintWriter::Stdout)
         .unwrap_err()
         .to_string();
     assert!(err.contains("SyntaxError"), "got {err}");
@@ -443,6 +453,7 @@ fn a_task_is_compiled_at_whatever_suspension_the_host_holds() {
                     "'made while nothing could run'",
                     vec![],
                     None,
+                    None,
                     PrintWriter::Stdout,
                 )
                 .unwrap();
@@ -473,7 +484,14 @@ fn a_task_is_compiled_at_whatever_suspension_the_host_holds() {
             "{expect} suspends rather than completing"
         );
         let task = progress
-            .feed_task_in(None, "'compiled at a suspension'", vec![], None, PrintWriter::Stdout)
+            .feed_task_in(
+                None,
+                "'compiled at a suspension'",
+                vec![],
+                None,
+                None,
+                PrintWriter::Stdout,
+            )
             .unwrap();
         assert!(matches!(task, MontyObject::SessionRef { .. }), "{expect}");
         let MontyObject::SessionRef { id, .. } = task else {
@@ -489,7 +507,7 @@ fn a_task_is_compiled_at_whatever_suspension_the_host_holds() {
 fn a_task_can_be_compiled_before_the_loop_starts() {
     let mut repl = session();
     let task = repl
-        .feed_task_in(None, "'made before the loop'", vec![], None, PrintWriter::Stdout)
+        .feed_task_in(None, "'made before the loop'", vec![], None, None, PrintWriter::Stdout)
         .unwrap();
     let MontyObject::SessionRef { id, .. } = task else {
         panic!("a task crosses as a reference");
@@ -520,7 +538,7 @@ fn a_task_can_be_compiled_before_the_loop_starts() {
 fn a_task_survives_a_dump_of_the_session_holding_it() {
     let mut repl = session();
     let task = repl
-        .feed_task_in(None, "'made before the dump'", vec![], None, PrintWriter::Stdout)
+        .feed_task_in(None, "'made before the dump'", vec![], None, None, PrintWriter::Stdout)
         .unwrap();
     let MontyObject::SessionRef { id, .. } = task else {
         panic!("a task crosses as a reference");
@@ -558,7 +576,14 @@ fn a_task_survives_a_dump_of_the_session_holding_it() {
 fn a_task_runs_once() {
     let mut repl = session();
     let task = repl
-        .feed_task_in(None, "count = count + 1\ncount", vec![], None, PrintWriter::Stdout)
+        .feed_task_in(
+            None,
+            "count = count + 1\ncount",
+            vec![],
+            None,
+            None,
+            PrintWriter::Stdout,
+        )
         .unwrap();
     let MontyObject::SessionRef { id, .. } = task else {
         panic!("a task crosses as a reference");
@@ -607,6 +632,7 @@ fn a_task_can_be_given_fuel_without_bounding_the_session() {
                     None,
                     "spun = 0\nwhile True:\n    spun = spun + 1\n",
                     vec![],
+                    None,
                     Some(1_000),
                     PrintWriter::Stdout,
                 )
@@ -619,6 +645,7 @@ fn a_task_can_be_given_fuel_without_bounding_the_session() {
                     None,
                     "n = 0\nwhile n < 20000:\n    n = n + 1\nn",
                     vec![],
+                    None,
                     None,
                     PrintWriter::Stdout,
                 )
@@ -663,6 +690,7 @@ fn each_task_is_given_its_own_fuel() {
                         None,
                         "n = 0\nwhile n < 3000:\n    n = n + 1\nn",
                         vec![],
+                        None,
                         Some(200_000),
                         PrintWriter::Stdout,
                     )
@@ -701,6 +729,7 @@ fn catching_the_overrun_does_not_buy_more_of_it() {
             None,
             "n = 0\nwhile True:\n    try:\n        while n < 1000000:\n            n = n + 1\n    except Exception:\n        n = 0\n",
             vec![],
+            None,
             Some(1_000),
             PrintWriter::Stdout,
         )
@@ -746,6 +775,7 @@ fn a_budget_survives_a_dump_of_the_task_it_bounds() {
             None,
             "n = 0\nwhile n < 1000:\n    n = n + 1\nwaited = ask(n)\nwhile n < 2000:\n    n = n + 1\nn",
             vec![],
+            None,
             Some(12_000),
             PrintWriter::Stdout,
         )
@@ -783,4 +813,108 @@ fn a_budget_survives_a_dump_of_the_task_it_bounds() {
     };
     assert_eq!(overrun[0], text("raised"), "the woken task ran out of what was left");
     assert_eq!(overrun[1], text("RuntimeError"));
+}
+
+// ---------------------------------------------------------------------------
+// The names a task can reach
+// ---------------------------------------------------------------------------
+
+/// A builtin the session has never mentioned is still the builtin when a task
+/// names it.
+///
+/// A name a task is the first to say takes a fresh slot, and nothing has ever
+/// bound it, so what answers is the builtin fallback: it reads the name back
+/// from the session's own strings. Compiling while the session is suspended is
+/// what makes that reading hard, since the code that is running was compiled
+/// against a shorter table than the one the name was just added to.
+#[test]
+fn a_task_names_a_builtin_the_session_never_said() {
+    let repl = session();
+    let mut run = drive(repl, |progress, turn| {
+        if turn == 0 {
+            let task = progress
+                .feed_task_in(None, "BaseException.__name__", vec![], None, None, PrintWriter::Stdout)
+                .unwrap();
+            enqueue(progress, &task);
+        }
+        turn > 1
+    });
+    assert_eq!(
+        seen(&mut run.repl),
+        vec![value(text("BaseException"), false)],
+        "the task read the builtin, not an unbound global"
+    );
+}
+
+/// The same, for a name said inside a function the host defined while the
+/// session was suspended.
+///
+/// This is the shape a host uses when it wants the coroutine to catch whatever
+/// its own body raised: source run now defines the function, and what the host
+/// carries away is the coroutine. The builtin is named in that body, so it is
+/// read when the body runs, long after the source mentioning it stopped being
+/// what the session was compiling.
+#[test]
+fn a_function_the_host_defined_while_suspended_names_a_builtin() {
+    let mut repl = session();
+    // A coroutine has no copy representation, so it reaches the host as a
+    // reference only when the session is told to hand such values over.
+    repl.set_cross_by_reference(true);
+    feed(&mut repl, "log = []");
+
+    let mut run = drive(repl, |progress, turn| {
+        if turn == 0 {
+            progress
+                .run_in(
+                    None,
+                    "async def cmd():\n    try:\n        raise ValueError('boom')\n    except BaseException as e:\n        log.append(type(e).__name__)\n    return 'ok', True\n\njob = cmd()\n",
+                    vec![],
+                    PrintWriter::Stdout,
+                )
+                .unwrap();
+            let task = progress.probe_in(None, "job", vec![], PrintWriter::Stdout).unwrap();
+            enqueue(progress, &task);
+        }
+        turn > 1
+    });
+    assert_eq!(
+        feed(&mut run.repl, "log"),
+        MontyObject::List(vec![text("ValueError")]),
+        "the function caught through the builtin, not an unbound global"
+    );
+}
+
+/// A task says where its source came from, so a traceback from it names the
+/// snippet rather than the session.
+///
+/// It matters more for a task than for a feed: the frames run long after the
+/// call that compiled them returned, so by the time anything raises, the name
+/// is all there is to say which snippet this was.
+#[test]
+fn a_task_carries_the_name_its_host_gave_it() {
+    let mut repl = session();
+    // A coroutine reaches the host as a reference, which is how it is handed
+    // back in to be awaited.
+    repl.set_cross_by_reference(true);
+    let task = repl
+        .feed_task_in(
+            None,
+            "raise ValueError('boom')",
+            vec![],
+            Some("rung://7"),
+            None,
+            PrintWriter::Stdout,
+        )
+        .unwrap();
+
+    let raised = repl
+        .feed_run(
+            "import asyncio\n\nasync def __await_it():\n    await job\n\nasyncio.run(__await_it())\n",
+            vec![("job".to_owned(), task)],
+            PrintWriter::Stdout,
+        )
+        .expect_err("the task raises where it is awaited");
+    let said = format!("{raised}");
+    assert!(said.contains("rung://7"), "the traceback names the rung: {said}");
+    assert!(!said.contains("<task-"), "no generated name was spent on it: {said}");
 }

@@ -541,6 +541,12 @@ impl MontyRepl {
     /// An exception the source raises is raised at whoever awaits the coroutine,
     /// unchanged.
     ///
+    /// `script_name` is what this source's frames say they came from, as it is
+    /// for [`feed_run_named`](Self::feed_run_named), and it matters more here:
+    /// a task's frames run long after this call returns, so the name is all a
+    /// later traceback has to say which of a host's many snippets raised.
+    /// `None` takes the generated one.
+    ///
     /// `max_steps` bounds what this source may execute without bounding the
     /// session: the overrun is raised inside the coroutine, where the code that
     /// started it can catch it, and everything else in the loop carries on. It
@@ -566,6 +572,7 @@ impl MontyRepl {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
@@ -580,6 +587,7 @@ impl MontyRepl {
             target,
             code,
             inputs,
+            script_name,
             max_steps,
             print,
             self.options,
@@ -1103,15 +1111,16 @@ impl ReplProgress {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
         match self {
-            Self::FunctionCall(call) => call.feed_task_in(target, code, inputs, max_steps, print),
-            Self::OsCall(call) => call.feed_task_in(target, code, inputs, max_steps, print),
-            Self::ResolveFutures(state) => state.feed_task_in(target, code, inputs, max_steps, print),
-            Self::NameLookup(lookup) => lookup.feed_task_in(target, code, inputs, max_steps, print),
-            Self::Complete { repl, .. } => repl.feed_task_in(target, code, inputs, max_steps, print),
+            Self::FunctionCall(call) => call.feed_task_in(target, code, inputs, script_name, max_steps, print),
+            Self::OsCall(call) => call.feed_task_in(target, code, inputs, script_name, max_steps, print),
+            Self::ResolveFutures(state) => state.feed_task_in(target, code, inputs, script_name, max_steps, print),
+            Self::NameLookup(lookup) => lookup.feed_task_in(target, code, inputs, script_name, max_steps, print),
+            Self::Complete { repl, .. } => repl.feed_task_in(target, code, inputs, script_name, max_steps, print),
         }
     }
 
@@ -1238,10 +1247,12 @@ impl ReplFunctionCall {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        self.snapshot.feed_task(target, code, inputs, max_steps, print)
+        self.snapshot
+            .feed_task(target, code, inputs, script_name, max_steps, print)
     }
 
     /// Which namespace a handle the host holds names; see
@@ -1374,10 +1385,12 @@ impl ReplOsCall {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        self.snapshot.feed_task(target, code, inputs, max_steps, print)
+        self.snapshot
+            .feed_task(target, code, inputs, script_name, max_steps, print)
     }
 
     /// Which namespace a handle the host holds names; see
@@ -1519,10 +1532,12 @@ impl ReplNameLookup {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        self.snapshot.feed_task(target, code, inputs, max_steps, print)
+        self.snapshot
+            .feed_task(target, code, inputs, script_name, max_steps, print)
     }
 
     /// Which namespace a handle the host holds names; see
@@ -1739,6 +1754,7 @@ impl ReplResolveFutures {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
@@ -1753,6 +1769,7 @@ impl ReplResolveFutures {
             target,
             code,
             inputs,
+            script_name,
             max_steps,
             print,
             self.repl.options,
@@ -2028,6 +2045,7 @@ impl ReplSnapshot {
         target: Option<ScopeId>,
         code: &str,
         inputs: Vec<(String, MontyObject)>,
+        script_name: Option<&str>,
         max_steps: Option<u64>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
@@ -2042,6 +2060,7 @@ impl ReplSnapshot {
             target,
             code,
             inputs,
+            script_name,
             max_steps,
             print,
             self.repl.options,
@@ -2306,6 +2325,7 @@ fn feed_task_in(
     target: Option<ScopeId>,
     code: &str,
     inputs: Vec<(String, MontyObject)>,
+    script_name: Option<&str>,
     max_steps: Option<u64>,
     print: PrintWriter<'_>,
     options: CompileOptions,
@@ -2326,7 +2346,10 @@ fn feed_task_in(
     }
     let scope = scopes.current;
 
-    let script_name = next_script_name(next_input_id, SnippetKind::Task);
+    let script_name = match script_name {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => next_script_name(next_input_id, SnippetKind::Task),
+    };
     // Kept before anything can fail, as a feed's is: this snippet's frames run
     // long after this call returns, and a traceback from one of them resolves
     // its source by this name.
