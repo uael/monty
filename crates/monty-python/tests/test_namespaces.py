@@ -1,6 +1,6 @@
 """Several global namespaces over one session's heap.
 
-A namespace is a name map, not a heap. Dressing one from another copies the
+A namespace is a name map, not a heap. Copying one from another copies the
 names and shares the objects, so a rebinding through either is invisible to the
 other while a mutation of an object both name is seen by both. Copying the heap
 instead is `dump()` and `load_session()`, which shares nothing.
@@ -17,11 +17,11 @@ def session(pool: Monty):
         yield s
 
 
-def test_a_dressed_child_shares_objects_and_not_bindings(session: MontySession):
+def test_a_copied_namespace_shares_objects_and_not_bindings(session: MontySession):
     session.feed_run('board = []')
     session.feed_run('x = 1')
     parent = session.select_namespace(0)
-    child = session.dress_namespace(parent)
+    child = session.copy_namespace(parent)
 
     # A mutation crosses, child to parent.
     session.select_namespace(child)
@@ -43,7 +43,7 @@ def test_a_dressed_child_shares_objects_and_not_bindings(session: MontySession):
 
 def test_a_name_only_the_child_binds_is_not_the_parents(session: MontySession):
     session.feed_run('shared = 1')
-    child = session.dress_namespace(0)
+    child = session.copy_namespace(0)
 
     session.select_namespace(child)
     session.feed_run('only_child = 7')
@@ -72,7 +72,7 @@ def test_an_empty_namespace_binds_nothing(session: MontySession):
 def test_a_function_reads_the_namespace_it_was_defined_in(session: MontySession):
     session.feed_run('scale = 10')
     session.feed_run('def scaled(v):\n    return v * scale')
-    child = session.dress_namespace(0)
+    child = session.copy_namespace(0)
 
     session.select_namespace(child)
     session.feed_run('scale = 100')
@@ -84,7 +84,7 @@ def test_a_function_reads_the_namespace_it_was_defined_in(session: MontySession)
 
 def test_probe_reads_a_named_namespace(session: MontySession):
     session.feed_run('who = "parent"')
-    child = session.dress_namespace(0)
+    child = session.copy_namespace(0)
     session.select_namespace(child)
     session.feed_run('who = "child"')
     session.select_namespace(0)
@@ -98,7 +98,7 @@ def test_probe_reads_a_named_namespace(session: MontySession):
 def test_probe_reads_a_second_namespace_while_the_first_is_suspended(session: MontySession):
     session.feed_run('board = []')
     session.feed_run('who = "parent"')
-    child = session.dress_namespace(0)
+    child = session.copy_namespace(0)
     session.select_namespace(child)
     session.feed_run('who = "child"')
     session.select_namespace(0)
@@ -125,7 +125,7 @@ def test_namespaces_survive_dump_and_load(pool: Monty):
     with pool.checkout() as session:
         session.feed_run('board = []')
         session.feed_run('x = 1')
-        child = session.dress_namespace(0)
+        child = session.copy_namespace(0)
         session.select_namespace(child)
         session.feed_run('x = 2')
         session.feed_run("board.append('before')")
@@ -145,7 +145,7 @@ def test_namespaces_survive_dump_and_load(pool: Monty):
 def test_a_fork_shares_nothing(pool: Monty):
     with pool.checkout() as session:
         session.feed_run('board = []')
-        child = session.dress_namespace(0)
+        child = session.copy_namespace(0)
         state = session.dump()
 
     with pool.checkout() as left, pool.checkout() as right:
@@ -160,7 +160,7 @@ def test_a_fork_shares_nothing(pool: Monty):
 
 def test_releasing_a_namespace_keeps_what_another_still_names(session: MontySession):
     session.feed_run('board = []')
-    child = session.dress_namespace(0)
+    child = session.copy_namespace(0)
     session.probe("board.append('written')", namespace=child)
 
     assert session.release_namespace(child) == child

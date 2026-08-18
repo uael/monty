@@ -544,7 +544,7 @@ impl Child {
         event
     }
 
-    /// Creates, dresses, selects or releases one of the session's global
+    /// Creates, copies, selects or releases one of the session's global
     /// namespaces.
     ///
     /// Refused while suspended: every operation here either changes what the
@@ -566,7 +566,7 @@ impl Child {
         };
         let handle = match op {
             pb::namespace::Op::Create(pb::Empty {}) => repl.create_namespace(),
-            pb::namespace::Op::Dress(parent) => repl.dress_namespace(ScopeId::from_raw(parent)),
+            pb::namespace::Op::Copy(parent) => repl.copy_namespace(ScopeId::from_raw(parent)),
             pb::namespace::Op::Select(id) => repl
                 .select_namespace(ScopeId::from_raw(id))
                 .map(|()| ScopeId::from_raw(id)),

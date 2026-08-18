@@ -2481,6 +2481,7 @@ fn bigint_pow(base: BigInt, exp: u64) -> BigInt {
 
 #[cfg(test)]
 mod tests {
+    use crate::name_map::NameMap;
     use monty_types::{AssertMessageAnnotations, PrintWriter, ResourceTracker};
     use num_bigint::BigInt;
 
@@ -2520,6 +2521,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2541,6 +2543,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2564,6 +2567,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2587,6 +2591,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2609,6 +2614,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2630,6 +2636,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2651,6 +2658,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2673,6 +2681,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -2695,6 +2704,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );

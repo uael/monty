@@ -1,5 +1,5 @@
 # run-async
-# The shape the sabre engine drives asyncio in: a custom awaitable whose
+# A demanding shape for the event loop: a custom awaitable whose
 # `__await__` delegates to a coroutine that waits on an `Event`, jobs started
 # with `ensure_future` and watched with `add_done_callback`, a `Lock` around the
 # control path, and `gather` over a generator expression of live tasks.
@@ -9,7 +9,7 @@ log = []
 
 
 class Journal:
-    """An event that is replaced rather than cleared, as the engine's is."""
+    """An event that is replaced rather than cleared, so waiters see one turn."""
 
     def __init__(self):
         self.turn = asyncio.Event()

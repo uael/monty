@@ -229,6 +229,7 @@ impl MontyRepl {
                     mem::take(&mut this.scopes),
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -325,6 +326,7 @@ impl MontyRepl {
                     mem::take(&mut self.scopes),
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -382,12 +384,13 @@ impl MontyRepl {
         let assert_repr_max_bytes = self.options.assert_message_annotations.max_bytes();
         HeapReader::with(
             &mut self.heap,
-            &mut (&self.program.interns, print),
-            |reader, (interns, print)| {
+            &mut (&self.program, print),
+            |reader, (program, print)| {
                 let vm = &mut VM::new(
                     mem::take(&mut self.scopes),
                     reader,
-                    interns,
+                    &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     assert_repr_max_bytes,
                 );
@@ -453,6 +456,59 @@ impl MontyRepl {
         self.probe_scoped_in(None, expr, bindings, print)
     }
 
+    /// Which namespace a handle the host holds names.
+    ///
+    /// A namespace crosses out as a reference, so this is what turns one the
+    /// session handed over into something the host can run against.
+    #[must_use]
+    pub fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        self.heap.exported_scope(token)
+    }
+
+    /// Runs statements against a named namespace, leaving the selected one
+    /// alone. `None` means the selected one.
+    ///
+    /// What a probe refuses, this is for: source that binds. The names it binds
+    /// are the namespace's afterwards, which is the difference between reading a
+    /// session and adding to one. Its `bindings` are still scoped to this source
+    /// alone.
+    ///
+    /// Runs to completion, like a probe and for the same reason, so source that
+    /// would suspend raises instead. Defining something that suspends when it is
+    /// later called is how a host puts work into a session it is holding.
+    ///
+    /// # Errors
+    /// Returns `MontyException` for a handle naming no namespace, source that
+    /// does not compile, one that raises, or one that reaches a name the
+    /// bindings do not supply.
+    ///
+    /// # Panics
+    /// If the namespace that was selected on entry has gone by the time this
+    /// returns. Nothing here can release one, so this is an invariant rather
+    /// than a case a caller can reach.
+    pub fn run_scoped_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        run_scoped_in(
+            SessionParts {
+                program: &mut self.program,
+                heap: &mut self.heap,
+                scopes: &mut self.scopes,
+            },
+            target,
+            code,
+            bindings,
+            print,
+            &self.script_name,
+            self.options,
+            &self.sources,
+        )
+    }
+
     /// Evaluates one expression against a named namespace, leaving the
     /// selected one alone. `None` means the selected one.
     ///
@@ -472,8 +528,7 @@ impl MontyRepl {
         bindings: Vec<(String, MontyObject)>,
         print: PrintWriter<'_>,
     ) -> Result<MontyObject, MontyException> {
-        let selected = self.scopes.current;
-        let result = probe_scoped_in(
+        probe_scoped_in(
             SessionParts {
                 program: &mut self.program,
                 heap: &mut self.heap,
@@ -486,15 +541,7 @@ impl MontyRepl {
             &self.script_name,
             self.options,
             &self.sources,
-        );
-        // A probe reads; it does not move the session. Put the selection back
-        // whether it answered or raised.
-        if self.scopes.current != selected {
-            self.scopes = mem::take(&mut self.scopes)
-                .reinstall(selected)
-                .expect("the namespace that was selected is still held");
-        }
-        result
+        )
     }
 
     /// The namespace a feed or probe that names none acts on.
@@ -526,12 +573,12 @@ impl MontyRepl {
     /// # Errors
     /// Returns `MontyException` when `parent` names no namespace, or when the
     /// session already holds as many as a handle can address.
-    pub fn dress_namespace(&mut self, parent: ScopeId) -> Result<ScopeId, MontyException> {
+    pub fn copy_namespace(&mut self, parent: ScopeId) -> Result<ScopeId, MontyException> {
         if self.scopes.get(parent).is_none() {
             return Err(MontyException::runtime_error("no such namespace"));
         }
         self.scopes
-            .dress(parent, &self.heap)
+            .copy(parent, &self.heap)
             .ok_or_else(|| MontyException::runtime_error("too many namespaces"))
     }
 
@@ -552,7 +599,11 @@ impl MontyRepl {
     /// point of sharing. Returns `false` for a handle naming nothing, and for
     /// the selected namespace, which a session always needs.
     pub fn release_namespace(&mut self, id: ScopeId) -> bool {
-        self.scopes.release(id, &mut self.heap)
+        let released = self.scopes.release(id, &mut self.heap);
+        // The released values may have held namespace handles of their own;
+        // what those owned is released here rather than left queued.
+        self.scopes.sweep_condemned(&mut self.heap);
+        released
     }
 
     /// Pins the value bound to `name` and hands back the reference that names
@@ -588,12 +639,13 @@ impl MontyRepl {
         let assert_repr_max_bytes = self.options.assert_message_annotations.max_bytes();
         HeapReader::with(
             &mut self.heap,
-            &mut (&self.program.interns, print),
-            |reader, (interns, print)| {
+            &mut (&self.program, print),
+            |reader, (program, print)| {
                 let vm = &mut VM::new(
                     mem::take(&mut self.scopes),
                     reader,
-                    interns,
+                    &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     assert_repr_max_bytes,
                 );
@@ -653,6 +705,17 @@ impl MontyRepl {
     /// Travels with a dump, so a session woken from one keeps the mode.
     pub fn set_cross_by_reference(&mut self, on: bool) {
         self.heap.set_cross_by_reference(on);
+    }
+
+    /// Lets sandboxed code mint and drive namespaces of its own: `namespace()`
+    /// builds one, `namespace(source)` copies one from a namespace or binds
+    /// one from a dict, and the handle reads and writes real slots.
+    ///
+    /// Off by default: a handle reaches across every global scope the session
+    /// holds, which an embedder must opt into. Travels with a dump, so a
+    /// session woken from one keeps the mode.
+    pub fn set_namespaces(&mut self, on: bool) {
+        self.heap.set_namespaces(on);
     }
 
     /// Releases one of the host's references to an exported value, letting the
@@ -872,6 +935,24 @@ impl ReplProgress {
         self.probe_in(None, expr, bindings, print)
     }
 
+    /// Which namespace a handle the host holds names, whatever the progress
+    /// state; see [`MontyRepl::namespace_of`].
+    ///
+    /// A namespace crosses out as a reference, and the moment a host is most
+    /// likely to hold one is while the session is suspended, so this answers
+    /// there too: it is what turns a handle into the `target` the calls below
+    /// take.
+    #[must_use]
+    pub fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        match self {
+            Self::FunctionCall(call) => call.namespace_of(token),
+            Self::OsCall(call) => call.namespace_of(token),
+            Self::ResolveFutures(state) => state.namespace_of(token),
+            Self::NameLookup(lookup) => lookup.namespace_of(token),
+            Self::Complete { repl, .. } => repl.namespace_of(token),
+        }
+    }
+
     /// Evaluates one expression against a named namespace, whatever the
     /// progress state. `None` reads the namespace the snippet is suspended in,
     /// which is what [`probe`](Self::probe) does.
@@ -897,6 +978,28 @@ impl ReplProgress {
             Self::ResolveFutures(state) => state.probe_in(target, expr, bindings, print),
             Self::NameLookup(lookup) => lookup.probe_in(target, expr, bindings, print),
             Self::Complete { repl, .. } => repl.probe_scoped_in(target, expr, bindings, print),
+        }
+    }
+
+    /// Runs statements against a namespace, whatever the progress state, and
+    /// leaves that state as it was; `None` is the namespace the session is
+    /// running in. See [`MontyRepl::run_scoped_in`].
+    ///
+    /// # Errors
+    /// As [`MontyRepl::run_scoped_in`]. The progress is untouched either way.
+    pub fn run_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        match self {
+            Self::FunctionCall(call) => call.run_in(target, code, bindings, print),
+            Self::OsCall(call) => call.run_in(target, code, bindings, print),
+            Self::ResolveFutures(state) => state.run_in(target, code, bindings, print),
+            Self::NameLookup(lookup) => lookup.run_in(target, code, bindings, print),
+            Self::Complete { repl, .. } => repl.run_scoped_in(target, code, bindings, print),
         }
     }
 
@@ -994,6 +1097,28 @@ impl ReplFunctionCall {
     /// # Errors
     /// Returns `MontyException` for a handle naming no namespace, a rejected
     /// expression, or one that raises.
+    /// Runs statements against the suspended session, leaving this suspension
+    /// resumable; see [`MontyRepl::run_scoped_in`].
+    ///
+    /// # Errors
+    /// As [`MontyRepl::run_scoped_in`]. The suspension is untouched either way.
+    pub fn run_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.run_scoped(target, code, bindings, print)
+    }
+
+    /// Which namespace a handle the host holds names; see
+    /// [`MontyRepl::namespace_of`].
+    #[must_use]
+    pub fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        self.snapshot.namespace_of(token)
+    }
+
     pub fn probe_in(
         &mut self,
         target: Option<ScopeId>,
@@ -1088,6 +1213,28 @@ impl ReplOsCall {
     /// # Errors
     /// Returns `MontyException` for a handle naming no namespace, a rejected
     /// expression, or one that raises.
+    /// Runs statements against the suspended session, leaving this suspension
+    /// resumable; see [`MontyRepl::run_scoped_in`].
+    ///
+    /// # Errors
+    /// As [`MontyRepl::run_scoped_in`]. The suspension is untouched either way.
+    pub fn run_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.run_scoped(target, code, bindings, print)
+    }
+
+    /// Which namespace a handle the host holds names; see
+    /// [`MontyRepl::namespace_of`].
+    #[must_use]
+    pub fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        self.snapshot.namespace_of(token)
+    }
+
     pub fn probe_in(
         &mut self,
         target: Option<ScopeId>,
@@ -1191,6 +1338,28 @@ impl ReplNameLookup {
     /// # Errors
     /// Returns `MontyException` for a handle naming no namespace, a rejected
     /// expression, or one that raises.
+    /// Runs statements against the suspended session, leaving this suspension
+    /// resumable; see [`MontyRepl::run_scoped_in`].
+    ///
+    /// # Errors
+    /// As [`MontyRepl::run_scoped_in`]. The suspension is untouched either way.
+    pub fn run_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        self.snapshot.run_scoped(target, code, bindings, print)
+    }
+
+    /// Which namespace a handle the host holds names; see
+    /// [`MontyRepl::namespace_of`].
+    #[must_use]
+    pub fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        self.snapshot.namespace_of(token)
+    }
+
     pub fn probe_in(
         &mut self,
         target: Option<ScopeId>,
@@ -1237,6 +1406,7 @@ impl ReplNameLookup {
                     &executor.module_code,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -1318,6 +1488,13 @@ impl ReplResolveFutures {
         self.repl.release(token)
     }
 
+    /// Which namespace a handle the host holds names; see
+    /// [`MontyRepl::namespace_of`].
+    #[must_use]
+    pub fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        self.repl.namespace_of(token)
+    }
+
     /// Evaluates one expression against the suspended session, with
     /// `bindings` visible to it and to nothing after it, and leaves this
     /// suspension resumable.
@@ -1348,6 +1525,34 @@ impl ReplResolveFutures {
     /// # Errors
     /// Returns `MontyException` for a handle naming no namespace, a rejected
     /// expression, or one that raises.
+    /// Runs statements against the suspended session, leaving this suspension
+    /// resumable; see [`MontyRepl::run_scoped_in`].
+    ///
+    /// # Errors
+    /// As [`MontyRepl::run_scoped_in`]. The suspension is untouched either way.
+    pub fn run_in(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        run_scoped_in(
+            SessionParts {
+                program: &mut self.repl.program,
+                heap: &mut self.repl.heap,
+                scopes: &mut self.vm_state.scopes,
+            },
+            target,
+            code,
+            bindings,
+            print,
+            &self.repl.script_name,
+            self.repl.options,
+            &self.repl.sources,
+        )
+    }
+
     pub fn probe_in(
         &mut self,
         target: Option<ScopeId>,
@@ -1424,6 +1629,7 @@ impl ReplResolveFutures {
                     &executor.module_code,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -1578,6 +1784,37 @@ impl ReplSnapshot {
     ///
     /// This is what lets a host decide its answer BY looking at the frame that
     /// is asking, which is the only moment some questions can be asked at all.
+    /// Which namespace a handle the host holds names; see
+    /// [`MontyRepl::namespace_of`].
+    fn namespace_of(&self, token: u64) -> Option<ScopeId> {
+        self.repl.heap.exported_scope(token)
+    }
+
+    /// Runs statements against the suspended session; see
+    /// [`MontyRepl::run_scoped_in`].
+    fn run_scoped(
+        &mut self,
+        target: Option<ScopeId>,
+        code: &str,
+        bindings: Vec<(String, MontyObject)>,
+        print: PrintWriter<'_>,
+    ) -> Result<MontyObject, MontyException> {
+        run_scoped_in(
+            SessionParts {
+                program: &mut self.repl.program,
+                heap: &mut self.repl.heap,
+                scopes: &mut self.vm_state.scopes,
+            },
+            target,
+            code,
+            bindings,
+            print,
+            &self.repl.script_name,
+            self.repl.options,
+            &self.repl.sources,
+        )
+    }
+
     fn probe_scoped(
         &mut self,
         target: Option<ScopeId>,
@@ -1624,6 +1861,7 @@ impl ReplSnapshot {
                     &executor.module_code,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -1685,7 +1923,6 @@ fn inject_inputs_into_vm(
 /// The mutable session state one expression needs to run against, borrowed
 /// from wherever it currently lives.
 ///
-/// While a snippet is suspended the session is split: the heap stays on the
 /// While a snippet is suspended the session is split: the heap and the program
 /// stay on the [`MontyRepl`], and the globals are inside the [`VMSnapshot`].
 /// Idle, all three are on the repl. Naming the three pieces is what lets one
@@ -1724,8 +1961,40 @@ fn probe_scoped_in(
     options: CompileOptions,
     sources: &AHashMap<String, String>,
 ) -> Result<MontyObject, MontyException> {
-    let SessionParts { program, heap, scopes } = parts;
     check_probe_expression(expr, script_name)?;
+    run_scoped_in(parts, target, expr, bindings, print, script_name, options, sources)
+}
+
+/// Runs `code` against `parts`, with `bindings` visible to it and to nothing
+/// after it.
+///
+/// Runs to completion, so source that would suspend raises rather than parking:
+/// what this exists for is the work a host does while the session is already
+/// suspended, and a second suspension has nowhere to go.
+///
+/// Naming a namespace does not move the session: whatever was installed on
+/// entry is installed again on the way out, so a host that reaches into one
+/// namespace while a snippet is suspended in another leaves that snippet
+/// resuming where it stopped. That restoration is here rather than at each
+/// caller because a suspended session cannot survive being left elsewhere: its
+/// frames resolve globals against the installed vector, and only the caller
+/// that is idle could put it right afterwards.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session's pieces plus what one run is: splitting them would only name the same call twice"
+)]
+fn run_scoped_in(
+    parts: SessionParts<'_>,
+    target: Option<ScopeId>,
+    expr: &str,
+    bindings: Vec<(String, MontyObject)>,
+    print: PrintWriter<'_>,
+    script_name: &str,
+    options: CompileOptions,
+    sources: &AHashMap<String, String>,
+) -> Result<MontyObject, MontyException> {
+    let SessionParts { program, heap, scopes } = parts;
+    let selected = scopes.current;
     // Move the named namespace into place before anything compiles, so a
     // handle naming nothing fails before the program has been extended.
     if let Some(target) = target {
@@ -1745,6 +2014,7 @@ fn probe_scoped_in(
                 mem::take(scopes),
                 reader,
                 &program.interns,
+                &program.globals,
                 print.reborrow(),
                 executor.assert_repr_max_bytes,
             );
@@ -1772,6 +2042,14 @@ fn probe_scoped_in(
             result
         },
     );
+
+    // Put the session back where it was running, whether the source answered
+    // or raised.
+    if scopes.current != selected {
+        *scopes = mem::take(scopes)
+            .reinstall(selected)
+            .expect("the namespace this session was running in cannot go while it runs");
+    }
 
     // Whatever this expression interned stays interned, success or not: a value
     // it left on the heap can name a string only this compilation added, and

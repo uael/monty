@@ -495,3 +495,67 @@ fn a_host_call_carries_a_contract_the_host_reads_before_answering() {
     assert_eq!(outcome.value, MontyObject::String("done".to_owned()));
     assert!(repl.release(id));
 }
+
+/// A coroutine is a value with no copy representation, so it crosses the way
+/// every other one does: as its `repr` by default, and as a reference once the
+/// session is asked for one. A host that has one can hand it back, which is
+/// how work compiled in one namespace reaches a loop running in another.
+#[test]
+fn a_coroutine_crosses_as_text_until_the_session_is_asked_for_a_reference() {
+    let mut repl = new_repl();
+    feed(&mut repl, "async def work():\n    return 7");
+    assert_eq!(
+        feed(&mut repl, "work()"),
+        MontyObject::Repr("<coroutine object work>".to_owned())
+    );
+
+    repl.set_cross_by_reference(true);
+    let MontyObject::SessionRef { id, repr } = feed(&mut repl, "work()") else {
+        panic!("a coroutine crosses as a reference in this mode");
+    };
+    assert_eq!(repr, "<coroutine object work>");
+
+    // and what the host holds is the coroutine itself: handed back, it runs
+    let held = MontyObject::SessionRef { id, repr };
+    assert_eq!(
+        feed_with(
+            &mut repl,
+            "import asyncio\nasyncio.run(_co)",
+            vec![("_co".to_owned(), held)]
+        ),
+        MontyObject::Int(7)
+    );
+    assert!(repl.release(id));
+}
+
+/// A namespace handle resolves wherever the session stands, the suspended
+/// arms included: the host is holding one exactly when it is answering, and
+/// what it is holding it for is to run against it.
+#[test]
+fn a_namespace_handle_resolves_while_the_session_is_suspended() {
+    let mut repl = new_repl();
+    repl.set_namespaces(true);
+    repl.set_cross_by_reference(true);
+    let MontyObject::SessionRef { id, .. } = feed(&mut repl, "namespace({})") else {
+        panic!("a namespace crosses as a reference in this mode");
+    };
+    let mut call = suspend_on(repl, "held.ask()", vec![("held".to_owned(), host_ref(1, "Held"))]);
+    let scope = call.namespace_of(id).expect("the handle names a namespace");
+    call.run_in(Some(scope), "kept = 3", vec![], PrintWriter::Stdout)
+        .expect("a suspended session still takes statements");
+    assert_eq!(
+        call.probe_in(Some(scope), "kept", vec![], PrintWriter::Stdout).unwrap(),
+        MontyObject::Int(3)
+    );
+
+    let progress = call
+        .resume(ExtFunctionResult::Return(MontyObject::None), PrintWriter::Stdout)
+        .expect("the call is answered");
+    assert_eq!(
+        progress.namespace_of(id).expect("the handle still names it"),
+        scope,
+        "a handle names the same namespace whatever arm the progress landed on"
+    );
+    let (mut repl, _) = progress.into_complete().expect("the snippet runs out");
+    assert!(repl.release(id));
+}

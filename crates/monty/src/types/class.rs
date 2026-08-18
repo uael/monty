@@ -11,6 +11,7 @@ use crate::{
         BorrowedHeapReadMut, DropGuard, DropWithContext, HeapData, HeapId, HeapItem, HeapRead,
         heap_read_ref_as_field_mut,
     },
+    namespace::ScopeId,
     types::{
         instance::{class_member, class_name, descriptor_class_get},
         str::allocate_string,
@@ -145,6 +146,11 @@ pub(crate) struct Class {
     /// bases never change. `Some` is what makes instances of this class
     /// raisable and catchable by `except <builtin>:`.
     exc_base: Option<ExcType>,
+    /// The global namespace the `class` statement ran in, as its methods
+    /// carry theirs. What makes "was this defined here" answerable about a
+    /// class, which is the question a deep copy asks of everything it meets.
+    #[serde(default)]
+    scope: ScopeId,
 }
 
 impl Class {
@@ -157,13 +163,14 @@ impl Class {
     /// reachable through `bases`; the 3-arg `type()` constructor (`builtins::type_`)
     /// is the single place that derives it.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<Value>, exc_base: Option<ExcType>) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<Value>, exc_base: Option<ExcType>, scope: ScopeId) -> Self {
         Self {
             name,
             namespace,
             options: DataclassOptions::default(),
             bases,
             exc_base,
+            scope,
         }
     }
 
@@ -174,6 +181,11 @@ impl Class {
     #[must_use]
     pub fn dataclass_options(&self) -> DataclassOptions {
         self.options
+    }
+
+    /// The namespace this class was defined in; see [`Class::scope`].
+    pub fn scope(&self) -> ScopeId {
+        self.scope
     }
 
     /// Returns the class name (interned or heap-owned).

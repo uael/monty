@@ -1049,7 +1049,7 @@ fn truncate_str(s: &str) -> (String, bool) {
 fn namespace_operation(op: Option<&pb::namespace::Op>) -> &'static str {
     match op {
         Some(pb::namespace::Op::Create(_)) => "create",
-        Some(pb::namespace::Op::Dress(_)) => "dress",
+        Some(pb::namespace::Op::Copy(_)) => "copy",
         Some(pb::namespace::Op::Select(_)) => "select",
         Some(pb::namespace::Op::Release(_)) => "release",
         None => "unspecified",

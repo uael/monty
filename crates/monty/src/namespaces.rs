@@ -14,9 +14,9 @@ use crate::{
 /// A namespace is a name map, not a heap: two of them holding the same
 /// `Value::Ref` name the same live object, so a mutation through one is seen
 /// through the other while a rebinding through one is not. That is the whole
-/// difference between dressing a child ([`dress`](Self::dress), which copies
-/// the names and shares the objects) and forking a session (which copies the
-/// heap and shares nothing).
+/// difference between copying a namespace ([`copy`](Self::copy), which copies the
+/// names and shares the objects) and deep-copying one ([`crate::deepcopy`],
+/// which copies the objects too and shares nothing).
 ///
 /// Storage is a dense vector indexed by [`ScopeId`]. An entry is `None` when
 /// its namespace has been released, and also while it is the one installed in
@@ -31,6 +31,11 @@ impl Namespaces {
     /// The values of a namespace that is not currently installed.
     pub(crate) fn get(&self, id: ScopeId) -> Option<&Vec<Value>> {
         self.scopes.get(id.index())?.as_ref()
+    }
+
+    /// The values of a parked namespace, for binding through a handle.
+    pub(crate) fn get_mut(&mut self, id: ScopeId) -> Option<&mut Vec<Value>> {
+        self.scopes.get_mut(id.index())?.as_mut()
     }
 
     /// Adds an empty namespace and returns its handle.
@@ -181,7 +186,7 @@ impl Scopes {
 
     /// Adds a namespace holding the same values as `from`, which may be the
     /// installed one.
-    pub(crate) fn dress(&mut self, from: ScopeId, heap: &Heap) -> Option<ScopeId> {
+    pub(crate) fn copy(&mut self, from: ScopeId, heap: &Heap) -> Option<ScopeId> {
         let source: Vec<Value> = self
             .get(from)?
             .iter()
@@ -242,6 +247,35 @@ impl Scopes {
             self.globals.resize_with(slots, || Value::Undefined);
         }
         self.parked.ensure_slots(slots);
+    }
+
+    /// Releases every namespace condemned by a handle drop that happened
+    /// outside a running VM (a host-side release whose values held handles).
+    ///
+    /// Loops because a release can condemn more. The installed namespace
+    /// cannot be released and stays queued for a later sweep; the loop ends
+    /// when a pass releases nothing.
+    pub(crate) fn sweep_condemned(&mut self, heap: &mut Heap) {
+        loop {
+            if !heap.has_condemned() {
+                return;
+            }
+            let mut released_any = false;
+            let mut kept = Vec::new();
+            for scope in heap.condemned() {
+                if scope == self.current {
+                    kept.push(scope);
+                } else if self.release(scope, heap) {
+                    released_any = true;
+                }
+            }
+            for scope in kept {
+                heap.condemn_scope(scope);
+            }
+            if !released_any {
+                return;
+            }
+        }
     }
 }
 

@@ -1240,3 +1240,42 @@ fn a_probe_and_its_suspended_snippet_share_one_symbol_space() {
         ])
     );
 }
+
+/// A name first seen by a compile that lands while a snippet is suspended is
+/// still a name, to code the resumed snippet runs.
+///
+/// The slot a compile allocates belongs to the session, so the map from slot
+/// back to name has to be the session's too. Read from the running snippet's
+/// own compiled code instead, it stops at the names that existed when that
+/// snippet compiled: a builtin the later source names resolves against nothing
+/// and the load raises rather than falling back to the builtin.
+#[test]
+fn a_name_a_later_compile_introduced_resolves_in_the_snippet_that_resumes() {
+    let (repl, _) = init_repl("board = []");
+
+    let progress = repl
+        .feed_start("board.append(ext_fn(1))\nboard.append(later())", vec![], PrintWriter::Stdout)
+        .unwrap();
+    let mut call = progress.into_function_call().expect("expected function call");
+    // `BaseException` is named here for the first time, so this compile is what
+    // gives it a slot; nothing ever binds it.
+    call.run_in(
+        None,
+        "def later():\n    try:\n        raise ValueError('x')\n    except BaseException as e:\n        return type(e).__name__\n",
+        vec![],
+        PrintWriter::Stdout,
+    )
+    .unwrap();
+
+    let progress = call
+        .resume(MontyObject::String("resumed".to_owned()), PrintWriter::Stdout)
+        .unwrap();
+    let (mut repl, _) = progress.into_complete().expect("expected completion");
+    assert_eq!(
+        feed_run_print(&mut repl, "board").unwrap(),
+        MontyObject::List(vec![
+            MontyObject::String("resumed".to_owned()),
+            MontyObject::String("ValueError".to_owned()),
+        ])
+    );
+}

@@ -180,6 +180,7 @@ fn create_class(
         namespace_dict,
         base_values,
         exc_base,
+        vm.scope,
     ))));
     Ok(Value::Ref(class_id))
 }

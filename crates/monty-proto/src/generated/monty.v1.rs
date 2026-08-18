@@ -602,10 +602,12 @@ pub struct Probe {
 /// Operates on the session's global namespaces, all of which live over its one
 /// heap and share its one slot map.
 ///
-/// A namespace is a name map, not a heap. Dressing one from another copies the
+/// A namespace is a name map, not a heap. Copying one from another copies the
 /// names and shares the objects, so a rebinding through either is invisible to
 /// the other while a mutation of an object both name is seen by both. Copying
-/// the heap instead is `Dump` followed by `Load`, which shares nothing.
+/// the objects too is not an op here: it may run a `__deepcopy__`, so it belongs
+/// where code runs, and the sandbox spells it `ns.deepcopy()`. Sharing nothing
+/// at all is `Dump` followed by `Load`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Namespace {
     #[prost(oneof = "namespace::Op", tags = "1, 2, 3, 4")]
@@ -622,7 +624,7 @@ pub mod namespace {
         /// A namespace holding the same values as `parent`, pointing at the same
         /// live objects.
         #[prost(uint32, tag = "2")]
-        Dress(u32),
+        Copy(u32),
         /// Makes this namespace the one subsequent feeds and probes act on.
         #[prost(uint32, tag = "3")]
         Select(u32),

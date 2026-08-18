@@ -91,7 +91,7 @@ impl Tuple {
     /// Note: This does NOT increment reference counts - the caller must
     /// ensure refcounts are properly managed.
     #[must_use]
-    fn new(items: TupleVec) -> Self {
+    pub(crate) fn new(items: TupleVec) -> Self {
         let contains_refs = items.iter().any(|v| matches!(v, Value::Ref(_)));
         Self {
             items,

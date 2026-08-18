@@ -19,6 +19,9 @@
 //! `StringId` on hand from the AST. Avoiding `String::clone` per insert is
 //! a measurable win for large modules.
 
+#[cfg(test)]
+use std::sync::OnceLock;
+
 use ahash::AHashMap;
 
 use crate::{
@@ -106,6 +109,14 @@ impl TryFrom<NameMapWire> for NameMap {
 }
 
 impl NameMap {
+    /// An empty map that lives forever, for VMs standing outside any session
+    /// (unit tests): every lookup misses.
+    #[cfg(test)]
+    pub fn empty() -> &'static Self {
+        static EMPTY: OnceLock<NameMap> = OnceLock::new();
+        EMPTY.get_or_init(Self::new)
+    }
+
     /// Returns an empty `NameMap` with no slots allocated.
     pub fn new() -> Self {
         Self::default()
@@ -135,6 +146,15 @@ impl NameMap {
     /// Returns `true` if a slot has been allocated for `name_id`.
     pub fn contains(&self, name_id: StringId) -> bool {
         self.by_name.contains_key(&name_id)
+    }
+
+    /// Returns the name interned at `slot`, or `None` when nothing has taken it.
+    ///
+    /// The reverse direction this map exists to own: the VM labels a global
+    /// slot's `NameError` with it, and resolves the builtin behind a name no
+    /// namespace binds.
+    pub fn name_at(&self, slot: u16) -> Option<StringId> {
+        self.slots.get(usize::from(slot)).copied()
     }
 
     /// Returns the slot for `name_id`, allocating a new one if absent.

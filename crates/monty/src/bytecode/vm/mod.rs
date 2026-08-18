@@ -41,6 +41,7 @@ use crate::{
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
     modules::{StandardLib, json::JsonStringCache, re::RePatternCache},
+    name_map::NameMap,
     namespace::ScopeId,
     namespaces::{Namespaces, Scopes},
     object_bridge::MontyObjectExt,
@@ -717,6 +718,10 @@ pub struct VM<'h> {
     /// Interned strings/bytes.
     pub(crate) interns: &'h Interns,
 
+    /// Names to slots for the global namespaces, borrowed from the program
+    /// beside `interns`. What a namespace handle resolves its keys through.
+    pub(crate) names: &'h NameMap,
+
     /// Print output writer, borrowed so callers retain access to collected output.
     pub(crate) print_writer: PrintWriter<'h>,
 
@@ -873,6 +878,7 @@ impl<'h> VM<'h> {
         scopes: Scopes,
         heap: &'h mut HeapReader<'h>,
         interns: &'h Interns,
+        names: &'h NameMap,
         print_writer: PrintWriter<'h>,
         assert_repr_max_bytes: u32,
     ) -> Self {
@@ -889,6 +895,7 @@ impl<'h> VM<'h> {
             frames: Vec::with_capacity(16),
             heap,
             interns,
+            names,
             print_writer,
             exception_stack: Vec::new(),
             instruction_ip: 0,
@@ -929,6 +936,7 @@ impl<'h> VM<'h> {
         module_code: &'h Code,
         heap: &'h mut HeapReader<'h>,
         interns: &'h Interns,
+        names: &'h NameMap,
         print_writer: PrintWriter<'h>,
         assert_repr_max_bytes: u32,
     ) -> Self {
@@ -974,6 +982,7 @@ impl<'h> VM<'h> {
             frames,
             heap,
             interns,
+            names,
             print_writer,
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
@@ -1021,6 +1030,11 @@ impl<'h> VM<'h> {
         // Drop cached JSON strings before consuming the VM — they are not
         // included in the snapshot and their refcounts must be decremented.
         self.json_string_cache.drop_all(self.heap);
+
+        // Release what can be released before the state is parked; a condemned
+        // scope that is the installed one stays queued, and the queue rides
+        // the heap through any dump this snapshot ends up in.
+        self.sweep_condemned();
 
         VMSnapshot {
             // Move values directly — no clone, no refcount increment needed
@@ -1082,10 +1096,41 @@ impl<'h> VM<'h> {
     /// completes. Must be called before the VM is dropped, since `Drop` will
     /// otherwise release them all with `drop_with`.
     pub fn take_scopes(&mut self) -> Scopes {
+        self.sweep_condemned();
         Scopes {
             globals: mem::take(&mut self.globals),
             parked: mem::take(&mut self.parked),
             current: self.scope,
+        }
+    }
+
+    /// Releases every namespace whose owning handle has dropped.
+    ///
+    /// Loops because a release can condemn more (a namespace can hold the
+    /// handle of another). The installed namespace cannot be released while it
+    /// runs, so it stays queued for whichever later sweep finds it parked; the
+    /// loop ends when a pass releases nothing.
+    pub(crate) fn sweep_condemned(&mut self) {
+        loop {
+            if !self.heap.heap().has_condemned() {
+                return;
+            }
+            let condemned = self.heap.heap_mut().condemned();
+            let mut released_any = false;
+            let mut kept = Vec::new();
+            for scope in condemned {
+                if scope == self.scope {
+                    kept.push(scope);
+                } else if self.parked.release(scope, self.heap.heap_mut()) {
+                    released_any = true;
+                }
+            }
+            for scope in kept {
+                self.heap.heap_mut().condemn_scope(scope);
+            }
+            if !released_any {
+                return;
+            }
         }
     }
 
@@ -1185,6 +1230,12 @@ impl<'h> VM<'h> {
     fn dispatch_checkpoint(&mut self, check_limits: bool, ip: usize) -> Result<(), RunError> {
         if check_limits {
             self.heap.tracker.check_memory_time()?;
+        }
+        // Namespaces condemned by handle drops release here rather than at the
+        // drop itself, which runs with no reach into the scope collection. An
+        // instruction-counted point, so free-list reuse stays deterministic.
+        if self.heap.heap().has_condemned() {
+            self.sweep_condemned();
         }
         if self.heap.should_gc() {
             self.current_frame_mut().ip = ip;
@@ -2757,13 +2808,19 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Returns the interned name of a module-level global at `slot`, if known.
+    /// Returns the interned name of a global at `slot`, if any name has taken it.
     ///
-    /// Returns `None` if no module code is attached (test harness use of
-    /// `VM::new` without `run_module`) or if the slot is past the recorded
-    /// name table.
+    /// Read from the program's own slot map rather than from the running code's
+    /// name table, because a slot belongs to the session and the code does not:
+    /// a session compiles snippet after snippet against one growing map, so any
+    /// code still running was compiled when the map was shorter, and a name
+    /// introduced since would read as nameless. Then a builtin the running code
+    /// names but no namespace binds resolves against nothing, and the load
+    /// raises `name '<global N>' is not defined` instead of falling back.
+    ///
+    /// `None` only for a slot no name has ever taken.
     fn global_name(&self, slot: u16) -> Option<StringId> {
-        self.module_code.and_then(|c| c.local_name(slot))
+        self.names.name_at(slot)
     }
 
     /// Pops the top of stack and stores it in a global variable.

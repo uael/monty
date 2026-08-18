@@ -316,6 +316,9 @@ pub enum Type {
     /// message it raises), not in the type system.
     #[strum(serialize = "hostref")]
     HostRef,
+    /// A global namespace held as a value; see `types::namespace_ref`.
+    #[strum(serialize = "namespace")]
+    Namespace,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -432,6 +435,10 @@ impl Type {
             // The one native class a bare name resolves to: every other lives
             // behind an import (`collections.abc`, `typing`, `contextlib`).
             "object" => Some(Self::Native(NativeClass::Object)),
+            // Constructing one is gated on the session's namespaces being
+            // enabled; the name resolves either way, since compile-time
+            // substitution cannot consult the heap.
+            "namespace" => Some(Self::Namespace),
             _ => None,
         }
     }
@@ -611,6 +618,12 @@ impl Type {
             (Self::DateTime, m) if m == StaticStrings::Fromisoformat => {
                 datetime::class_fromisoformat(vm.heap, args, vm.interns).map(AttrCallResult::Value)
             }
+            // `namespace.current()`: a handle to the namespace the caller is
+            // running in, which is the one thing a handle cannot be built from
+            // its own constructor, since that one always makes a new namespace.
+            (Self::Namespace, m) if vm.interns.get_str(m) == "current" => {
+                super::namespace_ref::current(vm, args).map(AttrCallResult::Value)
+            }
             _ => {
                 let method_name = vm.interns.get_str(method_id);
                 args.drop_with(vm.heap);
@@ -645,6 +658,7 @@ impl Type {
             Self::Iterator => super::iter::init(vm, args),
             Self::Path => Path::init(vm, args),
             Self::Property => property::property_init(vm, args),
+            Self::Namespace => super::namespace_ref::init(vm, args),
             Self::ContextVar => contextvars::init(vm, args),
             Self::Suppress => suppress::init(vm, args),
             Self::AttrGetter => attrgetter::init(vm, args),

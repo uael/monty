@@ -334,6 +334,7 @@ impl NameLookup {
                     &executor.module_code,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -449,6 +450,7 @@ impl ResolveFutures {
                 &executor.module_code,
                 reader,
                 &program.interns,
+                &program.globals,
                 PrintWriter::Stdout,
                 executor.assert_repr_max_bytes,
             );
@@ -503,6 +505,7 @@ impl ResolveFutures {
                     &executor.module_code,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -572,6 +575,7 @@ impl Snapshot {
                     &executor.module_code,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );

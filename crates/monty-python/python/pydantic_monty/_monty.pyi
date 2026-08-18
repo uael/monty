@@ -868,7 +868,7 @@ class MontySession:
         one simply binds none of them.
         """
 
-    def dress_namespace(self, parent: int) -> int:
+    def copy_namespace(self, parent: int) -> int:
         """Add a namespace holding the same values as `parent`, pointing at the
         same live objects.
 
@@ -1238,8 +1238,8 @@ class AsyncMontySession:
     async def create_namespace(self) -> int:
         """Async counterpart of `MontySession.create_namespace`."""
 
-    async def dress_namespace(self, parent: int) -> int:
-        """Async counterpart of `MontySession.dress_namespace`."""
+    async def copy_namespace(self, parent: int) -> int:
+        """Async counterpart of `MontySession.copy_namespace`."""
 
     async def select_namespace(self, namespace: int) -> int:
         """Async counterpart of `MontySession.select_namespace`."""

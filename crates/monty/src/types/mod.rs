@@ -30,6 +30,7 @@ pub mod long_int;
 pub mod match_pattern;
 pub mod module;
 pub mod namedtuple;
+pub mod namespace_ref;
 pub mod native_class;
 pub mod partialmethod;
 pub mod path;
@@ -61,9 +62,9 @@ pub(crate) use deque::Deque;
 pub(crate) use dict::{Dict, DictItemIterator, DictKeyIterator, DictValueIterator};
 pub(crate) use dict_view::{DictItemsView, DictKeysView, DictValuesView};
 pub(crate) use ext_function::ExtFunction;
-pub(crate) use host_ref::HostRef;
 pub(crate) use file::OpenFile;
 pub(crate) use generic_alias::{GenericAlias, UnionType};
+pub(crate) use host_ref::HostRef;
 pub(crate) use instance::{
     BoundMethod, Instance, instance_bool, instance_call, instance_delattr, instance_delitem, instance_len,
     instance_setattr, instance_setitem, instance_subscript,
@@ -74,6 +75,7 @@ pub(crate) use list::List;
 pub(crate) use long_int::{LongInt, long_int_as_f64};
 pub(crate) use module::Module;
 pub(crate) use namedtuple::{NamedTuple, NamedTupleClass, construct_namedtuple};
+pub(crate) use namespace_ref::NamespaceRef;
 pub(crate) use native_class::NativeClass;
 pub(crate) use partialmethod::PartialMethod;
 pub(crate) use path::Path;

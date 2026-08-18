@@ -504,12 +504,6 @@ impl MontyObjectExt for MontyObject {
                     HeapReadOutput::Module(m) => {
                         Self::Repr(format!("<module '{}'>", vm.interns.get_str(m.get(vm.heap).name())))
                     }
-                    HeapReadOutput::Coroutine(coro) => {
-                        let func_id = coro.get(vm.heap).func_id;
-                        let func = vm.interns.get_function(func_id);
-                        let name = vm.interns.get_str(func.name.name_id);
-                        Self::Repr(format!("<coroutine object {name}>"))
-                    }
                     HeapReadOutput::Combinator(comb) => {
                         Self::Repr(format!("<as_completed({})>", comb.get(vm.heap).children.len()))
                     }
@@ -682,10 +676,10 @@ impl MontyTypeExt for MontyType {
     /// `from_type_name` never hold/produce it).
     fn from_internal_static(ty: Type) -> Self {
         match ty {
-            // The descriptor wrappers and the `super()` proxy have no host
-            // counterpart; they surface as their `repr` string, like a class
-            // object does (see `limitations/classes.md`).
-            Type::StaticMethod | Type::ClassMethod | Type::Super => Self::Type,
+            // The descriptor wrappers, the `super()` proxy and a namespace
+            // handle have no host counterpart; they surface as their `repr`
+            // string, like a class object does (see `limitations/classes.md`).
+            Type::StaticMethod | Type::ClassMethod | Type::Super | Type::Namespace => Self::Type,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,
@@ -937,10 +931,10 @@ fn session_class(name: &str, members: &[String], vm: &VM<'_>) -> Option<HeapId> 
 /// mode, and as its `repr` string otherwise.
 ///
 /// This is the one place a type object, a class object, a template, a
-/// generator decides what it becomes on the way out, so it is the one place
-/// the mode has to be read. A reference is only possible for a heap value:
-/// there is nothing to pin otherwise, and every non-heap value already has a
-/// copy representation.
+/// generator, a coroutine decides what it becomes on the way out, so it is the
+/// one place the mode has to be read. A reference is only possible for a heap
+/// value: there is nothing to pin otherwise, and every non-heap value already
+/// has a copy representation.
 fn cross_unrepresentable(value: &Value, vm: &mut VM<'_>) -> MontyObject {
     let Value::Ref(id) = *value else {
         return repr_or_error(value, vm);

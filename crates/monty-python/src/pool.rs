@@ -461,8 +461,8 @@ impl PyMontySession {
     /// A rebinding through either is invisible to the other, and a mutation of
     /// an object both name is seen by both. Copying the heap instead is
     /// `dump()` and `load()`, which shares nothing.
-    fn dress_namespace(&self, py: Python<'_>, parent: u32) -> PyResult<u32> {
-        self.namespace_op(py, NamespaceOp::Dress(parent))
+    fn copy_namespace(&self, py: Python<'_>, parent: u32) -> PyResult<u32> {
+        self.namespace_op(py, NamespaceOp::Copy(parent))
     }
 
     /// Makes `namespace` the one subsequent feeds and probes act on.
@@ -581,7 +581,7 @@ impl PyMontySession {
 #[derive(Clone, Copy)]
 enum NamespaceOp {
     Create,
-    Dress(u32),
+    Copy(u32),
     Select(u32),
     Release(u32),
 }
@@ -600,7 +600,7 @@ impl PyMontySession {
                 };
                 match op {
                     NamespaceOp::Create => checkout.create_namespace().await,
-                    NamespaceOp::Dress(parent) => checkout.dress_namespace(parent).await,
+                    NamespaceOp::Copy(parent) => checkout.copy_namespace(parent).await,
                     NamespaceOp::Select(id) => checkout.select_namespace(id).await,
                     NamespaceOp::Release(id) => checkout.release_namespace(id).await,
                 }
@@ -1102,9 +1102,9 @@ impl PyAsyncMontySession {
         self.namespace_op(py, NamespaceOp::Create)
     }
 
-    /// Async counterpart of [`PyMontySession::dress_namespace`].
-    fn dress_namespace<'py>(&self, py: Python<'py>, parent: u32) -> PyResult<Bound<'py, PyAny>> {
-        self.namespace_op(py, NamespaceOp::Dress(parent))
+    /// Async counterpart of [`PyMontySession::copy_namespace`].
+    fn copy_namespace<'py>(&self, py: Python<'py>, parent: u32) -> PyResult<Bound<'py, PyAny>> {
+        self.namespace_op(py, NamespaceOp::Copy(parent))
     }
 
     /// Async counterpart of [`PyMontySession::select_namespace`].
@@ -1227,7 +1227,7 @@ impl PyAsyncMontySession {
             };
             match op {
                 NamespaceOp::Create => checkout.create_namespace().await,
-                NamespaceOp::Dress(parent) => checkout.dress_namespace(parent).await,
+                NamespaceOp::Copy(parent) => checkout.copy_namespace(parent).await,
                 NamespaceOp::Select(id) => checkout.select_namespace(id).await,
                 NamespaceOp::Release(id) => checkout.release_namespace(id).await,
             }

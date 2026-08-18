@@ -1,9 +1,9 @@
 //! Several global namespaces over one heap.
 //!
-//! A namespace is a name map, not a heap. Dressing one from another copies the
+//! A namespace is a name map, not a heap. Copying one from another copies the
 //! names and shares the objects, so a rebinding crosses in neither direction
-//! and a mutation crosses in both; forking a session copies the heap and
-//! shares nothing. These tests state both laws, and prove sharing by mutating
+//! and a mutation crosses in both; copying one deeply copies the objects too
+//! and shares nothing. These tests state both laws, and prove sharing by mutating
 //! through one namespace and reading through the other rather than by
 //! comparing values that merely look alike.
 
@@ -54,12 +54,12 @@ fn t(value: bool) -> MontyObject {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_dressed_child_shares_objects_and_not_bindings() {
+fn a_copied_namespace_shares_objects_and_not_bindings() {
     let mut repl = session();
     feed(&mut repl, "board = []");
     feed(&mut repl, "x = 1");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     // A mutation crosses, child to parent.
     feed_in(&mut repl, child, "board.append('c')");
@@ -84,7 +84,7 @@ fn a_name_only_the_child_binds_is_not_a_name_the_parent_has() {
     let mut repl = session();
     feed(&mut repl, "shared = 1");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     feed_in(&mut repl, child, "only_child = 7");
     assert_eq!(feed_in(&mut repl, child, "only_child"), MontyObject::Int(7));
@@ -115,7 +115,7 @@ fn siblings_share_the_parent_and_not_each_other() {
     feed(&mut repl, "tag = 'parent'");
     let parent = repl.namespace();
 
-    let kids: Vec<ScopeId> = (0..3).map(|_| repl.dress_namespace(parent).unwrap()).collect();
+    let kids: Vec<ScopeId> = (0..3).map(|_| repl.copy_namespace(parent).unwrap()).collect();
     for (i, &kid) in kids.iter().enumerate() {
         feed_in(&mut repl, kid, &format!("tag = 'kid{i}'"));
         feed_in(&mut repl, kid, &format!("board.append({i})"));
@@ -139,7 +139,7 @@ fn a_class_crosses_as_itself_not_as_a_twin() {
     feed(&mut repl, "inst = C(1)");
     feed(&mut repl, "board = []");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     assert_eq!(feed_in(&mut repl, child, "type(inst) is C"), t(true));
 
@@ -157,7 +157,7 @@ fn a_function_reads_the_namespace_it_was_defined_in() {
     feed(&mut repl, "scale = 10");
     feed(&mut repl, "def scaled(v):\n    return v * scale\n");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     assert_eq!(feed_in(&mut repl, child, "scaled(2)"), MontyObject::Int(20));
 
@@ -184,7 +184,7 @@ fn a_function_writes_the_namespace_it_was_defined_in() {
     feed(&mut repl, "seen = 0");
     feed(&mut repl, "def bump():\n    global seen\n    seen = seen + 1\n");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     feed_in(&mut repl, child, "bump()");
     assert_eq!(
@@ -205,7 +205,7 @@ fn a_generator_resumes_in_the_namespace_it_was_defined_in() {
     feed(&mut repl, "step = 1");
     feed(&mut repl, "def counter():\n    yield step\n    yield step\n");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     feed_in(&mut repl, child, "g = counter()");
     assert_eq!(feed_in(&mut repl, child, "next(g)"), MontyObject::Int(1));
@@ -224,7 +224,7 @@ fn a_dump_carries_the_sharing() {
     feed(&mut repl, "board = []");
     feed(&mut repl, "x = 1");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
     feed_in(&mut repl, child, "x = 2");
     feed_in(&mut repl, child, "board.append('before')");
 
@@ -245,7 +245,7 @@ fn a_dump_carries_where_a_function_reads_its_globals() {
     let mut repl = session();
     feed(&mut repl, "scale = 10");
     feed(&mut repl, "def scaled(v):\n    return v * scale\n");
-    let child = repl.dress_namespace(repl.namespace()).unwrap();
+    let child = repl.copy_namespace(repl.namespace()).unwrap();
     feed_in(&mut repl, child, "scale = 100");
 
     let mut woken = round_trip(&repl);
@@ -258,7 +258,7 @@ fn a_dump_carries_where_a_function_reads_its_globals() {
 fn a_fork_shares_nothing() {
     let mut repl = session();
     feed(&mut repl, "board = []");
-    let child = repl.dress_namespace(repl.namespace()).unwrap();
+    let child = repl.copy_namespace(repl.namespace()).unwrap();
 
     let mut left = round_trip(&repl);
     let mut right = round_trip(&repl);
@@ -284,7 +284,7 @@ fn a_second_namespace_is_readable_while_the_first_is_suspended() {
     feed(&mut repl, "board = []");
     feed(&mut repl, "x = 1");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
     feed_in(&mut repl, child, "x = 2");
     feed_in(&mut repl, child, "who = 'child'");
 
@@ -329,6 +329,46 @@ fn a_second_namespace_is_readable_while_the_first_is_suspended() {
     assert_eq!(feed_in(&mut repl, child, "x"), MontyObject::Int(2));
 }
 
+/// Reading or writing another namespace mid-suspension does not move the
+/// session: the snippet resumes in the namespace it suspended in.
+#[test]
+fn a_probe_of_another_namespace_leaves_the_suspension_where_it_was() {
+    let mut repl = session();
+    feed(&mut repl, "who = 'parent'");
+    let child = repl.copy_namespace(repl.namespace()).unwrap();
+    feed_in(&mut repl, child, "who = 'child'");
+
+    let mut progress = repl
+        .feed_start("answer = ask(1)\nwho", vec![], PrintWriter::Stdout)
+        .expect("suspends at the undefined callable");
+    assert_eq!(
+        progress
+            .probe_in(Some(child), "who", vec![], PrintWriter::Stdout)
+            .unwrap(),
+        MontyObject::String("child".to_owned())
+    );
+    progress
+        .run_in(Some(child), "noted = 1", vec![], PrintWriter::Stdout)
+        .unwrap();
+
+    let call = progress.into_function_call().expect("still a function call");
+    let (mut repl, outcome) = call
+        .resume(MontyObject::Int(2), PrintWriter::Stdout)
+        .unwrap()
+        .into_complete()
+        .expect("completes");
+    assert_eq!(
+        outcome.value,
+        MontyObject::String("parent".to_owned()),
+        "the resumed snippet reads the namespace it suspended in"
+    );
+    assert_eq!(feed(&mut repl, "answer"), MontyObject::Int(2));
+    let selected = repl.namespace();
+    let err = feed_err(&mut repl, selected, "noted");
+    assert!(err.contains("NameError"), "the run landed in the child, got {err}");
+    assert_eq!(feed_in(&mut repl, child, "noted"), MontyObject::Int(1));
+}
+
 #[test]
 fn probing_a_namespace_the_session_does_not_have_is_refused() {
     let mut repl = session();
@@ -353,7 +393,7 @@ fn releasing_a_namespace_keeps_what_another_still_names() {
     let mut repl = session();
     feed(&mut repl, "board = []");
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
 
     feed_in(&mut repl, child, "board.append('written')");
     assert!(repl.release_namespace(child));
@@ -395,7 +435,7 @@ fn the_loop_runs_tasks_of_different_namespaces() {
         "async def who():\n    import asyncio\n    await asyncio.sleep(0)\n    return tag\n",
     );
     let parent = repl.namespace();
-    let child = repl.dress_namespace(parent).unwrap();
+    let child = repl.copy_namespace(parent).unwrap();
     feed_in(&mut repl, child, "tag = 'child'");
     // A coroutine of the child's own, over the child's `tag`.
     feed_in(
@@ -428,7 +468,7 @@ fn a_parked_task_resumes_in_its_own_namespace() {
         &mut repl,
         "async def slow():\n    import asyncio\n    await asyncio.sleep(0.01)\n    return tag\n",
     );
-    let child = repl.dress_namespace(repl.namespace()).unwrap();
+    let child = repl.copy_namespace(repl.namespace()).unwrap();
     feed_in(&mut repl, child, "tag = 'child'");
     feed_in(
         &mut repl,
@@ -476,7 +516,7 @@ fn a_namespace_is_padded_to_names_added_after_it() {
     assert_eq!(feed(&mut repl, "later_63"), MontyObject::Int(63));
 }
 
-/// Prints what a namespace costs and what a fork costs against dressing one.
+/// Prints what a namespace costs, and what a whole session dump costs beside it.
 /// Run with `--nocapture`; the assertions are the invariants, the numbers are
 /// for the record.
 #[test]
@@ -491,22 +531,22 @@ fn cost_of_a_namespace() {
     let parent = repl.namespace();
 
     let started = Instant::now();
-    let kids: Vec<ScopeId> = (0..FRAMES).map(|_| repl.dress_namespace(parent).unwrap()).collect();
-    let dress_each = started.elapsed() / u32::try_from(FRAMES).expect("frame count fits");
+    let kids: Vec<ScopeId> = (0..FRAMES).map(|_| repl.copy_namespace(parent).unwrap()).collect();
+    let copy_each = started.elapsed() / u32::try_from(FRAMES).expect("frame count fits");
 
     let bytes = dump("ns.py", None, SessionRef::Idle(&repl)).unwrap();
     let started = Instant::now();
     for _ in 0..10 {
         drop(round_trip(&repl));
     }
-    let fork_each = started.elapsed() / 10;
+    let wake_each = started.elapsed() / 10;
 
     // Each namespace is one Value per slot the program has, and Value is 16
     // bytes; that is the whole per-namespace cost of sharing one slot map.
     let per_namespace = 16 * NAMES;
     println!(
         "COST names={NAMES} frames={FRAMES} | namespace={per_namespace}B \
-         total={}KiB | dress={dress_each:?}/ea | fork={fork_each:?}/ea dump={}B",
+         total={}KiB | copy={copy_each:?}/ea | wake={wake_each:?}/ea dump={}B",
         per_namespace * FRAMES / 1024,
         bytes.len(),
     );

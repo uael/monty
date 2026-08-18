@@ -1059,6 +1059,7 @@ mod tests {
     use crate::{
         heap::{Heap, HeapReader},
         intern::{InternerBuilder, Interns},
+        name_map::NameMap,
         namespaces::Scopes,
         types::LongInt,
     };
@@ -1101,6 +1102,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -1140,6 +1142,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );
@@ -1176,6 +1179,7 @@ mod tests {
                 Scopes::new(),
                 reader,
                 interns,
+                NameMap::empty(),
                 PrintWriter::Disabled,
                 AssertMessageAnnotations::DEFAULT_MAX_BYTES.get(),
             );

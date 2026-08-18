@@ -567,10 +567,12 @@ message Probe {
 // Operates on the session's global namespaces, all of which live over its one
 // heap and share its one slot map.
 //
-// A namespace is a name map, not a heap. Dressing one from another copies the
+// A namespace is a name map, not a heap. Copying one from another copies the
 // names and shares the objects, so a rebinding through either is invisible to
 // the other while a mutation of an object both name is seen by both. Copying
-// the heap instead is `Dump` followed by `Load`, which shares nothing.
+// the objects too is not an op here: it may run a `__deepcopy__`, so it belongs
+// where code runs, and the sandbox spells it `ns.deepcopy()`. Sharing nothing
+// at all is `Dump` followed by `Load`.
 message Namespace {
   oneof op {
     // A namespace binding nothing. It still shares the session's slot map, so
@@ -578,7 +580,7 @@ message Namespace {
     Empty create = 1;
     // A namespace holding the same values as `parent`, pointing at the same
     // live objects.
-    uint32 dress = 2;
+    uint32 copy = 2;
     // Makes this namespace the one subsequent feeds and probes act on.
     uint32 select = 3;
     // Drops a namespace, releasing what it alone held. An object another

@@ -501,8 +501,8 @@ impl Checkout {
     ///
     /// # Errors
     /// [`PoolError::Runtime`] when `parent` names no namespace.
-    pub async fn dress_namespace(&mut self, parent: u32) -> Result<u32, PoolError> {
-        self.namespace_op(pb::namespace::Op::Dress(parent)).await
+    pub async fn copy_namespace(&mut self, parent: u32) -> Result<u32, PoolError> {
+        self.namespace_op(pb::namespace::Op::Copy(parent)).await
     }
 
     /// Makes `id` the namespace subsequent feeds and probes act on.

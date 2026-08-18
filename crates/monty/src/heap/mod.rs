@@ -11,7 +11,7 @@ use std::{
     fmt,
     iter::once,
     marker::PhantomData,
-    mem::ManuallyDrop,
+    mem::{self, ManuallyDrop},
     ops::{Deref, DerefMut},
     ptr::{self, NonNull},
     sync::Arc,
@@ -32,15 +32,16 @@ use crate::{
     generator::Generator,
     heap_data::{CellValue, Closure, FunctionDefaults},
     modules::dataclasses::{DataclassField, DataclassParams},
+    namespace::ScopeId,
     types::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
-        HostRef,
-        FrozenSet, GenericAlias, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor, Module,
-        NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, Range, RangeIterator, ReMatch, RePattern, Set,
-        SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone, Tuple, TupleIterator,
-        TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive, callable_iterator::CallableIterator,
-        date, datetime, deque::DequeIterator, list::ListIterator, timedelta, timezone,
+        FrozenSet, GenericAlias, HostRef, Instance, Interpolation, ItertoolsIter, List, LongInt, MethodDescriptor,
+        Module, NamedTuple, NamedTupleClass, NamespaceRef, OpenFile, PartialMethod, Path, Range, RangeIterator,
+        ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress, Template, TimeZone,
+        Tuple, TupleIterator, TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive,
+        callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, list::ListIterator, timedelta,
+        timezone,
     },
     value::Value,
 };
@@ -240,6 +241,7 @@ pub enum HeapReadOutput<'a> {
     FunctionDefaults(HeapRead<'a, FunctionDefaults>),
     ExtFunction(HeapRead<'a, ExtFunction>),
     HostRef(HeapRead<'a, HostRef>),
+    Namespace(HeapRead<'a, NamespaceRef>),
     Cell(HeapRead<'a, CellValue>),
     Range(HeapRead<'a, Range>),
     Slice(HeapRead<'a, Slice>),
@@ -682,6 +684,7 @@ impl<'a> HeapPtr<'a> {
             }
             HeapData::ExtFunction(name) => HeapReadOutput::ExtFunction(heap_read(base, name, readers)),
             HeapData::HostRef(host_ref) => HeapReadOutput::HostRef(heap_read(base, host_ref, readers)),
+            HeapData::Namespace(handle) => HeapReadOutput::Namespace(heap_read(base, handle, readers)),
             HeapData::Cell(cell_value) => HeapReadOutput::Cell(heap_read(base, cell_value, readers)),
             HeapData::Range(range) => HeapReadOutput::Range(heap_read(base, range, readers)),
             HeapData::Slice(slice) => HeapReadOutput::Slice(heap_read(base, slice, readers)),
@@ -918,11 +921,24 @@ pub(crate) struct Heap {
     ///
     /// Travels with the heap so a session dumped in this mode wakes in it.
     cross_by_reference: bool,
+    /// Whether sandboxed code may mint and drive namespaces of its own.
+    ///
+    /// Travels with the heap, as `cross_by_reference` does.
+    namespaces_enabled: bool,
+    /// Namespaces whose owning handle dropped, awaiting release.
+    ///
+    /// A handle's drop runs with no reach into the scope collection, so it
+    /// queues the scope here and the holder of both (the VM at instruction
+    /// boundaries and exits, the REPL after host-side drops) performs the
+    /// release. Serialized: a handle can die while the namespace it owns is
+    /// the installed one (a frame cut while its snippet is suspended), and
+    /// that debt must survive a dump taken before the next install.
+    condemned_scopes: Vec<ScopeId>,
 }
 
 impl serde::Serialize for Heap {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Heap", 8)?;
+        let mut state = serializer.serialize_struct("Heap", 10)?;
         state.serialize_field("entries", &self.entries)?;
         state.serialize_field("tracker", &self.tracker)?;
         state.serialize_field("purple_count", &self.purple_count)?;
@@ -931,6 +947,8 @@ impl serde::Serialize for Heap {
         state.serialize_field("modules", &self.modules)?;
         state.serialize_field("exports", &self.exports)?;
         state.serialize_field("cross_by_reference", &self.cross_by_reference)?;
+        state.serialize_field("namespaces_enabled", &self.namespaces_enabled)?;
+        state.serialize_field("condemned_scopes", &self.condemned_scopes)?;
         state.end()
     }
 }
@@ -953,6 +971,10 @@ impl<'de> serde::Deserialize<'de> for Heap {
             exports: BTreeMap<HeapId, u32>,
             #[serde(default)]
             cross_by_reference: bool,
+            #[serde(default)]
+            namespaces_enabled: bool,
+            #[serde(default)]
+            condemned_scopes: Vec<ScopeId>,
         }
         let fields = HeapFields::deserialize(deserializer)?;
         let mut entries = fields.entries;
@@ -977,6 +999,8 @@ impl<'de> serde::Deserialize<'de> for Heap {
             modules: fields.modules,
             exports: fields.exports,
             cross_by_reference: fields.cross_by_reference,
+            namespaces_enabled: fields.namespaces_enabled,
+            condemned_scopes: fields.condemned_scopes,
         })
     }
 }
@@ -997,6 +1021,36 @@ const DEFAULT_GC_INTERVAL: usize = if cfg!(feature = "memory-model-checks") {
 };
 
 impl Heap {
+    /// Replaces an entry's payload, handing back what stood there.
+    ///
+    /// For a value the caller allocated and nothing else has reached yet: a
+    /// deep copy's placeholder, swapped for the finished copy once the children that
+    /// close its cycles exist. Taking `&mut self` is what makes that safe, since
+    /// no reader can be alive.
+    pub(crate) fn replace_data(&mut self, id: HeapId, data: HeapData) -> HeapData {
+        let mut entry = self.entries.entry(id).expect("replace_data names a live entry");
+        mem::replace(entry.get_mut().data.0.get_mut(), data)
+    }
+
+    /// Queues a namespace whose owning handle just dropped; see
+    /// [`condemned`](Self::condemned) for who releases it.
+    pub(crate) fn condemn_scope(&mut self, scope: ScopeId) {
+        self.condemned_scopes.push(scope);
+    }
+
+    /// Whether any namespace awaits release, checked on hot paths before
+    /// paying for [`condemned`](Self::condemned).
+    pub(crate) fn has_condemned(&self) -> bool {
+        !self.condemned_scopes.is_empty()
+    }
+
+    /// Takes the namespaces awaiting release. Releasing can condemn more (a
+    /// namespace can hold the handle of another), so sweepers loop until this
+    /// comes back empty.
+    pub(crate) fn condemned(&mut self) -> Vec<ScopeId> {
+        mem::take(&mut self.condemned_scopes)
+    }
+
     /// Creates a new heap with the given resource tracker.
     ///
     /// Use this to create heaps with custom resource limits or GC scheduling.
@@ -1013,6 +1067,8 @@ impl Heap {
             modules: BTreeMap::new(),
             exports: BTreeMap::new(),
             cross_by_reference: false,
+            namespaces_enabled: false,
+            condemned_scopes: Vec::new(),
         };
 
         // The empty-tuple singleton starts with refcount = 1 — that single ref *is* the
@@ -1180,6 +1236,20 @@ impl Heap {
         self.exports.contains_key(&id).then_some(id)
     }
 
+    /// Which namespace an exported handle names, or nothing when the token
+    /// names no live export or names something that is not a handle.
+    ///
+    /// A namespace crosses to the host as a reference like any other value with
+    /// no copy representation. This is how the host learns which namespace it
+    /// was handed, so it can run something against that one.
+    pub(crate) fn exported_scope(&self, token: u64) -> Option<ScopeId> {
+        let id = self.exported(token)?;
+        match self.get(id) {
+            HeapData::Namespace(handle) => Some(handle.scope()),
+            _ => None,
+        }
+    }
+
     /// Releases one of the host's references to `token`, freeing the value once
     /// nothing else holds it.
     ///
@@ -1215,6 +1285,20 @@ impl Heap {
     /// Sets whether a value with no copy representation crosses as a reference.
     pub fn set_cross_by_reference(&mut self, on: bool) {
         self.cross_by_reference = on;
+    }
+
+    /// Whether sandboxed code may mint and drive namespaces of its own.
+    pub fn namespaces_enabled(&self) -> bool {
+        self.namespaces_enabled
+    }
+
+    /// Lets sandboxed code mint and drive namespaces; see `types::namespace_ref`.
+    ///
+    /// Off by default: a namespace handle reaches across every global scope the
+    /// session holds, which an embedder must opt into. Travels with the heap so
+    /// a session dumped in this mode wakes in it.
+    pub fn set_namespaces(&mut self, on: bool) {
+        self.namespaces_enabled = on;
     }
 
     /// Increments the reference count for an existing heap entry.
@@ -1297,6 +1381,16 @@ impl Heap {
                     // snapshot deserialization to create duplicate functions with the same name)
                     if let Some(name) = ext_function_name {
                         Self::remove_ext_function_cache_entry(&mut reader.heap.ext_function_cache, &name, current_id);
+                    }
+                    // A dying handle condemns the namespace it owns; the VM or
+                    // REPL holding the scope collection performs the release. A
+                    // handle onto a namespace that was already there owns
+                    // nothing and condemns nothing.
+                    if let HeapData::Namespace(handle) = ptr.data(reader)
+                        && handle.owns()
+                    {
+                        let scope = handle.scope();
+                        reader.heap.condemned_scopes.push(scope);
                     }
 
                     // It is not possible to free from `HeapPtr` because it is created through
@@ -1468,6 +1562,13 @@ impl Heap {
             // Clear weak entries before freeing their slots, just as `dec_ref`.
             if let HeapData::ExtFunction(function) = value.data.0.get_mut() {
                 Self::remove_ext_function_cache_entry(&mut self.ext_function_cache, &function.cache_key(), id);
+            }
+            // As in `dec_ref`: a handle freed as part of a cycle still owned
+            // its namespace, which outlives this free by exactly one sweep.
+            if let HeapData::Namespace(handle) = value.data.0.get_mut()
+                && handle.owns()
+            {
+                self.condemned_scopes.push(handle.scope());
             }
             freed += 1;
             // Walk children, marking child `Value::Ref`s as `Dereferenced`

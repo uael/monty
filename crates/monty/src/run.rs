@@ -169,6 +169,7 @@ impl MontyRun {
                     globals,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -369,6 +370,7 @@ impl Executor {
                     globals,
                     reader,
                     &program.interns,
+                    &program.globals,
                     print.reborrow(),
                     executor.assert_repr_max_bytes,
                 );
@@ -464,6 +466,7 @@ impl Executor {
                 globals,
                 reader,
                 &program.interns,
+                &program.globals,
                 PrintWriter::Stdout,
                 executor.assert_repr_max_bytes,
             );

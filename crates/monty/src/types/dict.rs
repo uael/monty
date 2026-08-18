@@ -9,7 +9,10 @@ use hashbrown::HashTable;
 use serde::ser::SerializeStruct;
 use smallvec::{SmallVec, smallvec};
 
-use super::{DictItemsView, DictKeysView, DictValuesView, LazyHeapSet, PyTrait, allocate_tuple, list::repr_check_time};
+use super::{
+    DictItemsView, DictKeysView, DictValuesView, LazyHeapSet, PyTrait, allocate_tuple, list::repr_check_time,
+    namespace_ref,
+};
 use crate::{
     args::{ArgValues, FromArgs, KwargsValues},
     bytecode::{CallResult, ContainsVM, RecursionToken, VM},
@@ -1717,6 +1720,21 @@ struct DictUpdateArgs {
 fn dict_merge_from_value(dict: &mut Dict, other_value: Value, vm: &mut VM<'_>) -> RunResult<()> {
     let mut other_value_guard = DropGuard::new(other_value, vm);
     {
+        let (other_value, vm) = other_value_guard.as_parts_mut();
+        // A namespace is a mapping of names: `dict(ns)` snapshots it, names as
+        // keys, objects shared, exactly what `dict(mapping)` means.
+        if let Value::Ref(id) = other_value
+            && let HeapData::Namespace(handle) = vm.heap.get(*id)
+        {
+            let scope = handle.scope();
+            for (slot, name_id) in namespace_ref::bound(scope, vm)? {
+                if let Some(value) = namespace_ref::read(scope, slot, vm)? {
+                    let old_value = dict.set(Value::InternString(name_id), value, vm)?;
+                    old_value.drop_with(vm);
+                }
+            }
+            return Ok(());
+        }
         let (other_value, vm) = other_value_guard.as_parts();
         if let Value::Ref(id) = other_value
             && let HeapData::Dict(src_dict) = vm.heap.get(*id)

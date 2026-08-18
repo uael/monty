@@ -27,8 +27,8 @@ use crate::{
         AttrGetter, BoundMethod, Bytes, BytesIterator, Class, ContextToken, ContextVar, Dataclass, Deque, Dict,
         DictItemIterator, DictItemsView, DictKeyIterator, DictKeysView, DictValueIterator, DictValuesView, ExtFunction,
         FrozenSet, GenericAlias, HostRef, Instance, Interpolation, ItertoolsIter, LazyHeapSet, List, LongInt,
-        MethodDescriptor, Module, NamedTuple, NamedTupleClass, OpenFile, PartialMethod, Path, PyTrait, Range,
-        RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress,
+        MethodDescriptor, Module, NamedTuple, NamedTupleClass, NamespaceRef, OpenFile, PartialMethod, Path, PyTrait,
+        Range, RangeIterator, ReMatch, RePattern, Set, SetIterator, Slice, Str, StringIterator, SuperObject, Suppress,
         Template, Tuple, TupleIterator, Type, TypeAliasType, TypeVar, UnionType, UserProperty, asyncio::AsyncPrimitive,
         callable_iterator::CallableIterator, date, datetime, deque::DequeIterator, generic_alias::class_subscript,
         instance_subscript, list::ListIterator, str::allocate_string, timedelta, timezone,
@@ -240,6 +240,9 @@ pub(crate) enum HeapData {
     /// A host object the sandbox holds by reference: an opaque proxy whose
     /// operations suspend to the host rather than being answered here.
     HostRef(HostRef),
+    /// A global namespace held as a value, wearing a mapping's clothes; the
+    /// handle owns the namespace and its drop releases it.
+    Namespace(NamespaceRef),
 }
 
 // `HeapData` is memcpy'd on every allocate and free, so its inline size is paid on
@@ -346,7 +349,13 @@ impl HeapData {
             | Self::AttrGetter(_)
             // A leaf: it owns an id and a name, and the object it names is not
             // in this heap at all.
-            | Self::HostRef(_) => false,
+            | Self::HostRef(_)
+            // Holds only a scope id. The namespace's values are reachable and
+            // counted through the scope collection, not through this entry, so
+            // the collector must not walk them from here; a cycle threaded
+            // through a handle is therefore invisible to it, and lives until
+            // the handle drops and the release sweep breaks it.
+            | Self::Namespace(_) => false,
         }
     }
 
@@ -415,6 +424,7 @@ impl HeapData {
             Self::Future(future) => future.py_type(),
             Self::Combinator(_) => Type::AsCompleted,
             Self::HostRef(_) => Type::HostRef,
+            Self::Namespace(_) => Type::Namespace,
             Self::Generator(generator) => generator.py_type(),
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
@@ -659,6 +669,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::AsyncPrimitive($value) => $body,
             Self::Combinator($value) => $body,
             Self::HostRef($value) => $body,
+            Self::Namespace($value) => $body,
             Self::Closure(_)
             | Self::FunctionDefaults(_)
             | Self::ExtFunction(_)
@@ -1156,6 +1167,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Str(value) => value.py_iter(self_id, vm),
             Self::Bytes(value) => value.py_iter(self_id, vm),
             Self::List(value) => value.py_iter(self_id, vm),
+            Self::Namespace(value) => value.py_iter(self_id, vm),
             Self::Deque(value) => value.py_iter(self_id, vm),
             Self::ListIterator(value) => value.py_iter(self_id, vm),
             Self::DequeIterator(value) => value.py_iter(self_id, vm),

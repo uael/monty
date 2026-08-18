@@ -729,7 +729,7 @@ fn instance_call_str_dunder(self_id: HeapId, dunder: &'static str, vm: &mut VM<'
 /// pushed frame, so — unlike `__enter__` via [`call_member_bound`] — it cannot
 /// suspend on an external/OS call. That is forced by the callers' signatures,
 /// which must hand a `Value` straight back; see `limitations/classes.md`.
-fn instance_call_dunder_sync(
+pub(crate) fn instance_call_dunder_sync(
     self_id: HeapId,
     dunder: &'static str,
     args: ArgValues,
