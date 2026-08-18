@@ -129,8 +129,11 @@ jobs:
         env:
           MONTY_FS_SOAK: '1'
       - run: cargo llvm-cov run --no-report -p monty-datatest
-      # coverage for `make test-memory-model-checks`
-      - run: cargo llvm-cov --no-report -p monty --features memory-model-checks
+      # coverage for `make test-memory-model-checks`. `test-hooks` is what
+      # exposes `gc.collect()`, so without it the four tests that force a
+      # collection and check nothing leaked are compiled out, and those are the
+      # ones this feature exists to run.
+      - run: cargo llvm-cov --no-report -p monty --features "memory-model-checks test-hooks"
       - run: cargo llvm-cov run --no-report -p monty-datatest --features memory-model-checks
       # coverage for `make test-ref-count-return`
       - run: cargo llvm-cov --no-report -p monty --features ref-count-return
@@ -425,6 +428,124 @@ jobs:
 
       - run: make dev-bench
 
+  # A program must replay exactly and a session paused on one machine must
+  # resume on another: that is what an embedder buys by running Python here
+  # rather than in CPython, and neither property shows up in an ordinary test
+  # run. `ubuntu-latest` is x86_64 and `macos-latest` is arm64, so the pair is
+  # a genuine cross-architecture exchange rather than two runs of one binary.
+  #
+  # Both are little-endian, and each architecture comes with its own OS. A
+  # big-endian target (the `s390x` entry of `test-builds-arch`) would need
+  # `monty` compiled and run under QEMU, minutes of emulated build per PR, so
+  # it is not gated here; Postcard's wire form and the dump header's explicit
+  # `to_le_bytes` are what the format relies on there.
+  determinism:
+    name: determinism on ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: macos-latest
+
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-on-failure: true
+
+      # the matrix claims an architecture; make the runner confirm it, or a
+      # silent change of runner image turns this into two x86_64 jobs
+      - name: Confirm the runner architecture
+        run: |
+          rustc --version --verbose
+          rustc --version --verbose | grep -q "host: ${{ matrix.arch }}-"
+
+      # replay identity and the interleaving the in-sandbox clock decides, plus
+      # the dump-format guards that have to hold on every architecture: the
+      # `dump_format` fingerprints (asserted against the same literals here as
+      # everywhere) and the header's refusal to read another DUMP_VERSION
+      - run: cargo test -p monty --lib --test determinism --test repl
+
+      - name: Dump a paused session from this architecture
+        run: cargo test -p monty --test determinism -- --nocapture
+        env:
+          MONTY_DETERMINISM_DUMP_WRITE: ${{ github.workspace }}/determinism-dumps
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: determinism-dump-${{ matrix.arch }}
+          path: determinism-dumps
+          if-no-files-found: error
+
+  # Each architecture resumes every architecture's dump, its own included, and
+  # must reach the same result and the same event order.
+  determinism-cross-arch:
+    name: cross-architecture dumps on ${{ matrix.arch }}
+    needs: [determinism]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: macos-latest
+
+    runs-on: ${{ matrix.runs-on }}
+
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # no release versioning, see https://github.com/dtolnay/rust-toolchain/issues/180
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          lookup-only: false # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-on-failure: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: determinism-dump-*
+          merge-multiple: true
+          path: determinism-dumps
+
+      # named rather than counted: a missing upload would otherwise leave one
+      # architecture resuming only its own dump and still passing
+      - name: Both architectures must have contributed a dump
+        run: |
+          ls -l determinism-dumps
+          test -f determinism-dumps/x86_64-linux.dump
+          test -f determinism-dumps/aarch64-macos.dump
+
+      - name: Resume every architecture's dump here
+        run: cargo test -p monty --test determinism -- --nocapture
+        env:
+          MONTY_DETERMINISM_DUMP_READ: ${{ github.workspace }}/determinism-dumps
+
   miri:
     runs-on: ubuntu-latest
 
@@ -501,6 +622,9 @@ jobs:
       - test-js
       - test-browser
       - bench-test
+      - determinism
+      - determinism-cross-arch
+      - miri
       - fuzz
     runs-on: ubuntu-latest
     steps:
