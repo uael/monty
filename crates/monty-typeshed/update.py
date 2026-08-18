@@ -16,6 +16,11 @@ import subprocess
 from pathlib import Path
 
 # Whitelisted builtin functions (from crates/monty/src/builtins/)
+#
+# A name the interpreter resolves but this set omits is worse than a missing
+# stub: `monty -t` reports `unresolved-reference` on code that runs, so the
+# type checker rejects the sandbox's own vocabulary. Keep both sets in step
+# with the builtin namespace, which `limitations/builtins.md` lists in full.
 ALLOWED_FUNCTIONS = {
     'abs',
     'all',
@@ -23,21 +28,26 @@ ALLOWED_FUNCTIONS = {
     'bin',
     'chr',
     'divmod',
+    'getattr',
+    'hasattr',
     'hash',
     'hex',
     'id',
     'isinstance',
+    'issubclass',
     'iter',
     'len',
     'max',
     'min',
     'next',
     'oct',
+    'open',
     'ord',
     'pow',
     'print',
     'repr',
     'round',
+    'setattr',
     'sorted',
     'sum',
     'vars',
@@ -64,12 +74,18 @@ ALLOWED_CLASSES = {
     'range',
     # Iterator types (these are classes, not functions)
     'enumerate',
+    'filter',
+    'map',
     'reversed',
     'zip',
     # Slicing
     'slice',
-    # property is used by pathlib.Path
+    # Descriptors invoked by class-attribute lookup
+    'classmethod',
     'property',
+    'staticmethod',
+    # Zero-argument `super()` inside a method
+    'super',
     # Exception hierarchy (from crates/monty/src/exception_private.rs)
     'BaseException',
     'Exception',
@@ -88,12 +104,29 @@ ALLOWED_CLASSES = {
     'AssertionError',
     'MemoryError',
     'NameError',
+    'UnboundLocalError',
     'SyntaxError',
+    'ImportError',
+    'ModuleNotFoundError',
     'OSError',
+    'FileNotFoundError',
+    'FileExistsError',
+    'IsADirectoryError',
+    'NotADirectoryError',
+    'PermissionError',
     'TimeoutError',
     'TypeError',
     'ValueError',
+    # `UnicodeError` itself is not a name the interpreter binds; it is kept
+    # only because the two codec errors below subclass it, and a stub whose
+    # base is filtered away describes nothing at all. `limitations/builtins.md`
+    # records it, with `object`, as a name only the type checker resolves.
+    'UnicodeError',
+    'UnicodeDecodeError',
+    'UnicodeEncodeError',
     'StopIteration',
+    'StopAsyncIteration',
+    'GeneratorExit',
 }
 
 # Files to copy without filtering

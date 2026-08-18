@@ -3,9 +3,12 @@ import sys
 import types
 from _collections_abc import dict_items, dict_keys, dict_values
 from collections.abc import Awaitable, Callable, Iterable, Iterator, MutableSet, Reversible, Set as AbstractSet, Sized
+from io import BufferedRandom, BufferedReader, BufferedWriter, FileIO, TextIOWrapper
 from types import GenericAlias, TracebackType
 from typing import (
+    IO,
     Any,
+    BinaryIO,
     ClassVar,
     Final,
     Generic,
@@ -28,6 +31,12 @@ from _typeshed import (
     AnnotationForm,
     ConvertibleToFloat,
     ConvertibleToInt,
+    FileDescriptorOrPath,
+    OpenBinaryMode,
+    OpenBinaryModeReading,
+    OpenBinaryModeUpdating,
+    OpenBinaryModeWriting,
+    OpenTextMode,
     ReadableBuffer,
     SupportsAdd,
     SupportsAnext,
@@ -44,11 +53,14 @@ from _typeshed import (
     SupportsWrite,
 )
 from typing_extensions import (
+    Concatenate,
     Literal,
     LiteralString,
     ParamSpec,
     Self,
     TypeAlias,
+    TypeGuard,
+    TypeIs,
     TypeVarTuple,
     deprecated,
     disjoint_base,
@@ -112,6 +124,49 @@ class object:
     def __subclasshook__(cls, subclass: type, /) -> bool: ...
 
 @disjoint_base
+class staticmethod(Generic[_P, _R_co]):
+    @property
+    def __func__(self) -> Callable[_P, _R_co]: ...
+    @property
+    def __isabstractmethod__(self) -> bool: ...
+    def __init__(self, f: Callable[_P, _R_co], /) -> None: ...
+    @overload
+    def __get__(self, instance: None, owner: type, /) -> Callable[_P, _R_co]: ...
+    @overload
+    def __get__(self, instance: _T, owner: type[_T] | None = None, /) -> Callable[_P, _R_co]: ...
+    if sys.version_info >= (3, 10):
+        __name__: str
+        __qualname__: str
+
+        @property
+        def __wrapped__(self) -> Callable[_P, _R_co]: ...
+        def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _R_co: ...
+    if sys.version_info >= (3, 14):
+        def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
+        __annotate__: AnnotateFunc | None
+
+@disjoint_base
+class classmethod(Generic[_T, _P, _R_co]):
+    @property
+    def __func__(self) -> Callable[Concatenate[type[_T], _P], _R_co]: ...
+    @property
+    def __isabstractmethod__(self) -> bool: ...
+    def __init__(self, f: Callable[Concatenate[type[_T], _P], _R_co], /) -> None: ...
+    @overload
+    def __get__(self, instance: _T, owner: type[_T] | None = None, /) -> Callable[_P, _R_co]: ...
+    @overload
+    def __get__(self, instance: None, owner: type[_T], /) -> Callable[_P, _R_co]: ...
+    if sys.version_info >= (3, 10):
+        __name__: str
+        __qualname__: str
+
+        @property
+        def __wrapped__(self) -> Callable[Concatenate[type[_T], _P], _R_co]: ...
+    if sys.version_info >= (3, 14):
+        def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
+        __annotate__: AnnotateFunc | None
+
+@disjoint_base
 class type:
     @property
     def __base__(self) -> type | None: ...
@@ -163,6 +218,15 @@ class type:
     __annotations__: dict[str, AnnotationForm]
     if sys.version_info >= (3, 14):
         __annotate__: AnnotateFunc | None
+
+@disjoint_base
+class super:
+    @overload
+    def __init__(self, t: Any, obj: Any, /) -> None: ...
+    @overload
+    def __init__(self, t: Any, /) -> None: ...
+    @overload
+    def __init__(self) -> None: ...
 
 _PositiveInteger: TypeAlias = Literal[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
@@ -1042,6 +1106,32 @@ def divmod(x: _T_contra, y: SupportsRDivMod[_T_contra, _T_co], /) -> _T_co: ...
 
 exit: _sitebuiltins.Quitter
 
+@disjoint_base
+class filter(Generic[_T]):
+    @overload
+    def __new__(cls, function: None, iterable: Iterable[_T | None], /) -> Self: ...
+    @overload
+    def __new__(cls, function: Callable[[_S], TypeGuard[_T]], iterable: Iterable[_S], /) -> Self: ...
+    @overload
+    def __new__(cls, function: Callable[[_S], TypeIs[_T]], iterable: Iterable[_S], /) -> Self: ...
+    @overload
+    def __new__(cls, function: Callable[[_T], Any], iterable: Iterable[_T], /) -> Self: ...
+    def __iter__(self) -> Self: ...
+    def __next__(self) -> _T: ...
+
+@overload
+def getattr(o: object, name: str, /) -> Any: ...
+@overload
+def getattr(o: object, name: str, default: None, /) -> Any | None: ...
+@overload
+def getattr(o: object, name: str, default: bool, /) -> Any | bool: ...
+@overload
+def getattr(o: object, name: str, default: list[Any], /) -> Any | list[Any]: ...
+@overload
+def getattr(o: object, name: str, default: dict[Any, Any], /) -> Any | dict[Any, Any]: ...
+@overload
+def getattr(o: object, name: str, default: _T, /) -> Any | _T: ...
+def hasattr(obj: object, name: str, /) -> bool: ...
 def hash(obj: object, /) -> int: ...
 
 help: _sitebuiltins._Helper
@@ -1068,9 +1158,127 @@ else:
     _ClassInfo: TypeAlias = type | tuple[_ClassInfo, ...]
 
 def isinstance(obj: object, class_or_tuple: _ClassInfo, /) -> bool: ...
+def issubclass(cls: type, class_or_tuple: _ClassInfo, /) -> bool: ...
 def len(obj: Sized, /) -> int: ...
 
 license: _sitebuiltins._Printer
+
+@disjoint_base
+class map(Generic[_S]):
+    if sys.version_info >= (3, 14):
+        @overload
+        def __new__(cls, func: Callable[[_T1], _S], iterable: Iterable[_T1], /, *, strict: bool = False) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            /,
+            *,
+            strict: bool = False,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2, _T3], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            iter3: Iterable[_T3],
+            /,
+            *,
+            strict: bool = False,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2, _T3, _T4], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            iter3: Iterable[_T3],
+            iter4: Iterable[_T4],
+            /,
+            *,
+            strict: bool = False,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            iter3: Iterable[_T3],
+            iter4: Iterable[_T4],
+            iter5: Iterable[_T5],
+            /,
+            *,
+            strict: bool = False,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[..., _S],
+            iterable: Iterable[Any],
+            iter2: Iterable[Any],
+            iter3: Iterable[Any],
+            iter4: Iterable[Any],
+            iter5: Iterable[Any],
+            iter6: Iterable[Any],
+            /,
+            *iterables: Iterable[Any],
+            strict: bool = False,
+        ) -> Self: ...
+    else:
+        @overload
+        def __new__(cls, func: Callable[[_T1], _S], iterable: Iterable[_T1], /) -> Self: ...
+        @overload
+        def __new__(cls, func: Callable[[_T1, _T2], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], /) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2, _T3], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            iter3: Iterable[_T3],
+            /,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2, _T3, _T4], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            iter3: Iterable[_T3],
+            iter4: Iterable[_T4],
+            /,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
+            iterable: Iterable[_T1],
+            iter2: Iterable[_T2],
+            iter3: Iterable[_T3],
+            iter4: Iterable[_T4],
+            iter5: Iterable[_T5],
+            /,
+        ) -> Self: ...
+        @overload
+        def __new__(
+            cls,
+            func: Callable[..., _S],
+            iterable: Iterable[Any],
+            iter2: Iterable[Any],
+            iter3: Iterable[Any],
+            iter4: Iterable[Any],
+            iter5: Iterable[Any],
+            iter6: Iterable[Any],
+            /,
+            *iterables: Iterable[Any],
+        ) -> Self: ...
+
+    def __iter__(self) -> Self: ...
+    def __next__(self) -> _S: ...
 
 @overload
 def max(
@@ -1112,6 +1320,83 @@ def oct(number: SupportsIndex, /) -> str: ...
 
 _Opener: TypeAlias = Callable[[str, int], int]
 
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: OpenTextMode = 'r',
+    buffering: int = -1,
+    encoding: str | None = None,
+    errors: str | None = None,
+    newline: str | None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> TextIOWrapper: ...
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: OpenBinaryMode,
+    buffering: Literal[0],
+    encoding: None = None,
+    errors: None = None,
+    newline: None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> FileIO: ...
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: OpenBinaryModeUpdating,
+    buffering: Literal[-1, 1] = -1,
+    encoding: None = None,
+    errors: None = None,
+    newline: None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> BufferedRandom: ...
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: OpenBinaryModeWriting,
+    buffering: Literal[-1, 1] = -1,
+    encoding: None = None,
+    errors: None = None,
+    newline: None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> BufferedWriter: ...
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: OpenBinaryModeReading,
+    buffering: Literal[-1, 1] = -1,
+    encoding: None = None,
+    errors: None = None,
+    newline: None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> BufferedReader: ...
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: OpenBinaryMode,
+    buffering: int = -1,
+    encoding: None = None,
+    errors: None = None,
+    newline: None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> BinaryIO: ...
+@overload
+def open(
+    file: FileDescriptorOrPath,
+    mode: str,
+    buffering: int = -1,
+    encoding: str | None = None,
+    errors: str | None = None,
+    newline: str | None = None,
+    closefd: bool = True,
+    opener: _Opener | None = None,
+) -> IO[Any]: ...
 def ord(c: str | bytes | bytearray, /) -> int: ...
 
 @type_check_only
@@ -1208,6 +1493,7 @@ class _SupportsRound2(Protocol[_T_co]):
 def round(number: _SupportsRound1[_T], ndigits: None = None) -> _T: ...
 @overload
 def round(number: _SupportsRound2[_T], ndigits: SupportsIndex) -> _T: ...
+def setattr(obj: object, name: str, value: Any, /) -> None: ...
 @overload
 def sorted(
     iterable: Iterable[SupportsRichComparisonT], /, *, key: None = None, reverse: bool = False
@@ -1362,6 +1648,7 @@ class BaseException:
 
         def add_note(self, note: str, /) -> None: ...
 
+class GeneratorExit(BaseException): ...
 class KeyboardInterrupt(BaseException): ...
 
 @disjoint_base
@@ -1401,6 +1688,15 @@ if sys.version_info >= (3, 10):
 else:
     class AttributeError(Exception): ...
 
+@disjoint_base
+class ImportError(Exception):
+    def __init__(self, *args: object, name: str | None = None, path: str | None = None) -> None: ...
+    name: str | None
+    path: str | None
+    msg: str
+    if sys.version_info >= (3, 12):
+        name_from: str | None
+
 class LookupError(Exception): ...
 class MemoryError(Exception): ...
 
@@ -1414,6 +1710,7 @@ else:
     class NameError(Exception): ...
 
 class RuntimeError(Exception): ...
+class StopAsyncIteration(Exception): ...
 
 @disjoint_base
 class SyntaxError(Exception):
@@ -1443,11 +1740,39 @@ class TypeError(Exception): ...
 class ValueError(Exception): ...
 class OverflowError(ArithmeticError): ...
 class ZeroDivisionError(ArithmeticError): ...
+class ModuleNotFoundError(ImportError): ...
 class IndexError(LookupError): ...
 class KeyError(LookupError): ...
+class UnboundLocalError(NameError): ...
+class FileExistsError(OSError): ...
+class FileNotFoundError(OSError): ...
+class IsADirectoryError(OSError): ...
+class NotADirectoryError(OSError): ...
+class PermissionError(OSError): ...
 class TimeoutError(OSError): ...
 class NotImplementedError(RuntimeError): ...
 class RecursionError(RuntimeError): ...
+class UnicodeError(ValueError): ...
+
+@disjoint_base
+class UnicodeDecodeError(UnicodeError):
+    encoding: str
+    object: bytes
+    start: int
+    end: int
+    reason: str
+
+    def __init__(self, encoding: str, object: ReadableBuffer, start: int, end: int, reason: str, /) -> None: ...
+
+@disjoint_base
+class UnicodeEncodeError(UnicodeError):
+    encoding: str
+    object: str
+    start: int
+    end: int
+    reason: str
+
+    def __init__(self, encoding: str, object: str, start: int, end: int, reason: str, /) -> None: ...
 
 if sys.version_info >= (3, 11):
     _BaseExceptionT_co = TypeVar('_BaseExceptionT_co', bound=BaseException, covariant=True, default=BaseException)

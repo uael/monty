@@ -7,9 +7,13 @@ Python.
 ## Implemented builtin functions
 
 `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`,
-`getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `iter`, `len`, `map`,
-`max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`, `repr`,
-`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `vars`, `zip`.
+`getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `issubclass`, `iter`,
+`len`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`,
+`repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `vars`, `zip`.
+
+`classmethod`, `staticmethod`, `property` and `super` are also builtin names;
+what they do is in ./classes.md, which covers the descriptors class-attribute
+lookup invokes and the zero-argument `super()`.
 
 ## Implemented type constructors (also builtins)
 
@@ -26,14 +30,24 @@ These raise `NameError`:
 - **Namespace introspection**: `globals`, `locals`, `dir`. `vars` *is*
   implemented, but only for modules; see below.
 - **Interactive**: `input`, `breakpoint`, `help`.
-- **Decorators / descriptors**: `classmethod`, `staticmethod`, `property`,
-  `super`. (`@property` on functions is not recognized; use a method.)
 - **Construction / coercion**: `bytearray`, `complex`, `memoryview`,
   `object`, `format`, `ascii`.
-- **Other**: `callable`, `delattr`, `issubclass`, `aiter`, `anext`.
+- **Other**: `callable`, `delattr`, `aiter`, `anext`.
 
-`super()` is the biggest practical omission: with no class inheritance either
-(see ./classes.md), there is no inheritance mechanism at all.
+## Two names only the type checker resolves
+
+`object` and `UnicodeError` type-check and then raise `NameError` when the
+code runs. Both are structural in the vendored stub rather than deliberate:
+`object` is the root every other stub class inherits from, and `UnicodeError`
+is the declared base of `UnicodeDecodeError` / `UnicodeEncodeError`, so
+filtering either away would leave the classes naming it describing nothing.
+Every other builtin name agrees in both directions, which
+`crates/monty-runtime/tests/typeshed_builtins.rs` pins against the interpreter's
+own `vars(builtins)`.
+
+The catch behaviour is unaffected: Monty's codec errors derive straight from
+`ValueError`, so `except ValueError:` catches them exactly as the stub's
+hierarchy implies.
 
 ## `vars()`
 
