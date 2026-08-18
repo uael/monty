@@ -25,6 +25,7 @@ pub mod iter;
 pub mod itertools;
 pub mod list;
 pub mod long_int;
+pub mod match_pattern;
 pub mod module;
 pub mod namedtuple;
 pub mod native_class;

@@ -16,7 +16,7 @@ use super::{
     RESERVED_MODULE_DUNDERS,
     builder::{CodeBuilder, JumpLabel, JumpTarget, Offset},
     code::{Code, HandlerKind},
-    op::{FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, Opcode, YIELD_DELEGATING, assert_flags},
+    op::{FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, MatchShape, Opcode, YIELD_DELEGATING, assert_flags},
 };
 use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
@@ -24,7 +24,8 @@ use crate::{
     exception_private::ExcType,
     expressions::{
         Callable, CaptureSource, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier,
-        Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
+        Literal, MatchCase, NameScope, Node, Operator, Pattern, PreparedFunctionDef, PreparedNode, SequenceItem,
+        UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
@@ -816,6 +817,12 @@ impl<'a> Compiler<'a> {
                 }
             }
             Node::If { test, body, or_else } => self.compile_if(test, body, or_else)?,
+            Node::Match {
+                subject,
+                slot,
+                cases,
+                position,
+            } => self.compile_match(subject, slot, cases, *position)?,
             Node::For {
                 target,
                 iter,
@@ -885,6 +892,318 @@ impl<'a> Compiler<'a> {
             Node::Pass | Node::Global { .. } | Node::Nonlocal { .. } => {}
         }
         Ok(())
+    }
+
+    /// Compiles a PEP 634 `match` statement.
+    ///
+    /// The subject is evaluated once into its hidden local; each case then
+    /// loads it back, runs its pattern, and — if the pattern matched and the
+    /// guard passed — runs its body and jumps past the rest. Nothing of the
+    /// match is left on the operand stack when a body runs, so a `return` or
+    /// `break` out of one needs no unwinding.
+    fn compile_match(
+        &mut self,
+        subject: &ExprLoc,
+        slot: &Identifier,
+        cases: &'a [MatchCase<PreparedFunctionDef>],
+        position: CodeRange,
+    ) -> Result<(), CompileError> {
+        self.compile_expr(subject)?;
+        self.code.set_location(position, None);
+        self.compile_store(slot)?;
+        let mut done = Vec::with_capacity(cases.len());
+        for case in cases {
+            self.compile_name(slot)?;
+            let mut failed = self.compile_pattern(&case.pattern)?;
+            if let Some(guard) = &case.guard {
+                self.compile_expr(guard)?;
+                failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+            }
+            self.compile_block(&case.body)?;
+            done.push(self.code.emit_jump(Opcode::Jump)?);
+            for label in failed {
+                self.code.patch_jump(label)?;
+            }
+        }
+        for label in done {
+            self.code.patch_jump(label)?;
+        }
+        Ok(())
+    }
+
+    /// Compiles one pattern.
+    ///
+    /// Contract, held by every arm and relied on by the recursive ones: the
+    /// value to match is on top of the stack on entry, and is popped on *both*
+    /// exits — falling through on a match, or jumping to one of the returned
+    /// labels on a failure. That is what lets a sub-pattern be compiled with no
+    /// knowledge of what is underneath it on the stack.
+    fn compile_pattern(&mut self, pattern: &Pattern) -> Result<Vec<JumpLabel>, CompileError> {
+        // The wildcard tests nothing, so it needs neither the failure epilogue
+        // nor a jump out of it.
+        if matches!(pattern, Pattern::Wildcard) {
+            self.code.emit(Opcode::Pop)?;
+            return Ok(Vec::new());
+        }
+        let failed = self.compile_pattern_tests(pattern)?;
+        // Matched: drop the subject and step over the failure epilogue.
+        self.code.emit(Opcode::Pop)?;
+        let matched = self.code.emit_jump(Opcode::Jump)?;
+        for label in failed {
+            self.code.patch_jump(label)?;
+        }
+        // Failed: drop the subject too, so both exits leave the same stack.
+        self.code.emit(Opcode::Pop)?;
+        let out = self.code.emit_jump(Opcode::Jump)?;
+        self.code.patch_jump(matched)?;
+        Ok(vec![out])
+    }
+
+    /// The tests one pattern makes, with the subject on the stack throughout.
+    ///
+    /// Returns the labels a failure jumps to; the caller's epilogue pops the
+    /// subject behind them. Never emits the pop itself, which is what keeps the
+    /// two exits of [`compile_pattern`](Self::compile_pattern) symmetric.
+    fn compile_pattern_tests(&mut self, pattern: &Pattern) -> Result<Vec<JumpLabel>, CompileError> {
+        match pattern {
+            // Handled by `compile_pattern`, which never calls in for one.
+            Pattern::Wildcard => Ok(Vec::new()),
+            Pattern::Capture(name) => {
+                self.code.emit(Opcode::Dup)?;
+                self.compile_store(name)?;
+                Ok(Vec::new())
+            }
+            Pattern::Singleton(literal) => {
+                self.code.emit(Opcode::Dup)?;
+                self.compile_literal(literal)?;
+                // `is`, not `==`: `case True` must not match `1`.
+                self.code.emit(Opcode::CompareIs)?;
+                Ok(vec![self.code.emit_jump(Opcode::JumpIfFalse)?])
+            }
+            Pattern::Value(expr) => {
+                self.code.emit(Opcode::Dup)?;
+                self.compile_expr(expr)?;
+                self.code.emit(Opcode::CompareEq)?;
+                Ok(vec![self.code.emit_jump(Opcode::JumpIfFalse)?])
+            }
+            Pattern::Sequence(items) => self.compile_sequence_pattern(items),
+            // Only ever reached through `Pattern::Sequence`, which handles the
+            // slicing a star needs.
+            Pattern::Star(_) => Err(CompileError::new(
+                "a starred pattern outside a sequence pattern",
+                CodeRange::default(),
+            )),
+            Pattern::Mapping { keys, patterns, rest } => self.compile_mapping_pattern(keys, patterns, rest.as_ref()),
+            Pattern::Class {
+                cls,
+                positional,
+                keywords,
+            } => self.compile_class_pattern(cls, positional, keywords),
+            Pattern::Or(alternatives) => self.compile_or_pattern(alternatives),
+            Pattern::As { pattern, name } => {
+                self.code.emit(Opcode::Dup)?;
+                let failed = self.compile_pattern(pattern)?;
+                self.code.emit(Opcode::Dup)?;
+                self.compile_store(name)?;
+                Ok(failed)
+            }
+        }
+    }
+
+    /// `[a, *rest, b]`: a sequence of the right length, element by element.
+    ///
+    /// Elements before the star index from the front and elements after it from
+    /// the back, so the star can absorb any number in between; the star's own
+    /// slice becomes a `list`, as CPython's does whatever the subject was.
+    fn compile_sequence_pattern(&mut self, items: &[Pattern]) -> Result<Vec<JumpLabel>, CompileError> {
+        let star = items.iter().position(|item| matches!(item, Pattern::Star(_)));
+        let mut failed = Vec::new();
+        // Every `MatchShape` reads the subject without consuming it, so none of
+        // them needs a `Dup` in front.
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::IsSequence as u8)?;
+        failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::Len as u8)?;
+        let required = i64::try_from(if star.is_some() { items.len() - 1 } else { items.len() })
+            .map_err(|_| CompileError::new("sequence pattern is too long", CodeRange::default()))?;
+        let bound = self.code.add_const(Value::Int(required))?;
+        self.code.emit_u16(Opcode::LoadConst, bound)?;
+        self.code.emit(if star.is_some() {
+            Opcode::CompareGe
+        } else {
+            Opcode::CompareEq
+        })?;
+        failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+        let after = star.map_or(0, |at| items.len() - at - 1);
+        for (i, item) in items.iter().enumerate() {
+            if let (Some(at), Pattern::Star(name)) = (star, item) {
+                if let Some(name) = name {
+                    self.code.emit(Opcode::Dup)?;
+                    // Copied to a list *before* slicing, for two reasons: the
+                    // star binds a list whatever the subject was (a tuple or
+                    // range slice would keep its own type), and not every
+                    // sequence Monty accepts here can be sliced at all.
+                    self.code
+                        .emit_call_builtin_type(Type::List.callable_to_u8().expect("list is callable"), 1)?;
+                    self.emit_int_const(i64::try_from(at).unwrap_or(i64::MAX))?;
+                    if after == 0 {
+                        self.code.emit(Opcode::LoadNone)?;
+                    } else {
+                        self.emit_int_const(-i64::try_from(after).unwrap_or(i64::MAX))?;
+                    }
+                    self.code.emit(Opcode::LoadNone)?;
+                    self.code.emit(Opcode::BuildSlice)?;
+                    self.code.emit(Opcode::BinarySubscr)?;
+                    self.compile_store(name)?;
+                }
+            } else {
+                let index = match star {
+                    Some(at) if i > at => -i64::try_from(items.len() - i).unwrap_or(i64::MAX),
+                    _ => i64::try_from(i).unwrap_or(i64::MAX),
+                };
+                self.code.emit(Opcode::Dup)?;
+                self.emit_int_const(index)?;
+                self.code.emit(Opcode::BinarySubscr)?;
+                failed.extend(self.compile_pattern(item)?);
+            }
+        }
+        Ok(failed)
+    }
+
+    /// `{k: p, **rest}`: a mapping holding every key, whose values match.
+    fn compile_mapping_pattern(
+        &mut self,
+        keys: &[ExprLoc],
+        patterns: &[Pattern],
+        rest: Option<&Identifier>,
+    ) -> Result<Vec<JumpLabel>, CompileError> {
+        let mut failed = Vec::new();
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::IsMapping as u8)?;
+        failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+        let key_count = check_collection_size_u16(keys.len(), CodeRange::default())?;
+        // The key tuple is built twice when `**rest` needs one of its own: the
+        // key expressions are literals or dotted names, so evaluating them
+        // again is the cheaper of the two ways to keep the stack shallow.
+        if let Some(rest) = rest {
+            for key in keys {
+                self.compile_expr(key)?;
+            }
+            self.code.emit_u16(Opcode::BuildTuple, key_count)?;
+            self.code.emit_u8(Opcode::MatchShape, MatchShape::Rest as u8)?;
+            self.compile_store(rest)?;
+        }
+        for key in keys {
+            self.compile_expr(key)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, key_count)?;
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::Keys as u8)?;
+        // A missing key answers `None` rather than raising, which is the match
+        // failing; the values tuple has to come off the stack either way.
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit(Opcode::CompareIs)?;
+        let missing = self.code.emit_jump(Opcode::JumpIfTrue)?;
+        // Every failure from here on happens with the values tuple still on
+        // the stack, so they share one epilogue that drops it before joining
+        // the pattern's own failures.
+        let mut with_values = vec![missing];
+        for (i, pattern) in patterns.iter().enumerate() {
+            self.code.emit(Opcode::Dup)?;
+            self.emit_int_const(i64::try_from(i).unwrap_or(i64::MAX))?;
+            self.code.emit(Opcode::BinarySubscr)?;
+            with_values.extend(self.compile_pattern(pattern)?);
+        }
+        self.code.emit(Opcode::Pop)?;
+        let matched = self.code.emit_jump(Opcode::Jump)?;
+        for label in with_values {
+            self.code.patch_jump(label)?;
+        }
+        self.code.emit(Opcode::Pop)?;
+        failed.push(self.code.emit_jump(Opcode::Jump)?);
+        self.code.patch_jump(matched)?;
+        Ok(failed)
+    }
+
+    /// `C(p, attr=q)`: an instance of `C` whose named attributes match.
+    fn compile_class_pattern(
+        &mut self,
+        cls: &ExprLoc,
+        positional: &[Pattern],
+        keywords: &[(Identifier, Pattern)],
+    ) -> Result<Vec<JumpLabel>, CompileError> {
+        let mut failed = Vec::new();
+        self.code.emit(Opcode::Dup)?;
+        self.compile_expr(cls)?;
+        for (attr, _) in keywords {
+            let name = self.code.add_const(Value::InternString(attr.name_id))?;
+            self.code.emit_u16(Opcode::LoadConst, name)?;
+        }
+        let keyword_count = check_collection_size_u16(keywords.len(), cls.position)?;
+        self.code.emit_u16(Opcode::BuildTuple, keyword_count)?;
+        let positional_count = check_collection_size_u16(positional.len(), cls.position)?;
+        self.code.set_location(cls.position, None);
+        self.code.emit_u16(Opcode::MatchClass, positional_count)?;
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit(Opcode::CompareIs)?;
+        let no_match = self.code.emit_jump(Opcode::JumpIfTrue)?;
+        // Every failure from here on happens with the attribute tuple still on
+        // the stack, so they share one epilogue that drops it.
+        let mut with_attrs = vec![no_match];
+        // The attribute tuple is in sub-pattern order: positional first, then
+        // the keywords in source order, which is how `MatchClass` builds it.
+        for (i, pattern) in positional.iter().chain(keywords.iter().map(|(_, p)| p)).enumerate() {
+            self.code.emit(Opcode::Dup)?;
+            self.emit_int_const(i64::try_from(i).unwrap_or(i64::MAX))?;
+            self.code.emit(Opcode::BinarySubscr)?;
+            with_attrs.extend(self.compile_pattern(pattern)?);
+        }
+        self.code.emit(Opcode::Pop)?;
+        let matched = self.code.emit_jump(Opcode::Jump)?;
+        for label in with_attrs {
+            self.code.patch_jump(label)?;
+        }
+        self.code.emit(Opcode::Pop)?;
+        failed.push(self.code.emit_jump(Opcode::Jump)?);
+        self.code.patch_jump(matched)?;
+        Ok(failed)
+    }
+
+    /// `p | q`: the first alternative that matches wins.
+    ///
+    /// Each alternative but the last works on a copy of the subject, so a
+    /// failure leaves the original for the next one to try.
+    fn compile_or_pattern(&mut self, alternatives: &[Pattern]) -> Result<Vec<JumpLabel>, CompileError> {
+        let Some((last, rest)) = alternatives.split_last() else {
+            return Err(CompileError::new(
+                "an alternative pattern with no alternatives",
+                CodeRange::default(),
+            ));
+        };
+        let mut matched = Vec::with_capacity(rest.len());
+        for alternative in rest {
+            self.code.emit(Opcode::Dup)?;
+            let failed = self.compile_pattern(alternative)?;
+            matched.push(self.code.emit_jump(Opcode::Jump)?);
+            for label in failed {
+                self.code.patch_jump(label)?;
+            }
+        }
+        // The last alternative works on the subject itself, so its failure is
+        // the whole pattern's; its success has already popped the subject, and
+        // the earlier alternatives' has not, which the epilogue below evens out.
+        self.code.emit(Opcode::Dup)?;
+        let failed = self.compile_pattern(last)?;
+        for label in matched {
+            self.code.patch_jump(label)?;
+        }
+        Ok(failed)
+    }
+
+    /// Pushes an integer constant, for the indices and slice bounds a pattern
+    /// computes at compile time.
+    fn emit_int_const(&mut self, value: i64) -> Result<(), CompileError> {
+        let index = self.code.add_const(Value::Int(value))?;
+        self.code.emit_u16(Opcode::LoadConst, index)
     }
 
     /// Compiles a function definition.

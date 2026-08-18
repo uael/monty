@@ -798,6 +798,25 @@ pub enum Node<F> {
         /// Source position of the `class` statement (for error reporting).
         position: CodeRange,
     },
+    /// PEP 634 `match` statement.
+    ///
+    /// The subject is evaluated once into a hidden local, which every case's
+    /// test reads back: keeping it on the operand stack instead would leave the
+    /// stack unbalanced on a `return`/`break` out of a case body.
+    Match {
+        /// Evaluated once, before any pattern is tried.
+        subject: ExprLoc,
+        /// The hidden local the subject lives in for the duration. Its name is
+        /// not writable from source, so nothing can collide with it; one per
+        /// scope is enough, because a nested `match` can only appear in a case
+        /// *body*, by which point the outer subject has done its work.
+        slot: Identifier,
+        /// In source order; the first whose pattern matches (and whose guard
+        /// passes) runs, and the rest are skipped.
+        cases: Vec<MatchCase<F>>,
+        /// Source position of the `match` statement (for error reporting).
+        position: CodeRange,
+    },
     /// Global variable declaration. Only present in parsed form, consumed during prepare.
     ///
     /// Declares that the listed names refer to module-level (global) variables,
@@ -929,6 +948,70 @@ pub struct PreparedFunctionDef {
 
 /// Type alias for prepared AST nodes (output of prepare phase).
 pub type PreparedNode = Node<PreparedFunctionDef>;
+
+/// One `case` of a [`Node::Match`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatchCase<F> {
+    /// What the subject is tested against.
+    pub pattern: Pattern,
+    /// `case p if cond:` — evaluated only after the pattern matched, so it can
+    /// read the names the pattern bound.
+    pub guard: Option<ExprLoc>,
+    /// Runs when the pattern matched and the guard (if any) passed.
+    pub body: Vec<Node<F>>,
+}
+
+/// A PEP 634 pattern.
+///
+/// Every variant either *tests* the subject, *binds* a name, or both. Only
+/// [`Wildcard`](Self::Wildcard), [`Capture`](Self::Capture) and an
+/// [`As`](Self::As) over one of them are irrefutable, which is what the
+/// unreachable-case check in the parser turns on.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum Pattern {
+    /// `_`: matches anything and binds nothing.
+    Wildcard,
+    /// `x`: matches anything and binds it.
+    Capture(Identifier),
+    /// A literal or a dotted name (`1`, `'a'`, `Color.RED`), compared with `==`.
+    Value(ExprLoc),
+    /// `None`, `True`, `False`, compared with `is` as CPython does.
+    Singleton(Literal),
+    /// `[a, b]` / `(a, *rest)`: matches a sequence that is not a `str` or
+    /// `bytes`. At most one element is a [`Star`](Self::Star).
+    Sequence(Vec<Self>),
+    /// `*rest` inside a sequence pattern; `None` for `*_`.
+    Star(Option<Identifier>),
+    /// `{k: p, **rest}`: matches a mapping that has every key.
+    Mapping {
+        /// Key expressions, in source order; each is a literal or a dotted name.
+        keys: Vec<ExprLoc>,
+        /// The pattern each key's value must match, parallel to `keys`.
+        patterns: Vec<Self>,
+        /// `**rest`, bound to a new dict of the keys the pattern did not name.
+        rest: Option<Identifier>,
+    },
+    /// `C(p, attr=q)`: matches an instance of `C` whose attributes match.
+    Class {
+        /// The class to test against; anything else is a `TypeError`.
+        cls: ExprLoc,
+        /// Positional sub-patterns, matched against the attributes
+        /// `C.__match_args__` names.
+        positional: Vec<Self>,
+        /// `attr=pattern` pairs, in source order.
+        keywords: Vec<(Identifier, Self)>,
+    },
+    /// `p | q`: the first alternative that matches wins, and every alternative
+    /// binds the same names.
+    Or(Vec<Self>),
+    /// `p as name`: matches `p`, then binds the subject to `name`.
+    As {
+        /// The pattern that must match first.
+        pattern: Box<Self>,
+        /// The name the whole subject binds to.
+        name: Identifier,
+    },
+}
 
 /// Binary operators for arithmetic, bitwise, and boolean operations.
 ///

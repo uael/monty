@@ -16,7 +16,7 @@ mod hasattr;
 mod hash;
 mod hex;
 mod id;
-mod isinstance;
+pub(crate) mod isinstance;
 mod issubclass;
 mod len;
 mod map;

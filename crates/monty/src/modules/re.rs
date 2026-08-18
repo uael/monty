@@ -62,6 +62,19 @@ pub(crate) const DOTALL: u16 = 16;
 /// Python regex flag: ASCII-only matching for `\w`, `\b`, `\d`, `\s`.
 pub(crate) const ASCII: u16 = 256;
 
+// The four flags below are not exposed as `re` module attributes and change no
+// match: they are here because a pattern reports the flags it was given, and
+// what those bits are called does not depend on what Monty does with them.
+
+/// Python regex flag: locale-dependent matching.
+pub(crate) const LOCALE: u16 = 4;
+/// Python regex flag: Unicode matching, which is the default for a str pattern.
+pub(crate) const UNICODE: u16 = 32;
+/// Python regex flag: whitespace and `#` comments in the pattern are ignored.
+pub(crate) const VERBOSE: u16 = 64;
+/// Python regex flag: print the compiled pattern.
+pub(crate) const DEBUG: u16 = 128;
+
 /// Module-level `re` functions (`re.search(pattern, string)`, …), as opposed to the
 /// methods on a compiled `re.Pattern`. String patterns go through
 /// [`RePatternCache`], so repeated calls usually avoid recompiling.

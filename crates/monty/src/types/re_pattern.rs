@@ -22,7 +22,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{Heap, HeapData, HeapId, HeapItem, HeapRead, HeapReadOutput},
     intern::StaticStrings,
-    modules::re::{ASCII, DOTALL, IGNORECASE, MULTILINE},
+    modules::re::{ASCII, DEBUG, DOTALL, IGNORECASE, LOCALE, MULTILINE, UNICODE, VERBOSE},
     resource_checks::check_estimated_size,
     types::{
         LazyHeapSet, List, PyTrait, ReMatch, Type, allocate_tuple,
@@ -34,6 +34,21 @@ use crate::{
 
 /// A compiled regular expression pattern.
 ///
+/// The flags a pattern's repr names, in the order CPython names them.
+///
+/// `re.UNICODE` is absent because it is a str pattern's default and CPython
+/// leaves it unnamed; the rest appear whether or not Monty acts on them, a repr
+/// reporting what the pattern was given rather than what was done with it.
+const REPR_FLAGS: [(u16, &str); 7] = [
+    (IGNORECASE, "re.IGNORECASE"),
+    (LOCALE, "re.LOCALE"),
+    (MULTILINE, "re.MULTILINE"),
+    (DOTALL, "re.DOTALL"),
+    (VERBOSE, "re.VERBOSE"),
+    (DEBUG, "re.DEBUG"),
+    (ASCII, "re.ASCII"),
+];
+
 /// Wraps a `fancy_regex::Regex` with the original Python pattern string and flags.
 /// The `fancy_regex` crate supports backtracking features like backreferences and
 /// lookaround, but this means patterns are susceptible to ReDoS — Monty's resource
@@ -384,21 +399,22 @@ impl<'h> PyTrait<'h> for HeapRead<'h, RePattern> {
         let this = self.get(vm.heap);
         write!(f, "re.compile(")?;
         string_repr_fmt(&this.pattern, f)?;
-        if this.flags != 0 {
-            let mut flag_parts = smallvec::SmallVec::<[&'static str; 4]>::new();
-            if this.flags & IGNORECASE != 0 {
-                flag_parts.push("re.IGNORECASE");
+        // `re.UNICODE` is the default for a str pattern, the only kind compiled
+        // here, and CPython leaves a default unnamed.
+        let mut remaining = this.flags & !UNICODE;
+        let mut separator = ", ";
+        for (bit, name) in REPR_FLAGS {
+            if remaining & bit != 0 {
+                write!(f, "{separator}{name}")?;
+                remaining &= !bit;
+                separator = "|";
             }
-            if this.flags & MULTILINE != 0 {
-                flag_parts.push("re.MULTILINE");
-            }
-            if this.flags & DOTALL != 0 {
-                flag_parts.push("re.DOTALL");
-            }
-            if this.flags & ASCII != 0 {
-                flag_parts.push("re.ASCII");
-            }
-            write!(f, ", {}", flag_parts.join("|"))?;
+        }
+        // A bit CPython has no name for is printed as itself, so a pattern's
+        // repr accounts for every flag it was given rather than dropping the
+        // ones it did not recognise.
+        if remaining != 0 {
+            write!(f, "{separator}{remaining:#x}")?;
         }
         Ok(write!(f, ")")?)
     }

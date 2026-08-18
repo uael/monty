@@ -605,6 +605,40 @@ pub enum Opcode {
     /// `__name__`). Emitted once per execution of the `class C[T]` statement
     /// that declares it, so `T is T` holds inside the class.
     MakeTypeVar = 131,
+
+    // === PEP 634 pattern matching ===
+    /// The parts of a `match` a pattern cannot express in ordinary bytecode,
+    /// selected by a [`MatchShape`] operand: the two "is this shape" tests, a
+    /// length, and the two mapping-key operations. One opcode rather than five
+    /// because no pattern test is hot enough to pay for its own dispatch arm.
+    MatchShape = 132,
+    /// Class pattern. Operand: u16 positional sub-pattern count. Pops the
+    /// keyword-name tuple, the class, and a copy of the subject; pushes the
+    /// tuple of matched attributes, or `None` when the subject is not an
+    /// instance or an attribute is missing.
+    MatchClass = 133,
+}
+
+/// Which operation a [`Opcode::MatchShape`] performs.
+///
+/// The discriminants are the opcode's operand byte, so they are append-only in
+/// the same way the opcode enum is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::FromRepr)]
+#[repr(u8)]
+pub enum MatchShape {
+    /// Peek the subject, push whether a sequence pattern may match it: a
+    /// sequence that is not a `str` or `bytes`, as PEP 634 requires.
+    IsSequence = 0,
+    /// Peek the subject, push whether a mapping pattern may match it.
+    IsMapping = 1,
+    /// Peek the subject, push its length.
+    Len = 2,
+    /// Pop the key tuple, peek the subject, push the tuple of values it holds
+    /// for those keys — or `None` if it is missing any.
+    Keys = 3,
+    /// Pop the key tuple, peek the subject, push a new dict of everything the
+    /// key tuple did not name. Backs `{**rest}`.
+    Rest = 4,
 }
 
 /// [`Opcode::Yield`] flag: the `yield` belongs to a `yield from` loop.
@@ -726,6 +760,7 @@ impl Opcode {
             | Self::LiftToTop
             | Self::Assert
             | Self::Yield
+            | Self::MatchShape
             | Self::AssertFailed => OperandShape::U8,
             Self::LoadSmallInt => OperandShape::I8,
             Self::LoadConst
@@ -751,6 +786,7 @@ impl Opcode {
             | Self::DeleteAttr
             | Self::MakeTypeAlias
             | Self::MakeTypeVar
+            | Self::MatchClass
             | Self::MethodDictMerge => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
@@ -881,6 +917,14 @@ impl Opcode {
                 if flags & FORMAT_VALUE_HAS_SPEC != 0 { -1 } else { 0 }
             }
             (UnpackSequence, Operand::U8(n)) => i32::from(n) - 1,
+            // The two shape tests and the length peek the subject and push an
+            // answer; the two key operations replace the key tuple with theirs.
+            (MatchShape, Operand::U8(op)) => match self::MatchShape::from_repr(op) {
+                Some(self::MatchShape::IsSequence | self::MatchShape::IsMapping | self::MatchShape::Len) => 1,
+                // The compiler is the only emitter, so an unknown operand is a
+                // bug in it rather than anything a program can produce.
+                _ => 0,
+            },
             // Fused forms pop two test operands; `AssertFailed` also pops the
             // explicit message before entering dead code.
             (Assert, Operand::U8(flags)) => {
@@ -1012,6 +1056,9 @@ impl Opcode {
             // The thunk is replaced in place by the alias object.
             (MakeTypeAlias, Operand::U16(_)) => 0,
             (MakeTypeVar, Operand::U16(_)) => 1,
+            // Pops the keyword names and the class, plus the subject copy the
+            // pattern duplicated for it; pushes the attribute tuple or `None`.
+            (MatchClass, Operand::U16(_)) => -2,
             // `DictMerge` takes a u16 operand carrying the func_name_id for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under

@@ -20,6 +20,7 @@ mod vm;
 
 pub use code::Code;
 pub use compiler::Compiler;
+pub(crate) use op::MatchShape;
 #[cfg(test)]
 pub(crate) use op::opcode_fingerprint;
 pub(crate) use vm::{CallResult, ContainsVM, GeneratorInput, GeneratorStep, RecursionToken, stop_iteration_with};

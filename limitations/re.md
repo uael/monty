@@ -48,9 +48,26 @@ Supported: `NOFLAG`, `IGNORECASE` / `I`, `MULTILINE` / `M`, `DOTALL` / `S`,
 `ASCII` / `A`.
 
 Not implemented: `VERBOSE` / `X`, `LOCALE` / `L`, `DEBUG`, `UNICODE` / `U`
-(Unicode is always on). Unknown flag bits within the accepted `u16` range are
-silently accepted; bits above that range are rejected by the integer range
-check.
+(Unicode is always on). Their bits, and any other within the accepted `u16`
+range, are accepted and change no match; bits above that range are rejected by
+the integer range check.
+
+A pattern's `repr` reports every flag it was given, exactly as CPython does:
+CPython's names for the bits it names (including the four above), in CPython's
+order, then the remaining bits as one hex number, with `UNICODE` left unnamed as
+a str pattern's default. `repr(re.compile('a', 65))` is
+`"re.compile('a', re.VERBOSE|0x1)"`.
+
+Divergences:
+
+- **A flag combination CPython rejects is accepted.** `re.compile('a', re.L)`
+  and `re.compile('a', re.A | re.U)` raise `ValueError: cannot use LOCALE flag
+  with a str pattern` and `ValueError: ASCII and UNICODE flags are incompatible`
+  in CPython; Monty compiles both.
+- **`pattern.flags` is the value that was passed.** CPython adds `re.UNICODE` to
+  a str pattern's flags, so `re.compile('a').flags` is `32` there and `0` here,
+  and `re.compile('a', re.I).flags` is `34` there and `2` here. The `repr` is
+  unaffected, that bit being the one CPython leaves unnamed.
 
 ## `re.Pattern` objects
 

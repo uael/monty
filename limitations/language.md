@@ -7,13 +7,13 @@ any code runs.
 
 ## Statements rejected at parse time
 
-- **`class` definitions** — simple classes are supported (instance methods,
-  `__init__`/`__repr__`/`__str__`, class variables of arbitrary expressions).
-  Rejected at parse time: base classes / metaclasses (`class Foo(Bar):`) and
-  class-body statements other than `def`, a simple `name [: T] = <expr>`
-  assignment, `type X = ...`, `pass`, or a docstring. There is no inheritance
-  and no general dunder protocol. See ./classes.md.
-- **`match` statements** — structural pattern matching is not supported.
+- **`class` definitions** — classes are supported (instance methods,
+  `__init__`/`__repr__`/`__str__`, class variables of arbitrary expressions,
+  one base class). Rejected at parse time: metaclass keywords
+  (`class Foo(metaclass=M):`) and class-body statements other than `def`, a
+  simple `name [: T] = <expr>` assignment, `type X = ...`, `pass`, or a
+  docstring. Inheritance is single only, and the dunder protocol is a fixed
+  set rather than a general one. See ./classes.md.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
 - **Async comprehensions** (`[x async for x in ...]`) — `async for` as a
   *statement* is supported; only the comprehension form is rejected.
@@ -23,6 +23,35 @@ any code runs.
   CPython accepts.
 - **Wildcard imports** (`from m import *`) — raises `ImportError:
   "Wildcard imports (\`from ... import *\`) are not supported"`.
+
+## `match` statements
+
+PEP 634 structural pattern matching is implemented: literal, capture, wildcard,
+value, sequence, mapping, class and `|` patterns, `as` captures, guards, and the
+`__match_args__` protocol for positional class sub-patterns. The compile-time
+rules are enforced with CPython's own wording — an irrefutable case before the
+last one, a name bound twice in one pattern, alternatives that bind different
+names, a duplicate mapping key, and two starred names in one sequence pattern.
+
+Divergences:
+
+- **A `*rest` binds a list built from the whole subject.** CPython slices the
+  subject; Monty copies it to a list first, because not every sequence it
+  accepts here can be sliced (`collections.deque` cannot). The bound value is
+  the same list either way; only a subject with a side-effecting `__getitem__`
+  could tell, and Monty has no such builtin.
+- **The subject stays reachable after the match.** It is held in a hidden local
+  (named `<match>`, which no expression can name) for the duration, and that
+  local is not cleared afterwards, so the subject is released one scope-exit
+  later than in CPython.
+- **A class pattern reading an attribute that suspends raises
+  `NotImplementedError`.** Only a `property` doing host work can produce one,
+  the same restriction `__repr__` and `__eq__` carry (see ./classes.md).
+- `bytearray`, `memoryview` and `complex` are absent from Monty, so the
+  self-matching class patterns PEP 634 defines for them are too.
+- A sequence pattern accepts what `isinstance(x, collections.abc.Sequence)`
+  accepts, minus `str` and `bytes` — see ./typing.md for that set, which is
+  where a sandbox class joins it by naming the base.
 
 ## Expressions rejected at parse time
 

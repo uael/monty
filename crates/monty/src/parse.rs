@@ -20,7 +20,7 @@ use crate::{
     exception_private::ExcType,
     expressions::{
         Callable, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier, ImportName, Literal,
-        Node, Operator, SequenceItem, UnpackTarget,
+        MatchCase, Node, Operator, Pattern, SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
     intern::{InternerBuilder, StaticStrings, StringId},
@@ -28,7 +28,7 @@ use crate::{
     source_map::{SourceMap, StackFrameExt},
     stringize::stringize_annotation,
     tstring::{ParsedTemplate, TemplateInterpolation},
-    types::long_int::INT_MAX_STR_DIGITS,
+    types::{long_int::INT_MAX_STR_DIGITS, str::StringRepr},
     value::EitherStr,
 };
 
@@ -550,10 +550,7 @@ impl<'a> Parser<'a> {
                 self.depth_remaining += levels;
                 Ok(node)
             }
-            Stmt::Match(m) => Err(ParseError::not_implemented(
-                "pattern matching (match statements)",
-                self.convert_range(m.range),
-            )),
+            Stmt::Match(m) => self.parse_match(m),
             Stmt::Raise(ast::StmtRaise { exc, cause, .. }) => {
                 let exc = match exc {
                     Some(expr) => Some(self.parse_expression(*expr)?),
@@ -2050,6 +2047,188 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses a PEP 634 `match` statement.
+    ///
+    /// The subject binds to a hidden local named `<match>`, which no source
+    /// expression can name, so every case reads it back without keeping it on
+    /// the operand stack across a case body.
+    fn parse_match(&mut self, stmt: ast::StmtMatch) -> Result<ParseNode, ParseError> {
+        let position = self.convert_range(stmt.range);
+        let subject = self.parse_expression(*stmt.subject)?;
+        let slot = Identifier::new(self.interner.intern("<match>"), position);
+        let mut cases = Vec::with_capacity(stmt.cases.len());
+        let case_count = stmt.cases.len();
+        for (i, case) in stmt.cases.into_iter().enumerate() {
+            let case_position = self.convert_range(case.range);
+            let irrefutable = case.pattern.is_irrefutable();
+            let pattern = self.parse_pattern(case.pattern)?;
+            // CPython rejects a case that can never fail before the last one,
+            // naming the capture that swallowed the rest. A guard makes the
+            // case refutable again, so it is only unreachable without one.
+            if irrefutable && case.guard.is_none() && i + 1 < case_count {
+                let mut names = Vec::new();
+                collect_pattern_bindings(&pattern, &mut names);
+                let msg = match names.first() {
+                    Some(name) => format!(
+                        "name capture '{}' makes remaining patterns unreachable",
+                        self.interner.get_str(name.name_id)
+                    ),
+                    None => "wildcard makes remaining patterns unreachable".to_owned(),
+                };
+                return Err(ParseError::syntax(msg, case_position));
+            }
+            let guard = case.guard.map(|g| self.parse_expression(*g)).transpose()?;
+            let body = self.parse_statements(case.body)?;
+            cases.push(MatchCase { pattern, guard, body });
+        }
+        Ok(Node::Match {
+            subject,
+            slot,
+            cases,
+            position,
+        })
+    }
+
+    /// Parses one pattern, rejecting the shapes CPython rejects at compile time.
+    fn parse_pattern(&mut self, pattern: ast::Pattern) -> Result<Pattern, ParseError> {
+        let position = self.convert_range(pattern.range());
+        let parsed = match pattern {
+            ast::Pattern::MatchValue(v) => Pattern::Value(self.parse_expression(*v.value)?),
+            ast::Pattern::MatchSingleton(s) => Pattern::Singleton(match s.value {
+                ast::Singleton::None => Literal::None,
+                ast::Singleton::True => Literal::Bool(true),
+                ast::Singleton::False => Literal::Bool(false),
+            }),
+            ast::Pattern::MatchSequence(seq) => {
+                let mut items = Vec::with_capacity(seq.patterns.len());
+                let mut starred = false;
+                for item in seq.patterns {
+                    if matches!(item, ast::Pattern::MatchStar(_)) {
+                        if starred {
+                            return Err(ParseError::syntax(
+                                "multiple starred names in sequence pattern",
+                                position,
+                            ));
+                        }
+                        starred = true;
+                    }
+                    items.push(self.parse_pattern(item)?);
+                }
+                Pattern::Sequence(items)
+            }
+            ast::Pattern::MatchStar(star) => {
+                Pattern::Star(star.name.map(|n| self.identifier(&n.id, n.range)).filter(|n| {
+                    // `*_` binds nothing, exactly as a bare `_` does.
+                    self.interner.get_str(n.name_id) != "_"
+                }))
+            }
+            ast::Pattern::MatchMapping(map) => {
+                let mut keys = Vec::with_capacity(map.keys.len());
+                let mut seen: Vec<String> = Vec::with_capacity(map.keys.len());
+                for key in map.keys {
+                    let rendered = render_pattern_key(&key);
+                    if let Some(rendered) = rendered {
+                        if seen.contains(&rendered) {
+                            return Err(ParseError::syntax(
+                                format!("mapping pattern checks duplicate key ({rendered})"),
+                                position,
+                            ));
+                        }
+                        seen.push(rendered);
+                    }
+                    keys.push(self.parse_expression(key)?);
+                }
+                let patterns = map
+                    .patterns
+                    .into_iter()
+                    .map(|p| self.parse_pattern(p))
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                Pattern::Mapping {
+                    keys,
+                    patterns,
+                    rest: map.rest.map(|n| self.identifier(&n.id, n.range)),
+                }
+            }
+            ast::Pattern::MatchClass(class) => {
+                let cls = self.parse_expression(*class.cls)?;
+                let positional = class
+                    .arguments
+                    .patterns
+                    .into_iter()
+                    .map(|p| self.parse_pattern(p))
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                let mut keywords = Vec::with_capacity(class.arguments.keywords.len());
+                for keyword in class.arguments.keywords {
+                    let attr = self.identifier(&keyword.attr.id, keyword.attr.range);
+                    keywords.push((attr, self.parse_pattern(keyword.pattern)?));
+                }
+                Pattern::Class {
+                    cls,
+                    positional,
+                    keywords,
+                }
+            }
+            ast::Pattern::MatchAs(as_pattern) => {
+                let name = as_pattern
+                    .name
+                    .map(|n| self.identifier(&n.id, n.range))
+                    .filter(|n| self.interner.get_str(n.name_id) != "_");
+                match (as_pattern.pattern, name) {
+                    (None, None) => Pattern::Wildcard,
+                    (None, Some(name)) => Pattern::Capture(name),
+                    (Some(inner), None) => self.parse_pattern(*inner)?,
+                    (Some(inner), Some(name)) => Pattern::As {
+                        pattern: Box::new(self.parse_pattern(*inner)?),
+                        name,
+                    },
+                }
+            }
+            ast::Pattern::MatchOr(or) => {
+                let alternatives = or
+                    .patterns
+                    .into_iter()
+                    .map(|p| self.parse_pattern(p))
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                // Every alternative must bind the same names, since the code
+                // after the case reads them without knowing which one matched.
+                let mut expected: Option<Vec<StringId>> = None;
+                for alternative in &alternatives {
+                    let mut names = Vec::new();
+                    collect_pattern_bindings(alternative, &mut names);
+                    let mut ids: Vec<StringId> = names.iter().map(|n| n.name_id).collect();
+                    ids.sort_by_key(|id| id.index());
+                    match &expected {
+                        None => expected = Some(ids),
+                        Some(first) if *first == ids => {}
+                        Some(_) => {
+                            return Err(ParseError::syntax(
+                                "alternative patterns bind different names",
+                                position,
+                            ));
+                        }
+                    }
+                }
+                Pattern::Or(alternatives)
+            }
+        };
+        // One name may not be bound twice by one pattern: the second binding
+        // would silently overwrite the first.
+        let mut names = Vec::new();
+        collect_pattern_bindings(&parsed, &mut names);
+        for (i, name) in names.iter().enumerate() {
+            if names[..i].iter().any(|earlier| earlier.name_id == name.name_id) {
+                return Err(ParseError::syntax(
+                    format!(
+                        "multiple assignments to name '{}' in pattern",
+                        self.interner.get_str(name.name_id)
+                    ),
+                    position,
+                ));
+            }
+        }
+        Ok(parsed)
+    }
+
     fn identifier(&mut self, id: &Name, range: TextRange) -> Identifier {
         let string_id = self.interner.intern(id);
         Identifier::new(string_id, self.convert_range(range))
@@ -2881,6 +3060,50 @@ pub fn parse_facts(code: &str, filename: &str, stores: &[String]) -> ParseFacts 
     }
 }
 
+/// Collects every name a pattern binds, in the order the pattern binds them.
+///
+/// Used for the three compile-time checks CPython makes: an irrefutable case
+/// before the last one, a name bound twice by one pattern, and alternatives
+/// that bind different names. An `Or` reports only its first alternative's
+/// names, because the check that every alternative agrees runs first.
+fn collect_pattern_bindings(pattern: &Pattern, names: &mut Vec<Identifier>) {
+    match pattern {
+        Pattern::Wildcard | Pattern::Value(_) | Pattern::Singleton(_) => {}
+        Pattern::Capture(name) => names.push(*name),
+        Pattern::Star(name) => names.extend(name.iter().copied()),
+        Pattern::Sequence(items) => {
+            for item in items {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        Pattern::Mapping { patterns, rest, .. } => {
+            for item in patterns {
+                collect_pattern_bindings(item, names);
+            }
+            names.extend(rest.iter().copied());
+        }
+        Pattern::Class {
+            positional, keywords, ..
+        } => {
+            for item in positional {
+                collect_pattern_bindings(item, names);
+            }
+            for (_, item) in keywords {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        Pattern::Or(alternatives) => {
+            if let Some(first) = alternatives.first() {
+                collect_pattern_bindings(first, names);
+            }
+        }
+        Pattern::As { pattern, name } => {
+            collect_pattern_bindings(pattern, names);
+            names.push(*name);
+        }
+    }
+}
+
 /// Rejects source a probe must not evaluate: anything that is not one
 /// expression, and any expression that could bind a name.
 ///
@@ -3026,5 +3249,24 @@ impl<'a> Visitor<'a> for ModuleBindings<'a> {
             _ => {}
         }
         walk_expr(self, expr);
+    }
+}
+
+/// Renders a mapping-pattern key for the duplicate-key check, or `None` for a
+/// key that is not a literal (a dotted name, whose value is only known at
+/// runtime, so CPython does not check it either).
+fn render_pattern_key(key: &AstExpr) -> Option<String> {
+    match key {
+        AstExpr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => Some(i.to_string()),
+            ast::Number::Float(f) => Some(f.to_string()),
+            // A complex key is rare enough that letting it through only costs
+            // the duplicate check, which is a diagnostic rather than a rule.
+            ast::Number::Complex { .. } => None,
+        },
+        AstExpr::StringLiteral(s) => Some(StringRepr(s.value.to_str()).to_string()),
+        AstExpr::NoneLiteral(_) => Some("None".to_owned()),
+        AstExpr::BooleanLiteral(b) => Some(if b.value { "True".to_owned() } else { "False".to_owned() }),
+        _ => None,
     }
 }
