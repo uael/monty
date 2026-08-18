@@ -14,6 +14,15 @@ endif
 .uv: ## Check that uv is installed
 	@uv --version || echo 'Please install uv: https://docs.astral.sh/uv/getting-started/installation/'
 
+# `monty-datatest` embeds libpython through pyo3, which resolves whatever
+# `python3` the build finds first. On macOS that is Xcode's 3.9 and the binary
+# aborts in dyld before `main`, naming a missing framework rather than the
+# cause. Resolve the interpreter `.python-version` pins instead, and expand to
+# nothing when uv cannot, so pyo3's own search still applies. `build.rs` fails
+# the build with an explanation whenever what it finds is too old.
+PYTHON_PIN = $(shell cat .python-version)
+DATATEST_PYTHON = $(shell p=$$(uv python find $(PYTHON_PIN) 2>/dev/null); test -n "$$p" && echo PYO3_PYTHON=$$p)
+
 .PHONY: install-py
 install-py: .uv ## Install python dependencies
 	# --only-dev avoids building the python packages; --inexact preserves builds installed by make dev-py
@@ -127,21 +136,21 @@ lint: lint-rs lint-py ## Lint the code with ruff and clippy
 .PHONY: test-no-features
 test-no-features: ## Run rust tests without any features enabled
 	cargo test -p monty -p monty-fs
-	cargo run -p monty-datatest
+	$(DATATEST_PYTHON) cargo run -p monty-datatest
 
 .PHONY: test-memory-model-checks
 test-memory-model-checks: ## Run rust tests with memory-model-checks enabled - THIS IS EXTREMELY SLOW, SHOULD MOSTLY BE RUN IN CI OR IF ABSOLUTELY NECESSARY
 	cargo test -p monty --features "memory-model-checks test-hooks"
-	cargo run -p monty-datatest --features memory-model-checks
+	$(DATATEST_PYTHON) cargo run -p monty-datatest --features memory-model-checks
 
 .PHONY: test-ref-count-return
 test-ref-count-return: ## Run rust tests with ref-count-return enabled
 	cargo test -p monty --features ref-count-return
-	cargo run -p monty-datatest --features ref-count-return
+	$(DATATEST_PYTHON) cargo run -p monty-datatest --features ref-count-return
 
 .PHONY: test-cases
 test-cases: ## Run tests cases only
-	cargo run -p monty-datatest
+	$(DATATEST_PYTHON) cargo run -p monty-datatest
 
 .PHONY: miri
 miri: ## Run library inline tests under miri (particularly relevant for heap.rs)
@@ -149,7 +158,7 @@ miri: ## Run library inline tests under miri (particularly relevant for heap.rs)
 
 .PHONY: miri-test-cases
 miri-test-cases: ## Run library inline tests under miri (particularly relevant for heap.rs)
-	MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri run -p monty-datatest -- run_test_cases_monty
+	MIRIFLAGS=-Zmiri-disable-isolation $(DATATEST_PYTHON) cargo +nightly miri run -p monty-datatest -- run_test_cases_monty
 
 .PHONY: test-type-checking
 test-type-checking: ## Run rust tests on monty-type-checking
@@ -181,13 +190,13 @@ testcov: ## Run Rust tests with coverage, print table, and generate HTML report
 	cargo llvm-cov clean --workspace
 	echo "coverage for `make test-no-features`"
 	cargo llvm-cov --no-report -p monty
-	cargo llvm-cov run --no-report -p monty-datatest
+	$(DATATEST_PYTHON) cargo llvm-cov run --no-report -p monty-datatest
 	echo "coverage for `make test-memory-model-checks`"
 	cargo llvm-cov --no-report -p monty --features memory-model-checks
-	cargo llvm-cov run --no-report -p monty-datatest --features memory-model-checks
+	$(DATATEST_PYTHON) cargo llvm-cov run --no-report -p monty-datatest --features memory-model-checks
 	echo "coverage for `make test-ref-count-return`"
 	cargo llvm-cov --no-report -p monty --features ref-count-return
-	cargo llvm-cov run --no-report -p monty-datatest --features ref-count-return
+	$(DATATEST_PYTHON) cargo llvm-cov run --no-report -p monty-datatest --features ref-count-return
 	echo "coverage for `make test-type-checking`"
 	cargo llvm-cov --no-report -p monty-type-checking -p monty-typeshed
 	echo "Generating reports:"
