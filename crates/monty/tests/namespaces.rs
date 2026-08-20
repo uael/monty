@@ -557,3 +557,40 @@ fn cost_of_a_namespace() {
     assert_eq!(feed(&mut repl, "v0 == [0, 'written']"), t(true));
     assert_eq!(feed_in(&mut repl, kids[1], "v0 == [0, 'written']"), t(true));
 }
+
+/// A type is shared by a deep copy rather than carried by it.
+///
+/// A type holds no state of its own and reaches only other types, so a copy of
+/// one could not be told from it. Copying one would also stop `isinstance`
+/// agreeing with itself across the copy, and a namespace holding an alias could
+/// not be deep copied at all.
+#[test]
+fn a_deep_copy_shares_the_types_it_meets() {
+    let mut repl = session();
+    repl.set_namespaces(true);
+    repl.feed_run(
+        "type Wire = int | str\nclass K: pass\nw = g = u = k = None\nns = namespace({})\n",
+        vec![],
+        PrintWriter::Stdout,
+    )
+    .expect("a frame with types in it");
+    repl.feed_run(
+        "ns['w'] = Wire\nns['g'] = list[int]\nns['u'] = int | None\nns['k'] = K\n",
+        vec![],
+        PrintWriter::Stdout,
+    )
+    .expect("the types are bound");
+    let same = repl
+        .probe_scoped_in(
+            None,
+            "(lambda c: [c['w'] is Wire, c['g'] is ns['g'], c['u'] is ns['u'], c['k'] is K])(ns.deepcopy())",
+            vec![],
+            PrintWriter::Stdout,
+        )
+        .expect("a namespace holding types deep copies");
+    assert_eq!(
+        format!("{same:?}"),
+        "List([Bool(true), Bool(true), Bool(true), Bool(true)])",
+        "every type is the one the donor held"
+    );
+}

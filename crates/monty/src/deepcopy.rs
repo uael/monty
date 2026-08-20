@@ -194,7 +194,15 @@ fn shares(vm: &VM<'_>, id: HeapId, from: ScopeId) -> bool {
         | HeapData::Path(_)
         | HeapData::Range(_)
         | HeapData::Module(_)
-        | HeapData::ExtFunction(_) => true,
+        | HeapData::ExtFunction(_)
+        // A type is a value that says what other values are. It holds no state
+        // of its own and reaches only other types, so a copy of one could not
+        // be told from it, and one that could would stop `isinstance` agreeing
+        // with itself across a copy.
+        | HeapData::TypeAliasType(_)
+        | HeapData::GenericAlias(_)
+        | HeapData::UnionType(_)
+        | HeapData::TypeVar(_) => true,
         // Immutable and reaching nothing, so no copy of it could be told apart
         // from it; this is also what keeps `()` the one interned empty tuple.
         HeapData::Tuple(tuple) => !tuple.contains_refs(),

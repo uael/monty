@@ -1,7 +1,15 @@
 # Format mini-language (f-string specs)
 
-Monty implements CPython 3.14's format mini-language for f-string
-interpolations. The mini-language is only reachable through f-strings.
+Monty implements CPython 3.14's format mini-language. It is reachable through
+f-strings and through `str.format`, which share one formatter: a template's
+replacement fields are parsed when it is applied, and each field's value and
+spec go to the same code an f-string's do.
+
+`str.format` supports the whole of PEP 3101's field grammar — automatic and
+manual numbering (which cannot be mixed), keyword fields, `.attribute` and
+`[key]` access, the `!s`/`!r`/`!a` conversions, and specs that nest fields of
+their own one level deep. A field reads an attribute the way `getattr` does,
+so a property in a field is computed as CPython computes it.
 
 A t-string never *applies* a format spec: PEP 750 records the spec's rendered
 text on the `Interpolation` and leaves formatting to the consumer, so
@@ -12,8 +20,9 @@ CPython renders it. See ./string_templatelib.md.
 
 The other CPython formatting mechanisms are not implemented:
 
-- The `format()` builtin raises `NameError` and the `str.format()` method
-  raises `AttributeError` (see ./builtins.md).
+- The `format()` builtin raises `NameError` (see ./builtins.md), and
+  `str.format_map` raises `AttributeError`: it takes one mapping where
+  `str.format` takes keyword arguments.
 - Printf-style `%` formatting (`'%5.3f' % math.pi`, `'%s %s' % (a, b)`) is not
   implemented. `str` has no `__mod__`, so `str % value` raises
   `TypeError: unsupported operand type(s) for %: 'str' and '...'`. Use an

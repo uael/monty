@@ -20,6 +20,7 @@ use crate::{
     heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapItem, HeapRead, heap_read_ref_as_field},
     intern::{Interns, StaticStrings, StringId},
     resource_checks::{check_repeat_size, check_replace_size},
+    str_format::format_template,
     string_builder::StringBuilder,
     types::{
         LazyHeapSet, Type,
@@ -407,10 +408,8 @@ pub fn call_str_method(s: &str, method_id: StringId, args: ArgValues, vm: &mut V
 ///
 /// The following Python string methods are not yet implemented:
 ///
-/// - `format()` - Requires implementing the format spec mini-language (PEP 3101),
-///   which is complex and involves parsing format specifications like `{:>10.2f}`.
-/// - `format_map(mapping)` - Similar to `format()` but takes a mapping; depends on
-///   `format()` implementation.
+/// - `format_map(mapping)` - Like `format()`, but taking one mapping rather than
+///   keyword arguments.
 /// - `maketrans()` / `translate()` - Character translation tables; moderate complexity,
 ///   requires building and applying Unicode translation maps.
 /// - `expandtabs(tabsize=8)` - Tab expansion; simple but rarely used in practice.
@@ -526,6 +525,35 @@ fn call_str_method_impl<'h>(
         StaticStrings::Join => {
             let iterable = args.get_one_arg("str.join", vm.heap)?;
             str_join(s, iterable, vm)
+        }
+        // The template is copied out first: it lives on the heap this is about
+        // to allocate into, and what a field reads may move that heap.
+        StaticStrings::Format => {
+            let template = s.get(vm.heap).to_owned();
+            let (positional, keywords_given) = args.into_parts();
+            let positional: Vec<Value> = positional.collect();
+            let mut keywords: Vec<(String, Value)> = Vec::new();
+            for (key, value) in keywords_given {
+                let name = key.to_str(vm).map(str::to_owned);
+                key.drop_with(vm);
+                match name {
+                    Ok(name) => keywords.push((name, value)),
+                    Err(e) => {
+                        value.drop_with(vm);
+                        positional.drop_with(vm);
+                        for (_, held) in keywords {
+                            held.drop_with(vm);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            let made = format_template(&template, &positional, &keywords, vm);
+            positional.drop_with(vm);
+            for (_, value) in keywords {
+                value.drop_with(vm);
+            }
+            made.map(|said| allocate_string(said, vm.heap))
         }
         _ => {
             args.drop_with(vm);
