@@ -990,7 +990,23 @@ pub(crate) fn dataclass_hash(self_id: HeapId, class_id: HeapId, vm: &mut VM<'_>)
         .collect();
     let tuple = compared_tuple(self_id, class_id, &names, vm)?;
     defer_drop!(tuple, vm);
-    tuple.py_hash(vm)
+    if let Some(hash) = tuple.py_hash(vm)? {
+        return Ok(Some(hash));
+    }
+    // The tuple refused, so one of the fields did. CPython's generated
+    // `__hash__` hashes that same tuple, so the error names the field's type
+    // rather than the dataclass holding it.
+    for &name in &names {
+        let field_name = vm.interns.get_str(name).to_owned();
+        let value = instance_attr(self_id, &field_name, vm)?;
+        defer_drop!(value, vm);
+        if let Some(value) = value
+            && value.py_hash(vm)?.is_none()
+        {
+            return Err(ExcType::type_error_unhashable(&value.py_type_name(vm)));
+        }
+    }
+    Ok(None)
 }
 
 /// The error assigning `name` raises on an instance of `class_id`, or `None`
