@@ -504,6 +504,10 @@ impl Type {
                 | Self::ItertoolsDropWhile
                 | Self::ItertoolsFilterFalse
                 | Self::ItertoolsStarMap
+                // A paused generator is its own iterator, which is what makes a
+                // class whose `__iter__` is a generator function iterable. The
+                // async one is not: it is stepped through `__anext__`.
+                | Self::Generator
         )
     }
 

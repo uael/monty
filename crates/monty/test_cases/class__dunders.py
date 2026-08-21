@@ -125,6 +125,26 @@ class Plain:
 assert Plain()
 
 
+# === __iter__ implemented by a generator function ===
+class Countdown:
+    def __init__(self, n):
+        self.n = n
+
+    def __iter__(self):
+        for i in range(self.n, 0, -1):
+            yield i
+
+
+assert list(Countdown(3)) == [3, 2, 1]
+assert [x * 2 for x in Countdown(2)] == [4, 2]
+assert 2 in Countdown(3)
+# The generator a call returns is its own iterator, which is what lets `iter()`
+# accept it as the result of `__iter__`.
+counted = Countdown(2)
+assert iter(counted) is not counted
+assert max(Countdown(4)) == 4
+
+
 # === Inherited dunders ===
 class BaseStore(Store):
     pass
