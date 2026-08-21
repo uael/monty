@@ -84,11 +84,22 @@ deleting left to right. Divergences:
   integers or slices, not slice`, the same error `lst[1:3] = ...` raises, since
   Monty implements neither slice assignment nor slice deletion.
 - **`del` reaches only real instance attributes.** `del obj.attr` works on an
-  instance of a user class and raises `AttributeError` for every other type,
-  including a `@dataclass` instance and the built-in types whose attributes are
-  computed rather than stored. CPython allows deleting a dataclass instance
-  attribute, and reports `attribute '<name>' is read-only` where Monty reports
-  `has no attribute '<name>' and no __dict__ for setting new attributes`.
+  instance of a user class, a `@dataclass` included, and raises `AttributeError`
+  for every other type: a class object, a host-supplied dataclass, and the
+  built-in types whose attributes are computed rather than stored. Monty reports
+  `has no attribute '<name>' and no __dict__ for setting new attributes` where
+  CPython reports `attribute '<name>' is read-only`.
+- **A `@dataclass` refuses the deletions it refuses assignments.** `frozen=True`
+  raises `FrozenInstanceError: cannot delete field '<name>'` for any name, and
+  `slots=True` raises `AttributeError` for a name the class never declared,
+  both as CPython does. Deleting a declared `slots=True` field twice reports
+  Monty's usual `'C' object has no attribute 'x'`, where CPython's slot
+  descriptor reports the bare `x`.
+- **One wording for a refused `del container[key]`.** Monty always reports
+  `'C' object doesn't support item deletion`, where CPython reports `does not
+  support item deletion` unless the key is an integer index. The difference is
+  a CPython slot artifact (`PySequence_DelItem` versus `PyObject_DelItem`), and
+  it is the message only: both refuse.
 - **Module dunders cannot be deleted.** `del __name__` raises `NameError`,
   because the module dunders are resolved on read rather than stored (see
   below). CPython deletes the real module-dict entry.

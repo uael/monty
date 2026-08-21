@@ -189,3 +189,63 @@ grid = {'k': 1}
 del container()['k']
 assert calls == ['called']
 assert grid == {}
+
+# === `del` on a `@dataclass` instance obeys the decorator's options ===
+from dataclasses import FrozenInstanceError, dataclass
+
+
+@dataclass
+class Record:
+    x: int
+    y: int = 5
+
+
+rec = Record(1)
+del rec.x
+assert hasattr(rec, 'x') is False
+try:
+    rec.x
+    assert False, 'expected AttributeError reading a deleted field'
+except AttributeError as exc:
+    assert str(exc) == "'Record' object has no attribute 'x'"
+
+# A plain default stays bound on the class, so deleting the instance attribute
+# uncovers it rather than unbinding the name.
+del rec.y
+assert rec.y == 5
+
+
+@dataclass(frozen=True)
+class Sealed:
+    x: int
+
+
+sealed = Sealed(1)
+try:
+    del sealed.x
+    assert False, 'expected FrozenInstanceError deleting a frozen field'
+except FrozenInstanceError as exc:
+    assert str(exc) == "cannot delete field 'x'"
+assert sealed.x == 1
+
+# Frozen refuses every name on the instance, field or not.
+try:
+    del sealed.absent
+    assert False, 'expected FrozenInstanceError deleting a frozen non-field'
+except FrozenInstanceError as exc:
+    assert str(exc) == "cannot delete field 'absent'"
+
+
+@dataclass(slots=True)
+class Slotted:
+    x: int
+
+
+slotted = Slotted(1)
+del slotted.x
+assert hasattr(slotted, 'x') is False
+try:
+    del slotted.absent
+    assert False, 'expected AttributeError deleting an undeclared slot'
+except AttributeError as exc:
+    assert str(exc) == "'Slotted' object has no attribute 'absent' and no __dict__ for setting new attributes"

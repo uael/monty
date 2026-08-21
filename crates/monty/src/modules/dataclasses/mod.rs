@@ -1026,19 +1026,48 @@ pub(crate) fn set_attr_error(class_id: HeapId, name: &Value, vm: &VM<'_>) -> Opt
     check_set_attr(class_id, &attr, vm).err()
 }
 
+/// [`set_attr_error`] for the deletion path, and settled the same way.
+pub(crate) fn del_attr_error(class_id: HeapId, name: &Value, vm: &VM<'_>) -> Option<RunError> {
+    if !is_dataclass_class(class_id, vm) {
+        return None;
+    }
+    let attr = match name.as_either_str(vm.heap) {
+        Some(attr) => attr.as_str(vm.interns).to_owned(),
+        None => String::new(),
+    };
+    check_del_attr(class_id, &attr, vm).err()
+}
+
 /// Enforces what a decorated class allows to be assigned on an instance.
 ///
 /// `frozen=True` refuses every assignment, `slots=True` refuses names the class
 /// never declared (Monty has no `__slots__`, so the restriction is enforced
 /// here rather than by the object layout).
 pub(crate) fn check_set_attr(class_id: HeapId, attr: &str, vm: &VM<'_>) -> RunResult<()> {
+    check_attr_mutation(class_id, attr, "assign to", vm)
+}
+
+/// Enforces what a decorated class allows to be deleted from an instance.
+///
+/// The same table as [`check_set_attr`], because CPython synthesizes
+/// `__delattr__` beside `__setattr__` from one condition: a `frozen=True` class
+/// refuses every name an instance of it carries, field or not, and a
+/// `slots=True` class has no `__dict__` to delete an undeclared name from
+/// either.
+pub(crate) fn check_del_attr(class_id: HeapId, attr: &str, vm: &VM<'_>) -> RunResult<()> {
+    check_attr_mutation(class_id, attr, "delete", vm)
+}
+
+/// The shared body. `verb` reads back inside the `frozen` message, the only
+/// wording the two paths differ in.
+fn check_attr_mutation(class_id: HeapId, attr: &str, verb: &str, vm: &VM<'_>) -> RunResult<()> {
     if !is_dataclass_class(class_id, vm) {
         return Ok(());
     }
     let options = class_options(class_id, vm);
     if options.get(Opt::Frozen) {
         return Err(
-            SimpleException::new_msg(ExcType::FrozenInstanceError, format!("cannot assign to field '{attr}'")).into(),
+            SimpleException::new_msg(ExcType::FrozenInstanceError, format!("cannot {verb} field '{attr}'")).into(),
         );
     }
     let declared = field_specs(class_id, vm)

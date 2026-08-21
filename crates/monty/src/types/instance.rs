@@ -100,7 +100,14 @@ impl<'h> HeapRead<'h, Instance> {
 
     /// Removes an instance attribute, returning its key and value for the caller
     /// to drop, or `None` when the instance `__dict__` does not bind `name`.
+    ///
+    /// Guarded like [`set_attr`](Self::set_attr): a `frozen` or `slots`
+    /// dataclass refuses a deletion for the same reasons it refuses a write.
     pub fn del_attr(&mut self, name: &Value, vm: &mut VM<'h>) -> RunResult<Option<(Value, Value)>> {
+        let class_id = self.get(vm.heap).class();
+        if let Some(exc) = dataclasses::del_attr_error(class_id, name, vm) {
+            return Err(exc);
+        }
         self.attrs_mut().pop(name, vm)
     }
 }

@@ -354,7 +354,9 @@ host that wants to construct instances asks the sandbox to.
 
 ## `FrozenInstanceError`
 
-Raised when assigning to a field of a frozen host-supplied dataclass.
-Subclass of `AttributeError`, so `except AttributeError:` catches it, as in
-CPython's `dataclasses` module. User-defined classes in the sandbox are
-never frozen.
+Raised when assigning to a field of a frozen dataclass, host-supplied or a
+sandbox `@dataclass(frozen=True)`, and when deleting an attribute of the
+latter. Subclass of `AttributeError`, so `except AttributeError:` catches it,
+as in CPython's `dataclasses` module. A host-supplied dataclass never raises it
+for a deletion: `del` reaches instance attributes only, so it raises the plain
+`AttributeError` there (see ./language.md).
