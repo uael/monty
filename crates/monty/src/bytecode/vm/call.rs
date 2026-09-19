@@ -27,8 +27,8 @@ use crate::{
         Dict, Instance, PyTrait, Type, allocate_tuple,
         bytes::call_bytes_method,
         generator::Generator,
-        instance::{class_builtin_exc, class_member, class_name},
-        str::call_str_method,
+        instance::{class_builtin_exc, class_inherits_str, class_member, class_name},
+        str::{Str, allocate_class_string, call_str_method},
         tuple::TupleVec,
     },
     value::{EitherStr, VALUE_SIZE, Value},
@@ -1204,6 +1204,11 @@ impl<'h> VM<'h> {
 
     /// Constructs an instance of a user-defined class — the `Foo(...)` path.
     ///
+    /// A class that inherits `str` takes the other path: its instance is a
+    /// string built from the same arguments `str(...)` takes, carrying the
+    /// class. Such a class cannot define `__init__` (refused where the class is
+    /// built), so nothing below applies to it.
+    ///
     /// Allocates the instance with an empty `__dict__`, then:
     /// - **No `__init__`:** rejects any arguments (like `object()`), returns the
     ///   instance directly.
@@ -1226,6 +1231,9 @@ impl<'h> VM<'h> {
     /// on external/OS calls; the `is_initializer` flag is threaded through frame
     /// serialization so a suspended initializer resumes correctly.
     pub(crate) fn instantiate_class(&mut self, class_id: HeapId, args: ArgValues) -> Result<CallResult, RunError> {
+        if class_inherits_str(class_id, self) {
+            return self.instantiate_str_class(class_id, args).map(CallResult::Value);
+        }
         let instance_id = self
             .heap
             .allocate(HeapData::Instance(Box::new(Instance::new(class_id, Dict::new()))));
@@ -1342,6 +1350,26 @@ impl<'h> VM<'h> {
         replaced.drop_with(self);
         drop(instance);
         Ok(CallResult::Value(Value::Ref(instance_id)))
+    }
+
+    /// Constructs an instance of a class that inherits `str`.
+    ///
+    /// The arguments build the characters exactly as `str(...)` does, error
+    /// messages included, and the result is re-allocated carrying the class:
+    /// an instance is a string that knows what it is an instance of, so every
+    /// string operation reads it as the string it is, and the class only adds
+    /// methods and type identity.
+    fn instantiate_str_class(&mut self, class_id: HeapId, args: ArgValues) -> RunResult<Value> {
+        let this = self;
+        let converted = Str::init(this, args)?;
+        defer_drop!(converted, this);
+        let Some(text) = converted.as_either_str(this.heap) else {
+            unreachable!("str() answers a string")
+        };
+        let text = text.as_str(this.interns).to_owned();
+        // The instance takes the reference, released by `Str::py_dec_ref_ids`.
+        this.heap.inc_ref(class_id);
+        Ok(allocate_class_string(text, class_id, this.heap))
     }
 
     /// Whether `value` is a plain Python function object (`def`, closure, or

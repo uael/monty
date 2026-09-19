@@ -592,6 +592,17 @@ pub(crate) fn instance_attr(self_id: HeapId, attr: &str, vm: &VM<'_>) -> Option<
         return Some(value);
     }
     let class_id = instance_class(self_id, vm);
+    class_attr(class_id, self_id, attr, vm)
+}
+
+/// The class half of [`instance_attr`]: a member of the chain of `class_id`,
+/// bound to the receiver `self_id` when it is a method, then the `__class__`
+/// special case; `None` when nothing binds `attr`.
+///
+/// Split out because the receiver is not always an [`Instance`]: an instance of
+/// a class that inherits `str` is a string carrying its class, and reads its
+/// methods through here too.
+pub(crate) fn class_attr(class_id: HeapId, self_id: HeapId, attr: &str, vm: &VM<'_>) -> Option<Value> {
     match class_member(class_id, attr, vm) {
         // A class variable is returned as-is; a function binds `self`.
         Some(member) if is_method_value(&member, vm) => {
@@ -972,6 +983,17 @@ pub(crate) fn class_builtin_exc(class_id: HeapId, vm: &VM<'_>) -> Option<ExcType
     }
 }
 
+/// Whether instances of `class_id` are strings, because the class inherits
+/// `str`.
+///
+/// Resolved once at class creation, so this is a field read rather than a walk.
+pub(crate) fn class_inherits_str(class_id: HeapId, vm: &VM<'_>) -> bool {
+    match vm.heap.get(class_id) {
+        HeapData::Class(class) => class.inherits_str(),
+        _ => false,
+    }
+}
+
 /// The builtin exception an *instance* descends from, or `None` for a value
 /// that is not a sandbox exception.
 pub(crate) fn instance_builtin_exc(value: &Value, vm: &VM<'_>) -> Option<ExcType> {
@@ -1015,7 +1037,12 @@ pub(crate) fn class_name<'i>(class_id: HeapId, heap: &Heap, interns: &'i Interns
 /// other callable value is called as-is. Shared by `py_call_attr` and the
 /// context-manager hooks (`py_enter`/`py_exit`) so dunder invocation and
 /// ordinary method calls dispatch identically.
-fn call_member_bound(member: &Value, self_id: HeapId, args: ArgValues, vm: &mut VM<'_>) -> RunResult<CallResult> {
+pub(crate) fn call_member_bound(
+    member: &Value,
+    self_id: HeapId,
+    args: ArgValues,
+    vm: &mut VM<'_>,
+) -> RunResult<CallResult> {
     if is_method_value(member, vm) {
         vm.heap.inc_ref(self_id);
         vm.call_function(member, args.prepend(Value::Ref(self_id)))

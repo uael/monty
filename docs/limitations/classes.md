@@ -48,13 +48,13 @@ and function-attributes-become-methods), bound methods, class variables
 The 3-arg `type()` form creates classes at runtime with CPython's validation
 order and error wording, but with these divergences:
 
-- **`bases` holds at most one class, and it must be a class defined in the
-    sandbox.** Two or more raise
+- **`bases` holds at most one class.** Two or more raise
     `NotImplementedError: ... a class with more than one base ...`, because
     Monty resolves a member by walking one chain and has no linearization to
-    resolve a second base against. A builtin type other than an exception,
-    `object` included, raises
-    `TypeError: a class can only inherit from a class defined in the sandbox or a builtin exception`.
+    resolve a second base against. The one base is a class defined in the
+    sandbox, a builtin exception, or `str`; any other builtin type, `object`
+    included, raises
+    `TypeError: a class can only inherit from a class defined in the sandbox, a builtin exception or str`.
 - **Keywords are always rejected.** CPython forwards extra keywords to
     `__init_subclass__`; Monty has no `__init_subclass__`, but the error
     message matches what `object.__init_subclass__` produces
@@ -67,6 +67,56 @@ order and error wording, but with these divergences:
     (`non-string key (int) in the namespace of class 'A'`). CPython accepts
     them with only a `RuntimeWarning`; Monty has no warnings machinery, so it
     raises rather than silently accepting.
+
+## Inheriting `str`
+
+A class may name `str` as its one base.
+An instance of it *is* a string: it carries the characters and the class, so
+every string operation reads it as the string it is, and the class adds methods,
+class variables and type identity on top.
+`isinstance(x, str)`, `issubclass(Act, str)`, `type(x) is Act`, equality,
+hashing, ordering, slicing, `in`, iteration and every `str` method behave as in
+CPython, and a method of the class wins over the `str` method of the same name.
+A `str` method returns a plain `str`, as it does in CPython.
+
+```python test="skip"
+class Act(str):
+    def who(self) -> str:
+        return 'who:' + self
+
+
+a = Act('hello')
+assert a == 'hello' and a.startswith('he') and a.who() == 'who:hello'
+assert isinstance(a, str) and type(a) is Act
+```
+
+Divergences:
+
+- **The class may not define `__init__`.** An instance is a string and holds no
+    attributes of its own, so the body would have nothing to write to; Monty
+    raises
+    `TypeError: class 'Act' inherits str and defines __init__; an instance of it is a string, which holds no attributes of its own`
+    where CPython runs it. Attributes cannot be set on an instance either:
+    `a.x = 1` raises
+    `AttributeError: 'Act' object has no attribute 'x' and no __dict__ for setting new attributes`,
+    which is CPython's wording for a `__slots__ = ()` subclass, where CPython
+    itself accepts the assignment.
+- **The class may not define a dunder the string answers itself.** Monty runs
+    the string's own protocol and would never reach the class member, so the
+    class is refused rather than left to give the string's answer:
+    `TypeError: class 'Act' inherits str and defines __repr__, which the string answers itself`.
+    The refused names are `__new__`, `__repr__`, `__str__`, `__format__`,
+    `__bool__`, `__len__`, `__hash__`, `__eq__`, `__ne__`, `__lt__`, `__le__`,
+    `__gt__`, `__ge__`, `__iter__`, `__contains__`, `__getitem__`, `__add__`,
+    `__mul__`, `__rmul__`, `__mod__` and `__rmod__`. A dunder `str` does not
+    answer is untouched by the base and behaves as it does on any other class.
+- **An operation on the string names `str`, not the class.** `Act('x') + 1`
+    raises `can only concatenate str (not "int") to str`, matching CPython,
+    while a message about the object names the class:
+    `'Act' object has no attribute 'nope'`.
+- **The instance crosses the host boundary as a plain string**, losing the
+    class; a sandbox class instance otherwise crosses as a `ClassInstance` (see
+    below).
 
 ## Divergences from CPython
 
@@ -361,8 +411,10 @@ every construction request. Divergences:
     base class: `Base.m(self)`.
 - `__mro__`, `__bases__` and `__base__`: a class reports no ancestry, so a
     decorator cannot discover what a class inherits.
-- Inheriting from a builtin type other than an exception, `object` included. A
-    builtin exception *is* inheritable; see [exceptions.md](exceptions.md).
+- Inheriting from a builtin type other than an exception or `str`, `object`
+    included. A builtin exception *is* inheritable, see
+    [exceptions.md](exceptions.md); `str` is inheritable with the restrictions
+    described under "Inheriting `str`" above.
 - Metaclasses, `__init_subclass__`, `__set_name__`, and any other
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).

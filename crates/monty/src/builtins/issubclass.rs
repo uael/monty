@@ -9,7 +9,7 @@ use crate::{
     heap::{HeapData, HeapId},
     types::{
         Type,
-        instance::{class_builtin_exc, class_chain},
+        instance::{class_builtin_exc, class_chain, class_inherits_str},
     },
     value::Value,
 };
@@ -53,9 +53,13 @@ fn issubclass_check(cls: &Value, chain: &[HeapId], classinfo: &Value, vm: &mut V
             Value::Builtin(Builtins::ExcType(exc)) => exc.is_subclass_of(*handler),
             _ => false,
         }),
-        Value::Builtin(Builtins::Type(wanted)) => {
-            Ok(matches!(cls, Value::Builtin(Builtins::Type(t)) if is_type_subclass(*t, *wanted)))
-        }
+        // A sandbox class is a subclass of `str` when it inherits it, which its
+        // chain resolved at creation.
+        Value::Builtin(Builtins::Type(wanted)) => Ok(match cls {
+            Value::Builtin(Builtins::Type(t)) => is_type_subclass(*t, *wanted),
+            Value::Ref(id) => *wanted == Type::Str && class_inherits_str(*id, vm),
+            _ => false,
+        }),
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Tuple(_)) => issubclass_tuple(cls, chain, *id, vm),
         _ => Err(ExcType::type_error(
             "issubclass() arg 2 must be a class, or tuple of classes",

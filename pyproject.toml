@@ -121,6 +121,10 @@ known-first-party = ["pydantic_monty"]
     "I001", # Import block unsorted - needed for testing `import a, b` syntax
 ]
 
+"crates/monty/test_cases/class__str_base.py" = [
+    "UP031", # percent formatting of an instance of a class that inherits str is the test
+]
+
 "crates/monty/test_cases/class__annotations.py" = [
     # Scoped to this file so the single-quote convention stays enforced across
     # the other test cases: these tests exist to prove that double-quoted

@@ -49,7 +49,7 @@ mod unicode_type_data;
 pub mod union;
 
 pub(crate) use bytes::{Bytes, BytesIterator};
-pub(crate) use class::{Class, DataclassOptions};
+pub(crate) use class::{BuiltinBase, Class, DataclassOptions};
 pub(crate) use deque::Deque;
 pub(crate) use dict::{Dict, DictItemIterator, DictKeyIterator, DictValueIterator};
 pub(crate) use dict_view::{DictItemsView, DictKeysView, DictValuesView};

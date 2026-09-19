@@ -31,7 +31,7 @@ use crate::{
         Union,
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
         host_class_type,
-        instance::{instance_dataclass_eq, instance_getattr, instance_str, instance_user_eq},
+        instance::{class_name, instance_dataclass_eq, instance_getattr, instance_str, instance_user_eq},
         long_int::{
             bigint_cmp_f64, bigint_cmp_i64, bigint_divmod_tuple, bigint_eq_f64, bigint_eq_i64, bigint_true_divide,
             check_bits_str_digits_limit, i64_cmp_f64, repeat_count, wide_i128_into_value,
@@ -570,7 +570,12 @@ impl<'h> PyTrait<'h> for Value {
             // same value back (inc-ref'd for the heap case) instead of cloning
             // the bytes into a fresh allocation.
             Self::InternString(string_id) => Ok(Self::InternString(*string_id)),
-            Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Str(_)) => Ok(self.clone_with_heap(vm.heap)),
+            // A string carrying a class is an instance of a `class ...(str)`, and
+            // `str()` of one is the plain string of the same characters, so it
+            // falls through to the copy `HeapRead<Str>::py_str` makes.
+            Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Str(value) if value.class().is_none()) => {
+                Ok(self.clone_with_heap(vm.heap))
+            }
             // Instances dispatch to a user `__str__`/`__repr__` (needs the heap id).
             Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Instance(_)) => instance_str(*id, vm),
             Self::Ref(id) => vm.heap.read(*id).py_str(vm),
@@ -1470,6 +1475,10 @@ impl Value {
         };
         let name = match heap.get(*heap_id) {
             HeapData::NamedTuple(nt) => nt.name_either(),
+            // An instance of a class that inherits `str` is a string that
+            // carries its class, and CPython names that class in a message
+            // about the object (`'Act' object has no attribute 'nope'`).
+            HeapData::Str(value) => return value.class().map(|id| class_name(id, heap, interns)),
             HeapData::HostClass(hc) => host_class_type(heap, hc.class_id()).name_either(),
             // A Python class in CPython, so messages carry the bare name and
             // only `repr(type(x))` the module-qualified one.

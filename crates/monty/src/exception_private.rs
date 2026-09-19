@@ -1671,7 +1671,11 @@ pub(crate) trait ExcTypeExt: Sized {
             // qualified "collections.deque", so this can't share the branch below.
             format!("can only concatenate deque (not \"{rhs_name}\") to deque")
         } else if (op == "+" || op == "+=") && matches!(lhs_type, Type::Str | Type::List) {
-            format!("can only concatenate {lhs_name} (not \"{rhs_name}\") to {lhs_name}")
+            // Hardcoded like the branch above, because CPython names the builtin
+            // here even when the left operand is an instance of a class that
+            // inherits it: `Act('x') + 1` reports `can only concatenate str`.
+            let builtin = if matches!(lhs_type, Type::Str) { "str" } else { "list" };
+            format!("can only concatenate {builtin} (not \"{rhs_name}\") to {builtin}")
         } else {
             format!("unsupported operand type(s) for {op}: '{lhs_name}' and '{rhs_name}'")
         };

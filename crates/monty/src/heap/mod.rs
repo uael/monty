@@ -2027,6 +2027,13 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(*id);
             }
         }),
+        // Mirrors `Str::py_dec_ref_ids`: an instance of a class that inherits
+        // `str` owns that class, and a plain string owns nothing.
+        HeapData::Str(value) => {
+            if let Some(class_id) = value.class() {
+                on_child(class_id);
+            }
+        }
         // Mirrors `py_dec_ref_ids_for_data`: a property owns its getter.
         HeapData::ClassProperty(property) => {
             if let Value::Ref(id) = property.fget() {

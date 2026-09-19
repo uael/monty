@@ -30,8 +30,8 @@ pub fn builtin_isinstance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> 
 /// Supports:
 /// - Single builtin types: `isinstance(x, int)`
 /// - Exception types and their hierarchy: `isinstance(err, LookupError)`
-/// - User-defined classes: `isinstance(obj, Foo)` (identity of the instance's
-///   class; there is no inheritance chain to walk yet)
+/// - User-defined classes: `isinstance(obj, Foo)`, walking the instance's class
+///   chain
 /// - Host classes: `isinstance(obj, Point)` for a `HostClassType` (exact class
 ///   id; the host sends no bases)
 /// - Tuples (possibly nested) of the above
@@ -79,12 +79,21 @@ fn instance_of_host_class(obj: &Value, class_id: HeapId, vm: &VM<'_>) -> bool {
 }
 
 /// Whether `obj` is an instance of `class_id` or of one of its subclasses.
+///
+/// An instance is usually an [`Instance`](crate::types::Instance); an instance
+/// of a class that inherits `str` is a string carrying its class instead, and
+/// answers from the same chain.
 fn instance_of_class(obj: &Value, class_id: HeapId, vm: &VM<'_>) -> bool {
     let Value::Ref(obj_id) = obj else { return false };
-    let HeapData::Instance(inst) = vm.heap.get(*obj_id) else {
-        return false;
+    let own_class = match vm.heap.get(*obj_id) {
+        HeapData::Instance(inst) => inst.class(),
+        HeapData::Str(value) => match value.class() {
+            Some(own_class) => own_class,
+            None => return false,
+        },
+        _ => return false,
     };
-    class_chain(inst.class(), vm).contains(&class_id)
+    class_chain(own_class, vm).contains(&class_id)
 }
 
 /// Whether `obj` is a namedtuple instance built from the class `class_id`.

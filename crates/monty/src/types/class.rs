@@ -43,6 +43,23 @@ impl Default for DataclassOptions {
     }
 }
 
+/// The builtin type a class inherits, for the two a class may name as its base.
+///
+/// A builtin is not a heap object, so a class cannot hold a reference to one:
+/// it records which one it descends from instead. Resolved once at creation
+/// from the bases, and passed on to every class further down the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum BuiltinBase {
+    /// A builtin exception. `Some` is what makes an instance of the class
+    /// raisable, and the type every existing handler, message and host binding
+    /// keys off; the class's own name is carried alongside it so a traceback
+    /// still reads `Refused: why`.
+    Exception(ExcType),
+    /// `str`. An instance of the class is a string that carries the class, so
+    /// every string operation reads it as the string it is.
+    Str,
+}
+
 /// A user-defined class object created by a `class Foo: ...` statement.
 ///
 /// Holds the class name and a `namespace` [`Dict`] mapping member names to values:
@@ -70,12 +87,10 @@ pub(crate) struct Class {
     /// would report and what a future second base would extend; both
     /// `py_dec_ref_ids` and the GC child walk must report every id in it.
     bases: Vec<HeapId>,
-    /// The builtin exception this class descends from, resolved once at
-    /// creation because the chain cannot change afterwards. `Some` is what
-    /// makes an instance of this class raisable, and the type every existing
-    /// handler, message and host binding keys off; the class's own name is
-    /// carried alongside it so a traceback still reads `Refused: why`.
-    builtin_exc: Option<ExcType>,
+    /// The builtin type this class descends from, resolved once at creation
+    /// because the chain cannot change afterwards, or `None` for a class that
+    /// descends from `object` alone.
+    base: Option<BuiltinBase>,
     /// The `@dataclass(...)` options this class was decorated with, left at
     /// CPython's defaults for a class that was not. Stands in for the dunders
     /// CPython generates and Monty cannot yet install: baked in at decoration
@@ -93,22 +108,38 @@ impl Class {
     /// Dataclass options start at their defaults; `@dataclass` sets them with
     /// [`HeapRead::set_dataclass_options`] once it has built the class.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, builtin_exc: Option<ExcType>) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, base: Option<BuiltinBase>) -> Self {
         Self {
             name,
             namespace,
             bases,
-            builtin_exc,
+            base,
             options: DataclassOptions::default(),
             uuid: None,
         }
+    }
+
+    /// The builtin type this class descends from, or `None` for a class that
+    /// descends from `object` alone.
+    #[must_use]
+    pub fn base(&self) -> Option<BuiltinBase> {
+        self.base
     }
 
     /// The builtin exception this class descends from, or `None` for a class
     /// whose instances are not exceptions.
     #[must_use]
     pub fn builtin_exc(&self) -> Option<ExcType> {
-        self.builtin_exc
+        match self.base {
+            Some(BuiltinBase::Exception(exc)) => Some(exc),
+            Some(BuiltinBase::Str) | None => None,
+        }
+    }
+
+    /// Whether instances of this class are strings.
+    #[must_use]
+    pub fn inherits_str(&self) -> bool {
+        matches!(self.base, Some(BuiltinBase::Str))
     }
 
     /// The base classes, as borrowed ids. Owned by this class.
