@@ -33,6 +33,7 @@ use crate::{
         Class, DataclassOptions, Dict, Instance, LazyHeapSet, Module, PyTrait,
         host_class::{host_class_type, write_dataclass_repr},
         instance::{class_defines, class_dunder, class_name, instance_attr},
+        tuple::{TupleVec, allocate_tuple},
     },
     value::Value,
 };
@@ -239,6 +240,7 @@ fn apply_dataclass(vm: &mut VM<'_>, cls: Value, options: DataclassOptions) -> Ru
     // can still fail; a class left with fields alone reads back as a default one.
     store_dataclass_fields(&mut class, fields, vm)?;
     store_dataclass_params(&mut class, options, vm)?;
+    store_match_args(&mut class, *class_id, vm)?;
     // Last, so the options a class acts on are only ever those of a decoration
     // that ran to completion.
     class.set_dataclass_options(options, vm);
@@ -319,6 +321,27 @@ fn store_dataclass_params<'h>(
     let params = vm.heap.allocate_as(DataclassParams::new(options)).into_value();
     let name = Value::InternString(vm.interns.intern_static(StaticStrings::DataclassParams));
     let replaced = class.set_attr(name, params, vm)?;
+    replaced.drop_with(vm);
+    Ok(())
+}
+
+/// Writes `__match_args__`, the field names a positional class pattern binds,
+/// unless the class body wrote one of its own.
+///
+/// The fields are the ones the constructor takes positionally, which here is
+/// all of them: `init` and `kw_only` are both refused away from their defaults.
+fn store_match_args<'h>(class: &mut HeapRead<'h, Class>, class_id: HeapId, vm: &mut VM<'h>) -> RunResult<()> {
+    if class_defines(class_id, "__match_args__", vm) {
+        return Ok(());
+    }
+    let names: TupleVec = dataclass_fields(class_id, vm)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Value::InternString)
+        .collect();
+    let match_args = allocate_tuple(names, vm.heap);
+    let name = Value::InternString(vm.interns.intern_static(StaticStrings::DunderMatchArgs));
+    let replaced = class.set_attr(name, match_args, vm)?;
     replaced.drop_with(vm);
     Ok(())
 }

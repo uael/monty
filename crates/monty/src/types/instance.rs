@@ -793,7 +793,7 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 }
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
-fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
     match vm.heap.get(class_id) {
         HeapData::Class(class) => class
             .namespace()

@@ -860,6 +860,9 @@ pub enum StaticStrings {
     /// `__main__`, the `__name__` of the module being run.
     #[strum(serialize = "__main__")]
     DunderMain,
+    /// `__match_args__`, the field names a positional class pattern binds.
+    #[strum(serialize = "__match_args__")]
+    DunderMatchArgs,
     /// `defaultdict.__missing__` method.
     #[strum(serialize = "__missing__")]
     DunderMissing,

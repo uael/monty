@@ -23,13 +23,37 @@ any code runs.
     *expressions* (`(x for x in ...)`) parse but currently materialize to a
     `list` rather than a lazy iterator, a known temporary divergence; see
     `iter__generator_expr_type.py`.
-- **`match` statements** — structural pattern matching is not supported.
 - **`del` statements** — neither `del x` nor `del d[k]` parse.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
 - **`type` aliases** (PEP 695 `type Foo = int`).
 - **`async for` loops** and **async comprehensions**.
 - **Wildcard imports** (`from m import *`) — raises
     `` NotImplementedError: "Wildcard imports (`from ... import *`) are not supported" ``.
+
+## `match` statements
+
+PEP 634 structural pattern matching is implemented: literal, capture, wildcard,
+value, sequence, mapping, class and `|` patterns, `as` captures, guards, and the
+`__match_args__` protocol for positional class sub-patterns. The compile-time
+rules are enforced with CPython's own wording — an irrefutable case before the
+last one, a name bound twice in one pattern, alternatives that bind different
+names, a duplicate mapping key, and two starred names in one sequence pattern.
+
+Divergences:
+
+- **A `*rest` binds a list built from the whole subject.** CPython slices the
+    subject; Monty copies it to a list first, because not every sequence it
+    accepts here can be sliced (`collections.deque` cannot). The bound value is
+    the same list either way; only a subject with a side-effecting `__getitem__`
+    could tell, and Monty has no such builtin.
+- **The subject stays reachable after the match.** It is held in a hidden local
+    (named `<match>`, which no expression can name) for the duration, and that
+    local is not cleared afterwards, so the subject is released one scope-exit
+    later than in CPython.
+- `bytearray`, `memoryview` and `complex` are absent from Monty, so the
+    self-matching class patterns PEP 634 defines for them are too.
+- A sequence pattern accepts the sequences Monty can iterate, minus `str` and
+    `bytes`, which PEP 634 excludes.
 
 ## Expressions rejected at parse time
 

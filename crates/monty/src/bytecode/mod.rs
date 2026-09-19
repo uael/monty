@@ -23,7 +23,7 @@ pub use code::Code;
 pub use compiler::Compiler;
 #[cfg(test)]
 pub(crate) use op::opcode_fingerprint;
-pub(crate) use op::{NAME_CALLABLE, NAME_GLOBAL_ONLY, Opcode};
+pub(crate) use op::{MatchShape, NAME_CALLABLE, NAME_GLOBAL_ONLY, Opcode};
 pub(crate) use vm::{
     CallResult, ContainsVM, FrameNamespace, PendingLookupEffect, RecursionToken, RunReentryGuard, unpack_exact,
 };

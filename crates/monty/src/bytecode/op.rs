@@ -559,6 +559,18 @@ pub enum Opcode {
     /// Unbind a name through the frame's namespace; `NameError` if absent.
     /// Operands as `LoadName`.
     DeleteName = 124,
+
+    // === PEP 634 pattern matching ===
+    /// The parts of a `match` a pattern cannot express in ordinary bytecode,
+    /// selected by a [`MatchShape`] operand: the two "is this shape" tests, a
+    /// length, and the two mapping-key operations. One opcode rather than five
+    /// because no pattern test is hot enough to pay for its own dispatch arm.
+    MatchShape = 125,
+    /// Class pattern. Operand: u16 positional sub-pattern count. Pops the
+    /// keyword-name tuple, the class, and a copy of the subject; pushes the
+    /// tuple of matched attributes, or `None` when the subject is not an
+    /// instance or an attribute is missing.
+    MatchClass = 126,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -575,6 +587,28 @@ pub(crate) const NAME_GLOBAL_ONLY: u8 = 0x02;
 // flags/operand encoding on one opcode (e.g. `Assert`/`FormatValue`) over a
 // family of near-identical opcodes, unless the instruction is hot enough that
 // decoding the discriminating operand would cost measurable dispatch time.
+
+/// Which operation a [`Opcode::MatchShape`] performs.
+///
+/// The discriminants are the opcode's operand byte, so they are append-only in
+/// the same way the opcode enum is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::FromRepr)]
+#[repr(u8)]
+pub enum MatchShape {
+    /// Peek the subject, push whether a sequence pattern may match it: a
+    /// sequence that is not a `str` or `bytes`, as PEP 634 requires.
+    IsSequence = 0,
+    /// Peek the subject, push whether a mapping pattern may match it.
+    IsMapping = 1,
+    /// Peek the subject, push its length.
+    Len = 2,
+    /// Pop the key tuple, peek the subject, push the tuple of values it holds
+    /// for those keys — or `None` if it is missing any.
+    Keys = 3,
+    /// Pop the key tuple, peek the subject, push a new dict of everything the
+    /// key tuple did not name. Backs `{**rest}`.
+    Rest = 4,
+}
 
 /// Byte layout of an opcode's in-stream operand.
 #[repr(u8)]
@@ -680,7 +714,8 @@ impl Opcode {
             | Self::SetExtend
             | Self::LiftToTop
             | Self::Assert
-            | Self::AssertFailed => OperandShape::U8,
+            | Self::AssertFailed
+            | Self::MatchShape => OperandShape::U8,
             Self::LoadSmallInt => OperandShape::I8,
             Self::LoadModule
             | Self::LoadConst
@@ -702,7 +737,8 @@ impl Opcode {
             | Self::StoreAttr
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
-            | Self::MethodDictMerge => OperandShape::U16,
+            | Self::MethodDictMerge
+            | Self::MatchClass => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
             | Self::JumpIfFalse
@@ -850,6 +886,14 @@ impl Opcode {
                     -2
                 }
             }
+            // The two shape tests and the length peek the subject and push an
+            // answer; the two key operations replace the key tuple with theirs.
+            (MatchShape, Operand::U8(op)) => match self::MatchShape::from_repr(op) {
+                Some(self::MatchShape::IsSequence | self::MatchShape::IsMapping | self::MatchShape::Len) => 1,
+                // The compiler is the only emitter, so an unknown operand is a
+                // bug in it rather than anything a program can produce.
+                _ => 0,
+            },
 
             // === Variable-effect: U16 operand ===
             (BuildList | BuildTuple | BuildSet | BuildFString, Operand::U16(n)) => 1 - i32::from(n),
@@ -955,6 +999,9 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
+            // Pops the keyword names and the class, plus the subject copy the
+            // pattern duplicated for it; pushes the attribute tuple or `None`.
+            (MatchClass, Operand::U16(_)) => -2,
             // `DictMerge` takes a u16 operand carrying the func_name_id for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under

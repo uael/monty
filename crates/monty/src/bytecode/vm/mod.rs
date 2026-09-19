@@ -31,10 +31,11 @@ use crate::{
     asyncio::{CallId, TaskId},
     builtins::Builtins,
     bytecode::{
+        MatchShape,
         code::{Code, LocationEntry},
         op::{Opcode, decode_assert_flags},
     },
-    defer_drop_mut,
+    defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
     heap_data::{CellValue, Closure, FunctionDefaults},
@@ -50,6 +51,7 @@ use crate::{
     types::{
         Dict, LongInt, PyTrait, SessionRandom,
         file::{apply_buffer_store, apply_open_name, apply_write_position},
+        match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
         random::SEED_BYTES,
         str::allocate_string,
     },
@@ -1603,6 +1605,14 @@ impl<'h> VM<'h> {
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
                 }
+                Opcode::MatchShape => {
+                    let shape = self.current_frame.fetch_u8();
+                    try_catch!(self, self.exec_match_shape(shape));
+                }
+                Opcode::MatchClass => {
+                    let positional = self.current_frame.fetch_u16();
+                    try_catch!(self, self.exec_match_class(positional as usize));
+                }
                 // Control Flow - use self.current_frame.ip directly for jumps
                 Opcode::Jump => {
                     let offset = self.current_frame.fetch_i16();
@@ -2220,6 +2230,64 @@ impl<'h> VM<'h> {
     #[inline]
     pub(super) fn peek(&self) -> &Value {
         self.stack.last().expect("stack underflow")
+    }
+
+    /// Runs one [`Opcode::MatchShape`] operation.
+    ///
+    /// Every variant leaves the subject where it found it: a pattern keeps it
+    /// on the stack for the tests that follow, and drops it once.
+    ///
+    /// Outlined from the run loop for the reason `exec_get_yield_from_iter` is:
+    /// the loop's stack frame is paid on every native re-entry, and
+    /// `MAX_RUN_REENTRY_DEPTH` is calibrated against its size.
+    #[inline(never)]
+    fn exec_match_shape(&mut self, shape: u8) -> Result<(), RunError> {
+        let Some(shape) = MatchShape::from_repr(shape) else {
+            return Err(RunError::internal("MatchShape: invalid operand"));
+        };
+        match shape {
+            MatchShape::IsSequence | MatchShape::IsMapping | MatchShape::Len => {
+                let this = self;
+                let subject = this.peek().clone_with_heap(this.heap);
+                defer_drop!(subject, this);
+                let answer = match shape {
+                    MatchShape::IsSequence => Value::Bool(is_match_sequence(subject, this)),
+                    MatchShape::IsMapping => Value::Bool(is_match_mapping(subject, this)),
+                    // Only reached behind a shape test, so the subject has a length.
+                    _ => match_len(subject, this)?,
+                };
+                this.push(answer);
+            }
+            MatchShape::Keys | MatchShape::Rest => {
+                let this = self;
+                let keys = this.pop();
+                let subject = this.peek().clone_with_heap(this.heap);
+                defer_drop!(subject, this);
+                let answer = if shape == MatchShape::Keys {
+                    match_keys(subject, keys, this)?
+                } else {
+                    match_rest(subject, keys, this)?
+                };
+                this.push(answer);
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs [`Opcode::MatchClass`]: pops the keyword names, the class and the
+    /// subject copy, and pushes the attribute tuple or `None`.
+    ///
+    /// Outlined for the same reason as [`Self::exec_match_shape`].
+    #[inline(never)]
+    fn exec_match_class(&mut self, positional: usize) -> Result<(), RunError> {
+        let this = self;
+        let keywords = this.pop();
+        let cls = this.pop();
+        let subject = this.pop();
+        defer_drop!(subject, this);
+        let answer = match_class(subject, cls, keywords, positional, this)?;
+        this.push(answer);
+        Ok(())
     }
 
     /// Pops n values from the stack in reverse order (first popped is last in vec).
