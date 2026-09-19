@@ -98,6 +98,29 @@ class Generic[T]:
 assert Generic().get(5) == 5
 assert Generic.label == 'generic'
 
+
+# === PEP 696 defaults on a type parameter parse and are discarded ===
+def defaulted[T = int](value: T) -> T:
+    return value
+
+
+assert defaulted('y') == 'y'
+
+
+class Boxed[T = object]:
+    kind = 'boxed'
+
+    def hold(self, value: T) -> T:
+        return value
+
+
+assert Boxed().hold(7) == 7
+assert Boxed.kind == 'boxed'
+
+type Defaulted[T = str] = [6]
+assert Defaulted.__name__ == 'Defaulted'
+assert Defaulted.__value__ == [6]
+
 type Parametrised[T] = [5]
 assert Parametrised.__name__ == 'Parametrised'
 assert Parametrised.__value__ == [5]

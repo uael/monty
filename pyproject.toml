@@ -70,8 +70,8 @@ exclude-newer = "7 days"
 [tool.ruff.per-file-target-version]
 # PEP 750 t-strings.
 "crates/monty/test_cases/tstring__all.py" = "py314"
-# PEP 695 `type X = ...` and type parameter lists.
-"crates/monty/test_cases/typealias__pep695.py" = "py312"
+# PEP 695 `type X = ...` and type parameter lists, with PEP 696 defaults.
+"crates/monty/test_cases/typealias__pep695.py" = "py313"
 
 [tool.ruff.lint]
 extend-select = [
