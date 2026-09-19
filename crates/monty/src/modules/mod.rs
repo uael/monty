@@ -30,6 +30,7 @@ pub(crate) mod os;
 pub(crate) mod pathlib;
 pub(crate) mod random;
 pub(crate) mod re;
+pub(crate) mod string_templatelib;
 pub(crate) mod sys;
 pub(crate) mod time;
 pub(crate) mod typing;
@@ -78,6 +79,9 @@ pub(crate) enum StandardLib {
     Random,
     /// The `copy` module providing `copy()` and `deepcopy()`.
     Copy,
+    /// The `string.templatelib` module exposing the PEP 750 `Template` and
+    /// `Interpolation` type objects (no functions).
+    StringTemplatelib,
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
@@ -110,6 +114,7 @@ impl StandardLib {
             StaticStrings::Binascii => Some(Self::Binascii),
             StaticStrings::Random => Some(Self::Random),
             StaticStrings::Copy => Some(Self::Copy),
+            StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::Time => Some(Self::Time),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
@@ -139,6 +144,7 @@ impl StandardLib {
             Self::Binascii => binascii::create_module(vm),
             Self::Random => random::create_module(vm),
             Self::Copy => copy::create_module(vm),
+            Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::Time => time::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),

@@ -38,6 +38,7 @@ use crate::{
     parse::{CodeRange, ExceptHandler, Try, syntax_error_in_snippet},
     run::CompileOptions,
     source_map::{SourceMap, StackFrameExt},
+    tstring::ParsedTemplate,
     types::Type,
     value::{EitherStr, Value},
 };
@@ -127,6 +128,19 @@ fn check_comp_generators(count: usize, position: CodeRange) -> Result<(), Compil
         ))
     } else {
         Ok(())
+    }
+}
+
+/// The single-character `str` CPython stores in `Interpolation.conversion`,
+/// or `None` when the field carries no `!` conversion.
+///
+/// A t-string never applies the conversion; it reports which one was written.
+fn conversion_char(conversion: ConversionFlag) -> Option<u8> {
+    match conversion {
+        ConversionFlag::None => None,
+        ConversionFlag::Str => Some(b's'),
+        ConversionFlag::Repr => Some(b'r'),
+        ConversionFlag::Ascii => Some(b'a'),
     }
 }
 
@@ -1413,6 +1427,20 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// Compiles an import, resolving the module only when execution reaches it.
     fn compile_import(&mut self, module_name: StringId, binding: &Identifier) -> Result<(), CompileError> {
         let position = binding.position;
+        // A dotted module with no `as` alias would bind a name containing a dot,
+        // which no expression can ever read, where CPython binds the top-level
+        // package. Monty has no package objects, so reject it and point at the
+        // forms that do work. See `limitations/modules.md`.
+        if binding.name_id == module_name && self.interns.get_str(module_name).contains('.') {
+            let dotted = self.interns.get_str(module_name).to_owned();
+            return Err(CompileError::not_implemented(
+                format!(
+                    "importing a submodule without an alias; use `import {dotted} as <name>` \
+                     or `from {dotted} import <name>`"
+                ),
+                position,
+            ));
+        }
         self.code.set_location(position, None);
         self.code
             .emit_u16(Opcode::LoadModule, check_name_index_u16(module_name, position)?)?;
@@ -1676,6 +1704,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let part_count = self.compile_fstring_parts(parts)?;
                 self.code.emit_u16(Opcode::BuildFString, part_count)?;
             }
+            Expr::TString(template) => self.compile_tstring(template, expr_loc.position)?,
 
             Expr::ListComp {
                 elt,
@@ -3813,6 +3842,47 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.code.emit_u8(Opcode::Assert, assert_flags(None))?;
             }
         }
+        Ok(())
+    }
+
+    /// Compiles a t-string into a `Template`.
+    ///
+    /// Nothing is joined: the literal segments become one tuple, and each
+    /// replacement field becomes an `Interpolation` holding its value and the
+    /// three pieces of metadata a consumer inspects. Only the *format spec* is
+    /// rendered here, because CPython stores its text after substituting any
+    /// nested field (`t"{x:>{w}}"` records `">5"`).
+    fn compile_tstring(&mut self, template: &ParsedTemplate, position: CodeRange) -> Result<(), CompileError> {
+        let strings_len = u16::try_from(template.strings.len())
+            .map_err(|_| CompileError::new("t-string has too many literal segments", position))?;
+        for string_id in &template.strings {
+            let const_idx = self.code.add_const(Value::InternString(*string_id))?;
+            self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, strings_len)?;
+
+        let interpolations_len = u16::try_from(template.interpolations.len())
+            .map_err(|_| CompileError::new("t-string has too many interpolations", position))?;
+        for interpolation in &template.interpolations {
+            self.compile_expr(&interpolation.expr)?;
+            let expression_idx = self.code.add_const(Value::InternString(interpolation.expression))?;
+            self.code.emit_u16(Opcode::LoadConst, expression_idx)?;
+            match conversion_char(interpolation.conversion) {
+                Some(flag) => {
+                    let const_idx = self.code.add_const(Value::InternString(StringId::from_ascii(flag)))?;
+                    self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+                }
+                None => self.code.emit(Opcode::LoadNone)?,
+            }
+            let spec_parts = self.compile_fstring_parts(&interpolation.format_spec)?;
+            self.code.emit_u16(Opcode::BuildFString, spec_parts)?;
+            self.code.set_location(interpolation.expr.position, None);
+            self.code.emit(Opcode::BuildInterpolation)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, interpolations_len)?;
+
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::BuildTemplate)?;
         Ok(())
     }
 

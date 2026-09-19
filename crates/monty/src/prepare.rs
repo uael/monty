@@ -15,6 +15,7 @@ use crate::{
     name_map::{NameMap, namespace_overflow},
     namespace::NamespaceId,
     parse::{CodeRange, ExceptHandler, ParseError, ParseNode, ParsedSignature, RawFunctionDef, Try},
+    tstring::{ParsedTemplate, TemplateInterpolation},
 };
 
 /// Mutable handle to the module's global [`NameMap`], threaded through
@@ -1202,6 +1203,30 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     .map(|part| self.prepare_fstring_part(part))
                     .collect::<Result<Vec<_>, ParseError>>()?;
                 Expr::FString(prepared_parts)
+            }
+            Expr::TString(template) => {
+                let ParsedTemplate {
+                    strings,
+                    interpolations,
+                } = *template;
+                let interpolations = interpolations
+                    .into_iter()
+                    .map(|interpolation| {
+                        Ok(TemplateInterpolation {
+                            expr: Box::new(self.prepare_expression(*interpolation.expr)?),
+                            format_spec: interpolation
+                                .format_spec
+                                .into_iter()
+                                .map(|part| self.prepare_fstring_part(part))
+                                .collect::<Result<Vec<_>, ParseError>>()?,
+                            ..interpolation
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                Expr::TString(Box::new(ParsedTemplate {
+                    strings,
+                    interpolations,
+                }))
             }
             Expr::IfElse { test, body, orelse } => Expr::IfElse {
                 test: Box::new(self.prepare_expression(*test)?),
@@ -2872,6 +2897,16 @@ fn collect_assigned_names_from_expr(
                 }
             }
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_assigned_names_from_expr(&interpolation.expr, assigned_names, interner);
+                for part in &interpolation.format_spec {
+                    if let FStringPart::Interpolation { expr, .. } = part {
+                        collect_assigned_names_from_expr(expr, assigned_names, interner);
+                    }
+                }
+            }
+        }
         Expr::Slice { lower, upper, step } => {
             if let Some(e) = lower {
                 collect_assigned_names_from_expr(e, assigned_names, interner);
@@ -3396,6 +3431,16 @@ fn collect_cell_vars_from_expr(
                 }
             }
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_cell_vars_from_expr(&interpolation.expr, our_locals, cell_vars, interner);
+                for part in &interpolation.format_spec {
+                    if let FStringPart::Interpolation { expr, .. } = part {
+                        collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
+                    }
+                }
+            }
+        }
         Expr::Named { value, .. } => {
             // Only scan the value expression for cell vars
             collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
@@ -3756,6 +3801,12 @@ fn collect_referenced_names_from_expr(
         }
         Expr::FString(parts) => {
             collect_referenced_names_from_fstring_parts(parts, referenced, interner);
+        }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_referenced_names_from_expr(&interpolation.expr, referenced, interner);
+                collect_referenced_names_from_fstring_parts(&interpolation.format_spec, referenced, interner);
+            }
         }
         Expr::Subscript { object, index } => {
             collect_referenced_names_from_expr(object, referenced, interner);

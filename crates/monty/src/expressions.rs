@@ -8,6 +8,7 @@ use crate::{
     intern::{BytesId, LongIntId, StringId},
     namespace::NamespaceId,
     parse::{CodeRange, ParsedSignature, Try},
+    tstring::ParsedTemplate,
     value::{EitherStr, Marker, Value},
 };
 
@@ -291,6 +292,12 @@ pub enum Expr {
     ///
     /// The results are concatenated to produce the final string.
     FString(Vec<FStringPart>),
+    /// PEP 750 template string (`t"a{x!r:>5}b"`).
+    ///
+    /// Unlike an f-string nothing is joined: the literal segments and the
+    /// replacement fields stay separate, because a `Template` hands both to its
+    /// consumer rather than rendering them.
+    TString(Box<ParsedTemplate>),
     /// Conditional expression (ternary operator): `body if test else orelse`
     ///
     /// Only one of body/orelse is evaluated based on the truthiness of test.

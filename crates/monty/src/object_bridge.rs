@@ -621,6 +621,8 @@ impl MontyTypeExt for MontyType {
     fn to_internal(&self) -> Type {
         match self {
             Self::TypeAliasType => Type::TypeAliasType,
+            Self::Template => Type::Template,
+            Self::Interpolation => Type::Interpolation,
             Self::Ellipsis => Type::Ellipsis,
             Self::NotImplementedType => Type::NotImplementedType,
             Self::Type => Type::Type,
@@ -714,6 +716,8 @@ impl MontyTypeExt for MontyType {
     fn from_internal_static(ty: Type) -> Option<Self> {
         Some(match ty {
             Type::TypeAliasType => Self::TypeAliasType,
+            Type::Template => Self::Template,
+            Type::Interpolation => Self::Interpolation,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,

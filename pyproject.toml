@@ -68,6 +68,8 @@ exclude-newer = "7 days"
 # directory: raising the target for every fixture also changes how ruff
 # *formats* unrelated ones (3.14 allows unparenthesized `except` groups).
 [tool.ruff.per-file-target-version]
+# PEP 750 t-strings.
+"crates/monty/test_cases/tstring__all.py" = "py314"
 # PEP 695 `type X = ...` and type parameter lists.
 "crates/monty/test_cases/typealias__pep695.py" = "py312"
 

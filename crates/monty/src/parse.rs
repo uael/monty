@@ -24,6 +24,7 @@ use crate::{
     intern::{CompileInterns, StringId},
     source_map::{SourceMap, StackFrameExt},
     stringize::stringize_annotation,
+    tstring::{ParsedTemplate, TemplateInterpolation},
     types::{long_int::INT_MAX_STR_DIGITS, str::StringRepr},
     value::EitherStr,
 };
@@ -1675,10 +1676,7 @@ impl<'a, 'i> Parser<'a, 'i> {
                 }
             }
             AstExpr::FString(ast::ExprFString { value, range, .. }) => self.parse_fstring(&value, range),
-            AstExpr::TString(t) => Err(ParseError::not_implemented(
-                "template strings (t-strings)",
-                self.convert_range(t.range),
-            )),
+            AstExpr::TString(ast::ExprTString { value, range, .. }) => self.parse_tstring(&value, range),
             AstExpr::StringLiteral(ast::ExprStringLiteral { value, range, .. }) => {
                 let string_id = self.interner.intern(&value.to_string());
                 Ok(ExprLoc::new(
@@ -2324,6 +2322,112 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
 
         Ok(ExprLoc::new(self.convert_range(range), Expr::FString(parts)))
+    }
+
+    /// Parses a t-string (PEP 750) into an [`Expr::TString`].
+    ///
+    /// Unlike an f-string nothing is joined: the literal segments and the
+    /// replacement fields stay separate, because a `Template` hands both to its
+    /// consumer. The two vectors are normalized here so `strings` is always one
+    /// longer than `interpolations`, empty segments included, which is the shape
+    /// CPython guarantees.
+    fn parse_tstring(&mut self, value: &ast::TStringValue, range: TextRange) -> Result<ExprLoc, ParseError> {
+        // Field-relative borrow of the source, so interning (which needs
+        // `&mut self.interner`) can happen while a source slice is live.
+        let code = self.code;
+        let mut segments: Vec<String> = vec![String::new()];
+        let mut interpolations = Vec::new();
+
+        for element in value.elements() {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    segments
+                        .last_mut()
+                        .expect("one segment exists before any field")
+                        .push_str(&lit.value);
+                }
+                InterpolatedStringElement::Interpolation(interp) => {
+                    // `t"{x=}"` puts `x=` in the *literal* text, not in the
+                    // interpolation, and makes `repr` the default conversion
+                    // unless the field carries a conversion or a format spec.
+                    let mut conversion = convert_conversion_flag(interp.conversion);
+                    if let Some(debug_text) = &interp.debug_text {
+                        let segment = segments.last_mut().expect("one segment exists before any field");
+                        segment.push_str(debug_text.leading());
+                        segment.push_str(&code[interp.expression.range()]);
+                        segment.push_str(debug_text.trailing());
+                        if matches!(conversion, ConversionFlag::None) && interp.format_spec.is_none() {
+                            conversion = ConversionFlag::Repr;
+                        }
+                    }
+                    // CPython reports the source from just past the `{` to the
+                    // end of the expression, so leading whitespace survives
+                    // (`t"{ x }".interpolations[0].expression == " x"`) while
+                    // trailing whitespace does not.
+                    let open_brace: usize = interp.range().start().into();
+                    let expr_start = if code.as_bytes().get(open_brace) == Some(&b'{') {
+                        open_brace + 1
+                    } else {
+                        open_brace
+                    };
+                    let expr_end: usize = interp.expression.range().end().into();
+                    let expression = self.interner.intern(&code[expr_start..expr_end]);
+                    let format_spec = match &interp.format_spec {
+                        Some(spec) => self.parse_tstring_format_spec(spec)?,
+                        None => Vec::new(),
+                    };
+                    let expr = Box::new(self.parse_expression((*interp.expression).clone())?);
+                    interpolations.push(TemplateInterpolation {
+                        expr,
+                        expression,
+                        conversion,
+                        format_spec,
+                    });
+                    segments.push(String::new());
+                }
+            }
+        }
+
+        let strings = segments.iter().map(|s| self.interner.intern(s)).collect();
+        Ok(ExprLoc::new(
+            self.convert_range(range),
+            Expr::TString(Box::new(ParsedTemplate {
+                strings,
+                interpolations,
+            })),
+        ))
+    }
+
+    /// Parses a t-string field's format spec into parts concatenated at runtime.
+    ///
+    /// A t-string never *applies* a spec, it reports the rendered text, so the
+    /// spec is neither parsed nor bit-packed the way
+    /// [`parse_format_spec`](Self::parse_format_spec) does for an f-string: a
+    /// static spec stays verbatim and a nested field (`t"{x:>{w}}"`) is
+    /// formatted with `str()` and concatenated, matching CPython.
+    fn parse_tstring_format_spec(
+        &mut self,
+        spec: &ast::InterpolatedStringFormatSpec,
+    ) -> Result<Vec<FStringPart>, ParseError> {
+        let mut parts = Vec::with_capacity(spec.elements.len());
+        for element in &spec.elements {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    parts.push(FStringPart::Literal(self.interner.intern(&lit.value)));
+                }
+                InterpolatedStringElement::Interpolation(nested) => {
+                    parts.push(FStringPart::Interpolation {
+                        expr: Box::new(self.parse_expression((*nested.expression).clone())?),
+                        conversion: convert_conversion_flag(nested.conversion),
+                        // Python forbids a spec inside a spec, and `=` there is
+                        // not a debug field.
+                        format_spec: None,
+                        debug_prefix: None,
+                    });
+                }
+            }
+        }
+        Ok(parts)
     }
 
     /// Parses a single f-string element (literal or interpolation).

@@ -732,6 +732,8 @@ pub enum StaticStrings {
     Compile,
     /// `itertools.compress()` function.
     Compress,
+    /// `Interpolation.conversion` attribute.
+    Conversion,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
     /// `sys.copyright` attribute.
@@ -950,6 +952,8 @@ pub enum StaticStrings {
     Expm1,
     /// `random.expovariate()` function.
     Expovariate,
+    /// `Interpolation.expression` attribute.
+    Expression,
     /// `extend()` method, shared by `list` and `deque`.
     Extend,
     /// `deque.extendleft()` method.
@@ -1006,6 +1010,8 @@ pub enum StaticStrings {
     FollowSymlinks,
     /// Kwarg name `format` — `date.strftime(format=...)`, `datetime.strftime(format=...)`.
     Format,
+    /// `Interpolation.format_spec` attribute.
+    FormatSpec,
     /// `math.frexp()` function.
     Frexp,
     /// `chain.from_iterable` — the one attribute an `itertools` type carries.
@@ -1130,6 +1136,11 @@ pub enum StaticStrings {
     IntMaxStrDigits,
     /// `sys.flags.interactive` field.
     Interactive,
+    /// The `string.templatelib.Interpolation` type.
+    #[strum(serialize = "Interpolation")]
+    InterpolationClass,
+    /// `Template.interpolations` attribute.
+    Interpolations,
     /// `set.intersection()` method.
     Intersection,
     /// `Path.is_absolute()` method, answered without host I/O.
@@ -1750,6 +1761,12 @@ pub enum StaticStrings {
     /// `match.string`
     #[strum(serialize = "string")]
     StringAttr,
+    /// Module name for `from string.templatelib import ...`. The whole dotted
+    /// path is interned as one string, which is what the import lookup matches.
+    #[strum(serialize = "string.templatelib")]
+    StringTemplatelib,
+    /// `Template.strings` attribute.
+    Strings,
     /// `strip()` method, shared by `str` and `bytes`.
     Strip,
     /// `datetime.strptime()` classmethod.
@@ -1799,6 +1816,9 @@ pub enum StaticStrings {
     TeeType,
     /// `file.tell()` method.
     Tell,
+    /// The `string.templatelib.Template` type.
+    #[strum(serialize = "Template")]
+    TemplateClass,
     /// `datetime.time` class name.
     Time,
     /// The `datetime.timedelta` type.
@@ -1909,6 +1929,9 @@ pub enum StaticStrings {
     /// `validate` parameter of `base64.b64decode()`.
     #[strum(serialize = "validate")]
     Validate,
+    /// `Interpolation.value` attribute, distinct from [`Self::Values`].
+    #[strum(serialize = "value")]
+    ValueAttr,
     /// `dict.values()` method.
     Values,
     /// `sys.flags.verbose` field.

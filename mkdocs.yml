@@ -71,6 +71,7 @@ nav:
       - pathlib: 'limitations/pathlib.md'
       - random: 'limitations/random.md'
       - re: 'limitations/re.md'
+      - string.templatelib: 'limitations/string_templatelib.md'
       - sys: 'limitations/sys.md'
       - time: 'limitations/time.md'
       - unicodedata: 'limitations/unicodedata.md'

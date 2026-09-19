@@ -49,7 +49,7 @@ use crate::{
     parse::CodeRange,
     run::{Program, SessionTables, VmEnv},
     types::{
-        Dict, LongInt, PyTrait, SessionRandom, allocate_type_alias,
+        Dict, LongInt, PyTrait, SessionRandom, allocate_interpolation, allocate_template, allocate_type_alias,
         file::{apply_buffer_store, apply_open_name, apply_write_position},
         match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
         random::SEED_BYTES,
@@ -1619,6 +1619,22 @@ impl<'h> VM<'h> {
                     let name_idx = self.current_frame.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.delete_attr(name_id));
+                }
+                Opcode::BuildInterpolation => {
+                    // Stack order: value, expression, conversion, format_spec (TOS)
+                    let format_spec = self.pop();
+                    let conversion = self.pop();
+                    let expression = self.pop();
+                    let value = self.pop();
+                    let interpolation = allocate_interpolation(value, expression, conversion, format_spec, self);
+                    self.push(interpolation);
+                }
+                Opcode::BuildTemplate => {
+                    // Stack order: strings tuple, interpolations tuple (TOS)
+                    let interpolations = self.pop();
+                    let strings = self.pop();
+                    let template = allocate_template(strings, interpolations, self);
+                    self.push(template);
                 }
                 Opcode::MakeTypeAlias => {
                     let name_idx = self.current_frame.fetch_u16();

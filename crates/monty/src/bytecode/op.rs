@@ -579,6 +579,14 @@ pub enum Opcode {
     DeleteSubscr = 128,
     /// `del a.b`: pop obj, remove the attribute. Operand: u16 name_id.
     DeleteAttr = 129,
+
+    // === PEP 750 template construction ===
+    /// Pop format_spec, conversion, expression and value (in that order from
+    /// TOS) and push one `string.templatelib.Interpolation`.
+    BuildInterpolation = 130,
+    /// Pop the interpolations tuple then the strings tuple, push a
+    /// `string.templatelib.Template`.
+    BuildTemplate = 131,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -708,6 +716,8 @@ impl Opcode {
             | Self::WithExit
             | Self::WithExceptStart
             | Self::DeleteSubscr
+            | Self::BuildInterpolation
+            | Self::BuildTemplate
             | Self::BuildCell => OperandShape::None,
             Self::LoadLocal
             | Self::StoreLocal
@@ -971,6 +981,10 @@ impl Opcode {
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
             (DeleteSubscr, Operand::None) => -2,
+            // Four field values in, one `Interpolation` out.
+            (BuildInterpolation, Operand::None) => -3,
+            // Two tuples in, one `Template` out.
+            (BuildTemplate, Operand::None) => -1,
             (GetIter | Await, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,

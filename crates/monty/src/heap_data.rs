@@ -150,6 +150,12 @@ macro_rules! heap_payloads {
             Random(boxed $crate::types::Random),
             /// PEP 695 `typing.TypeAliasType`: the value of `type X = ...`.
             TypeAliasType(inline $crate::types::TypeAliasType),
+            /// PEP 750 `string.templatelib.Template`: a `t"..."` literal's value.
+            Template(inline $crate::types::Template),
+            /// PEP 750 `string.templatelib.Interpolation`: one `{...}` field of a
+            /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
+            /// payload ceiling for a type nothing hot allocates.
+            Interpolation(boxed $crate::types::Interpolation),
         }
     };
 }
@@ -228,8 +234,11 @@ impl HeapData {
             | Self::Partial(_)
             | Self::GenericAlias(_)
             | Self::Union(_)
-            // An alias's memoized `__value__` can reach back to the alias itself.
-            | Self::TypeAliasType(_) => true,
+            // An alias's memoized `__value__` can reach back to the alias itself,
+            // and a template holds arbitrary interpolated values.
+            | Self::TypeAliasType(_)
+            | Self::Template(_)
+            | Self::Interpolation(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -295,6 +304,8 @@ impl HeapData {
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
             Self::TypeAliasType(_) => Type::TypeAliasType,
+            Self::Template(_) => Type::Template,
+            Self::Interpolation(_) => Type::Interpolation,
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::Union(_) => Type::Union,
             Self::DictKeysView(_) => Type::DictKeys,
@@ -659,6 +670,8 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::FunctionDefaults($value) => $body,
             Self::ExtFunction($value) => $body,
             Self::TypeAliasType($value) => $body,
+            Self::Template($value) => $body,
+            Self::Interpolation($value) => $body,
             Self::Cell(_)
             | Self::Exception(_)
             | Self::Module(_)
@@ -1107,6 +1120,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
         match self {
             Self::TypeAliasType(value) => value.py_iter(vm),
+            Self::Template(value) => value.py_iter(vm),
+            Self::Interpolation(value) => value.py_iter(vm),
             Self::Str(value) => value.py_iter(vm),
             Self::Bytes(value) => value.py_iter(vm),
             Self::List(value) => value.py_iter(vm),

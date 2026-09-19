@@ -71,7 +71,11 @@ Divergences:
 
 - **Complex number literals** (`1j`, `2+3j`) —
     `NotImplementedError: The monty syntax parser does not yet support complex constants`.
-- **Template strings (t-strings)** — PEP 750.
+
+## Template strings (PEP 750)
+
+`t'...'` builds a `string.templatelib.Template`. See
+[string_templatelib.md](string_templatelib.md).
 
 ## Starred unpacking
 
