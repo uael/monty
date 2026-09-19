@@ -282,15 +282,6 @@ pub struct Compiler<'a, 'i> {
     /// Number of `finally` body copies emitted into this code object.
     finally_copies: u16,
 
-    /// Where this body first returns a value, if it does.
-    ///
-    /// Kept because whether that is allowed is only known once the whole body
-    /// is compiled: a `return value` is ordinary until a later `yield` makes
-    /// the body a generator, and a generator's return value belongs on the
-    /// `StopIteration` it raises, which needs an exception carrying a Python
-    /// value rather than a message.
-    value_return: Option<CodeRange>,
-
     /// Whether the compiler is currently compiling module-level code.
     ///
     /// At module level, `Local` scope maps to global opcodes
@@ -556,7 +547,6 @@ impl<'a, 'i> Compiler<'a, 'i> {
             interns,
             fblocks: Vec::new(),
             finally_copies: 0,
-            value_return: None,
             is_module_scope,
             frame_locals,
             comp_slots: Vec::new(),
@@ -663,20 +653,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         compiler.code.emit(Opcode::LoadNone)?;
         compiler.code.emit(Opcode::ReturnValue)?;
 
-        let code = compiler.code.build();
-        // A generator's return value belongs on the `StopIteration` its
-        // exhaustion raises, and an exception here carries a message rather
-        // than a Python object. Refused while that is true, so nobody reads a
-        // `StopIteration.value` that was never carried.
-        if code.is_generator()
-            && let Some(position) = compiler.value_return
-        {
-            return Err(CompileError::new(
-                "returning a value from a generator is not supported",
-                position,
-            ));
-        }
-        Ok(code)
+        Ok(compiler.code.build())
     }
 
     /// Compiles statements, retaining `finally` bodies for inline cleanup.
@@ -1776,6 +1753,36 @@ impl<'a, 'i> Compiler<'a, 'i> {
             Expr::LambdaRaw { .. } => {
                 // LambdaRaw should be converted to Lambda during prepare phase
                 unreachable!("Expr::LambdaRaw should not exist after prepare phase")
+            }
+
+            Expr::YieldFrom(value) => {
+                if let Some(refusal) = self.flags.yield_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
+                }
+                // The delegation loop, which is one `Send` step per turn:
+                //
+                //   <value>; GetIter     receiver
+                //   LoadNone             receiver, None: the first send
+                // start:
+                //   Send -> done         receiver, yielded  (or jumps to done)
+                //   Yield                receiver, sent-in
+                //   Jump start
+                // done:                  what the receiver returned
+                //
+                // The receiver stays beneath the value being passed either way,
+                // so `Yield` hands out what the inner one yielded and leaves
+                // what was sent in exactly where the next `Send` wants it.
+                self.compile_expr(value)?;
+                self.code.set_location(expr_loc.position, None);
+                // A generator is its own iterator, so this passes one straight
+                // through and calls `iter()` on anything else.
+                self.code.emit(Opcode::GetIter)?;
+                self.code.emit(Opcode::LoadNone)?;
+                let start = self.code.current_jump_target();
+                let done = self.code.emit_jump(Opcode::Send)?;
+                self.code.emit(Opcode::Yield)?;
+                self.code.emit_jump_to(Opcode::Jump, start)?;
+                self.code.patch_jump(done)?;
             }
 
             Expr::Yield(value) => {
@@ -4046,9 +4053,6 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// exception state preserved as needed.
     fn compile_return(&mut self, expr: Option<&ExprLoc>) -> Result<(), CompileError> {
         if let Some(expr) = expr {
-            if self.value_return.is_none() && !matches!(expr.expr, Expr::Literal(Literal::None)) {
-                self.value_return = Some(expr.position);
-            }
             self.compile_expr(expr)?;
         } else {
             self.code.emit(Opcode::LoadNone)?;

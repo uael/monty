@@ -426,6 +426,16 @@ pub enum Opcode {
     /// is, so `x = yield v` reads it.
     Yield = 107,
 
+    /// One step of a `yield from` delegation. Operand: the offset past the
+    /// loop, taken when the receiver is done.
+    ///
+    /// TOS is the value to send and TOS1 the receiver. When the receiver
+    /// yields, TOS becomes what it yielded and the receiver stays beneath, so
+    /// the [`Yield`](Self::Yield) that follows hands it straight out. When the
+    /// receiver is done, both are popped, what it returned is pushed in their
+    /// place, and the jump leaves the loop.
+    Send = 132,
+
     // === Unpacking ===
     /// Unpack TOS into n values. Operand: u8 count.
     UnpackSequence = 103,
@@ -777,7 +787,8 @@ impl Opcode {
             | Self::JumpIfFalse
             | Self::JumpIfTrueOrPop
             | Self::JumpIfFalseOrPop
-            | Self::ForIter => OperandShape::Offset,
+            | Self::ForIter
+            | Self::Send => OperandShape::Offset,
             Self::CallBuiltinFunction | Self::CallBuiltinType | Self::UnpackEx => OperandShape::U8U8,
             Self::CallAttr | Self::CallAttrExtended | Self::MakeFunction => OperandShape::U16U8,
             Self::LoadGlobalCallable => OperandShape::U16U16,
@@ -1070,6 +1081,11 @@ impl Opcode {
             (JumpIfTrue | JumpIfFalse | JumpIfTrueOrPop | JumpIfFalseOrPop, Operand::Offset(_)) => -1,
             // `ForIter` adds the the value yielded by the iterator to the stack.
             (ForIter, Operand::Offset(_)) => 1,
+            // The fall-through effect: the sent value is replaced by what the
+            // receiver yielded, with the receiver still beneath it. Taking the
+            // jump instead leaves one value where both were, which the jump
+            // target's own depth records, exactly as `ForIter`'s does.
+            (Send, Operand::Offset(_)) => 0,
 
             // Catch-all: opcode emitted with the wrong operand variant, or a
             // new opcode added without an arm above. Every opcode has exactly
@@ -1098,6 +1114,8 @@ impl Opcode {
             Self::JumpIfTrueOrPop | Self::JumpIfFalseOrPop => 0,
             // Pop iterator on jump-taken (no value pushed).
             Self::ForIter => -1,
+            // Receiver and sent value both go, replaced by the result.
+            Self::Send => -1,
             _ => panic!("Opcode::jump_taken_delta: {self:?} is not a jump opcode"),
         }
     }

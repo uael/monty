@@ -514,6 +514,8 @@ impl<'h> VM<'h> {
                 call_offset: f.call_offset,
                 is_initializer: f.is_initializer,
                 generator: f.generator,
+                delegated_return: f.delegated_return,
+                delegating: f.delegating,
                 namespace: f.namespace,
             })
             .collect();
@@ -528,6 +530,8 @@ impl<'h> VM<'h> {
             call_offset: current.call_offset,
             is_initializer: current.is_initializer,
             generator: current.generator,
+            delegated_return: current.delegated_return,
+            delegating: current.delegating,
             namespace: mem::take(&mut current.namespace),
         });
 
@@ -601,6 +605,8 @@ impl<'h> VM<'h> {
                         namespace: sf.namespace,
                         is_initializer: sf.is_initializer,
                         generator: sf.generator,
+                        delegated_return: sf.delegated_return,
+                        delegating: sf.delegating,
                     }
                 })
                 .collect();

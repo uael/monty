@@ -37,6 +37,24 @@ pub(crate) enum GeneratorState {
     Done,
 }
 
+/// Where a generator suspended inside a `yield from` stands.
+///
+/// The delegation loop leaves the receiver under the value it hands out, so a
+/// generator that carries one of these has its receiver on top of its saved
+/// stack. `close()` and `throw()` read it to reach that receiver, which is what
+/// makes an exception, and an exit, travel to the innermost body as they do in
+/// CPython.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Delegation {
+    /// The `Yield` the loop suspended on. A frame put back here hands the
+    /// receiver's next value onwards, rather than sending to it again.
+    pub yield_ip: usize,
+
+    /// Where the frame goes once the receiver is finished, which is what the
+    /// receiver's return value is left at.
+    pub done_ip: usize,
+}
+
 /// A generator object: everything needed to put its frame back on the stack.
 ///
 /// The saved state is exactly what a frame is, and no more. `ip` is relative to
@@ -71,6 +89,11 @@ pub(crate) struct Generator {
     /// Owned reference to the `exec()` / `eval()` globals dict the function was
     /// defined under; `None` when its globals are module slots.
     pub globals: Option<HeapId>,
+
+    /// The `yield from` this is suspended inside, if it is inside one; see
+    /// [`Delegation`]. Set at every suspend, so it never speaks of a
+    /// delegation that is over.
+    pub delegating: Option<Delegation>,
 }
 
 impl Generator {
@@ -86,6 +109,7 @@ impl Generator {
             exception_stack: Vec::new(),
             state: GeneratorState::Created,
             globals,
+            delegating: None,
         }
     }
 }

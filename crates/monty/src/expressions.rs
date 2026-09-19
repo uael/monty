@@ -291,6 +291,12 @@ pub enum Expr {
     /// next `send()` passes in, or `None` for a plain `next()`. `yield` with
     /// no value yields `None`.
     Yield(Option<Box<ExprLoc>>),
+    /// `yield from iterable`: hands the enclosing generator's turn to another
+    /// iterator until that one is done, then evaluates to what it returned.
+    ///
+    /// Every value the inner one yields passes straight out, and every value
+    /// sent in passes straight back, so the two generators read as one.
+    YieldFrom(Box<ExprLoc>),
     /// F-string expression containing literal and interpolated parts.
     ///
     /// At evaluation time, each part is processed in sequence:

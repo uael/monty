@@ -1590,10 +1590,11 @@ impl<'a, 'i> Parser<'a, 'i> {
                 let value = y.value.map(|v| self.parse_expression(*v)).transpose()?;
                 Ok(ExprLoc::new(range, Expr::Yield(value.map(Box::new))))
             }
-            AstExpr::YieldFrom(y) => Err(ParseError::not_implemented(
-                "yield from expressions",
-                self.convert_range(y.range),
-            )),
+            AstExpr::YieldFrom(y) => {
+                let range = self.convert_range(y.range);
+                let value = self.parse_expression(*y.value)?;
+                Ok(ExprLoc::new(range, Expr::YieldFrom(Box::new(value))))
+            }
             AstExpr::Compare(ast::ExprCompare {
                 left,
                 ops,

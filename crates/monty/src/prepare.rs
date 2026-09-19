@@ -1297,6 +1297,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 Some(value) => Some(Box::new(self.prepare_expression(*value)?)),
                 None => None,
             }),
+            Expr::YieldFrom(value) => Expr::YieldFrom(Box::new(self.prepare_expression(*value)?)),
         };
 
         Ok(ExprLoc { position, expr })
@@ -2868,6 +2869,9 @@ fn collect_assigned_names_from_expr(
                 collect_assigned_names_from_expr(value, assigned_names, interner);
             }
         }
+        Expr::YieldFrom(value) => {
+            collect_assigned_names_from_expr(value, assigned_names, interner);
+        }
         Expr::Subscript { object, index } => {
             collect_assigned_names_from_expr(object, assigned_names, interner);
             collect_assigned_names_from_expr(index, assigned_names, interner);
@@ -3482,6 +3486,9 @@ fn collect_cell_vars_from_expr(
                 collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
             }
         }
+        Expr::YieldFrom(value) => {
+            collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
+        }
         // Leaf expressions
         Expr::Literal(_) | Expr::Builtin(_) | Expr::Name(_) | Expr::Lambda { .. } | Expr::Slice { .. } => {}
     }
@@ -3938,6 +3945,9 @@ fn collect_referenced_names_from_expr(
             if let Some(value) = value {
                 collect_referenced_names_from_expr(value, referenced, interner);
             }
+        }
+        Expr::YieldFrom(value) => {
+            collect_referenced_names_from_expr(value, referenced, interner);
         }
     }
 }

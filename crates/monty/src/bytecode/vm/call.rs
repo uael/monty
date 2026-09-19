@@ -477,15 +477,16 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Runs a generator to its next `yield` from Rust, for the builtins that
-    /// walk an iterator themselves (`list()`, `sorted()`, a comprehension).
+    /// Runs a generator to its next `yield` from Rust, for everything that
+    /// walks an iterator itself: `list()`, `sorted()`, a comprehension, `for`
+    /// and the `next()` builtin.
     ///
     /// The frame is spliced in exactly as [`resume_generator`](VM::resume_generator)
     /// does; only the driving differs, this being a nested `run()` in the shape
     /// [`evaluate_function`](Self::evaluate_function) uses. That is also its
-    /// limit: a generator driven from inside a builtin cannot suspend to the
-    /// host, the same restriction every synchronous re-entry here carries.
-    /// `for` and an explicit `next()` do not go through this.
+    /// limit: a generator driven this way cannot suspend to the host, the same
+    /// restriction every synchronous re-entry here carries. Only `send()` and
+    /// `__next__()`, which resume the frame on the VM's own loop, can.
     ///
     /// `None` means the generator finished, which is the exhaustion an iterator
     /// protocol reports by returning nothing rather than by raising.
@@ -562,7 +563,7 @@ impl<'h> VM<'h> {
 
     /// Converts a direct call suspension into a specific synchronous-context error.
     #[cold]
-    fn unsupported_call_result(&mut self, ctx: &'static str, result: CallResult) -> RunError {
+    pub(super) fn unsupported_call_result(&mut self, ctx: &'static str, result: CallResult) -> RunError {
         let error = match &result {
             CallResult::External(function_name, _) => ExcType::not_implemented(format!(
                 "{ctx}: external function '{}' is not yet supported in this context",
