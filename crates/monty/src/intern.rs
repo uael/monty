@@ -923,6 +923,8 @@ pub enum StaticStrings {
     Dklen,
     /// `field(doc=...)`, CPython's per-field docstring.
     Doc,
+    /// Kwarg name `dont_inherit` — `compile(dont_inherit=...)`.
+    DontInherit,
     /// `sys.dont_write_bytecode` attribute.
     DontWriteBytecode,
     /// `re.DOTALL` flag
@@ -1100,7 +1102,7 @@ pub enum StaticStrings {
     Fieldnames,
     /// Kwarg name `file` — `open(file=...)`.
     File,
-    /// Kwarg name `filename` — `os.path.getsize(filename=...)`, `os.path.realpath(filename=...)`.
+    /// Kwarg name `filename` — `compile(filename=...)`, `os.path.getsize(filename=...)`, `os.path.realpath(filename=...)`.
     Filename,
     /// `zip_longest(fillvalue=...)` keyword.
     Fillvalue,
