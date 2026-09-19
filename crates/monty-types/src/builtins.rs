@@ -41,7 +41,7 @@ pub enum BuiltinsFunctions {
     // Breakpoint,
     // bytearray - handled by Type enum
     // bytes - handled by Type enum
-    // Callable,
+    // Callable - appended at the end, see below
     Chr,
     // Classmethod,
     // Compile,
@@ -56,7 +56,7 @@ pub enum BuiltinsFunctions {
     // Format - appended below
     // frozenset - handled by Type enum
     Getattr,
-    // Globals,
+    // Globals - appended at the end, see below
     Hasattr,
     Hash,
     // Help,
@@ -120,4 +120,8 @@ pub enum BuiltinsFunctions {
     Locals,
     /// `issubclass(cls, classinfo)`, appended after [`Self::Locals`].
     Issubclass,
+    /// `callable(object)`, appended after [`Self::Issubclass`].
+    Callable,
+    /// `globals()`, appended after [`Self::Callable`].
+    Globals,
 }

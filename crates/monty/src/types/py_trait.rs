@@ -487,10 +487,9 @@ pub(crate) trait PyTrait<'h>: PyObjectIdentity {
     /// over from there), and anything needing the host is the matching
     /// suspension.
     ///
-    /// Overriding this is what makes a type callable.
-    /// [`HeapData::is_callable`](crate::heap::HeapData::is_callable) is a
-    /// deliberate subset of the overrides, so a new one need not be added
-    /// there — but everything listed there must override this.
+    /// Overriding this is what makes a type callable, so a new override must
+    /// also join [`HeapData::is_callable`](crate::heap::HeapData::is_callable),
+    /// which is what `callable()` reports.
     ///
     /// A callable that dispatches onward holds its `HeapRead`, and so an active
     /// reader count, for the whole nested call. That is sound only because every

@@ -221,7 +221,25 @@ impl VM<'_> {
         Ok(Value::Ref(dict_id))
     }
 
-    /// A fresh dict of the bound module globals, for `locals()` at module scope.
+    /// The dict `globals()` returns in the current frame.
+    ///
+    /// A frame running under an `exec()` / `eval()` globals dict returns that
+    /// dict itself, so a write through it is seen by the code that shares it.
+    /// Module globals are slots, not a dict, so every other frame gets a fresh
+    /// snapshot of the bound ones.
+    pub(crate) fn globals_dict(&mut self) -> RunResult<Value> {
+        let dict_id = match self.frame_namespace().0 {
+            FrameGlobals::Slots => self.snapshot_globals()?,
+            FrameGlobals::Dict(dict) => {
+                self.heap.inc_ref(dict);
+                dict
+            }
+        };
+        Ok(Value::Ref(dict_id))
+    }
+
+    /// A fresh dict of the bound module globals, for `globals()` and for
+    /// `locals()` at module scope.
     fn snapshot_globals(&mut self) -> RunResult<HeapId> {
         let dict_id = self.heap.allocate(HeapData::Dict(Dict::new()));
         // Owned by the guard until every entry is in, so a failed insert frees it.

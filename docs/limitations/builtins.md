@@ -6,33 +6,31 @@ Python.
 
 ## Implemented builtin functions
 
-`abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `eval`, `exec`, `filter`,
-`format`, `getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `iter`, `len`,
-`locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`, `repr`,
-`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
-`eval`, `exec` and `locals` are described in [eval_exec.md](eval_exec.md).
+`abs`, `all`, `any`, `bin`, `callable`, `chr`, `divmod`, `enumerate`, `eval`, `exec`,
+`filter`, `format`, `getattr`, `globals`, `hasattr`, `hash`, `hex`, `id`, `isinstance`,
+`issubclass`, `iter`, `len`, `locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`,
+`pow`, `print`, `repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
+`eval`, `exec`, `globals` and `locals` are described in [eval_exec.md](eval_exec.md).
 
 ## Implemented type constructors (also builtins)
 
-`bool`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `range`,
-`set`, `slice`, `str`, `tuple`. Exception classes (`ValueError`,
-`TypeError`, etc.) are also names in the builtin namespace.
+`bool`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `object`,
+`property`, `range`, `set`, `slice`, `str`, `tuple`. Exception classes
+(`ValueError`, `TypeError`, etc.) are also names in the builtin namespace.
 
 ## Builtins that are NOT implemented
 
 These raise `NameError`:
 
 - **Code objects and imports**: `compile`, `__import__`.
-- **Namespace introspection**: `globals`, `vars`, `dir`.
+- **Namespace introspection**: `vars`, `dir`.
 - **Interactive**: `input`, `breakpoint`, `help`.
-- **Decorators / descriptors**: `classmethod`, `staticmethod`, `property`,
-    `super`. (`@property` on functions is not recognized; use a method.)
-- **Construction / coercion**: `bytearray`, `complex`, `memoryview`,
-    `object`, `ascii`.
-- **Other**: `callable`, `delattr`, `issubclass`, `aiter`, `anext`.
+- **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`.
+- **Construction / coercion**: `bytearray`, `complex`, `memoryview`, `ascii`.
+- **Other**: `delattr`, `aiter`, `anext`.
 
-`super()` is the biggest practical omission: with no class inheritance either
-(see [classes.md](classes.md)), there is no inheritance mechanism at all.
+`super()` is the biggest practical omission: a class can name one base (see
+[classes.md](classes.md)), but an override cannot call the method it replaces.
 
 ## Behavioural divergences
 
@@ -43,6 +41,9 @@ These raise `NameError`:
     `AttributeError`, so `[1].append`, `'a'.upper`, `{}.get`, `dict.fromkeys`
     and `list.__class_getitem__` cannot be assigned, passed as a callback or
     reached through `getattr`. Call them directly (`list.__class_getitem__(int)`).
+- **`callable()` reports what Monty can call** — an instance of a sandbox class
+    that defines `__call__` answers `False`, because `__call__` is not dispatched
+    (see [classes.md](classes.md)), and calling it raises `TypeError`.
 - **`hash(x)`** — Monty hashes `str`, `bytes`, `float` and every container with
     its own algorithm, so the values differ from CPython's. Only `bool` and
     small `int` agree: an `int` hashes to itself, which is what CPython does

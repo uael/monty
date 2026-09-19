@@ -7,6 +7,7 @@ mod abs;
 mod all;
 mod any;
 mod bin;
+mod callable;
 mod chr;
 mod divmod;
 mod enumerate;
@@ -14,6 +15,7 @@ mod eval_exec;
 mod filter;
 mod format;
 mod getattr;
+mod globals;
 mod hasattr;
 mod hash;
 mod hex;
@@ -140,6 +142,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::All => all::builtin_all(vm, args),
             Self::Any => any::builtin_any(vm, args),
             Self::Bin => bin::builtin_bin(vm, args),
+            Self::Callable => callable::builtin_callable(vm, args),
             Self::Chr => chr::builtin_chr(vm, args),
             Self::Divmod => divmod::builtin_divmod(vm, args),
             Self::Enumerate => enumerate::builtin_enumerate(vm, args),
@@ -148,6 +151,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             // `getattr()` / `hasattr()` may suspend a lazy host attribute lookup.
             Self::Getattr => return getattr::builtin_getattr(vm, args),
             Self::Hasattr => return hasattr::builtin_hasattr(vm, args),
+            Self::Globals => globals::builtin_globals(vm, args),
             Self::Hash => hash::builtin_hash(vm, args),
             Self::Hex => hex::builtin_hex(vm, args),
             Self::Id => id::builtin_id(vm, args),

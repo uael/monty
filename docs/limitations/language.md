@@ -136,11 +136,13 @@ became mandatory in Python 3.7 or earlier and so are inert there too, and
 
 ## Module-level dunder variables
 
-Monty has no module object and no `globals()` dict, but it exposes a fixed set
-of module-level dunders so common idioms (e.g. `if __name__ == '__main__':`)
-work. They are resolved on read; there is no real namespace entry behind them,
-so the values built per read (`__file__`, `__annotations__`) are fresh objects
-each time and `__file__ is __file__` is `False` where CPython gives `True`.
+Monty has no module object, and module globals are slots rather than a namespace
+dict, but it exposes a fixed set of module-level dunders so common idioms (e.g.
+`if __name__ == '__main__':`) work. They are resolved on read; there is no real
+namespace entry behind them, so they are absent from `globals()` (see
+[eval_exec.md](eval_exec.md)), and the values built per read (`__file__`,
+`__annotations__`) are fresh objects each time, making `__file__ is __file__`
+`False` where CPython gives `True`.
 
 | Name              | Monty value  | CPython (script run)         |
 | ----------------- | ------------ | ---------------------------- |
