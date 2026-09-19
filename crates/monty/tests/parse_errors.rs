@@ -603,11 +603,26 @@ fn matrix_multiplication_augmented_assignment_returns_syntax_error() {
 }
 
 #[test]
-fn del_statement_returns_not_implemented_error() {
-    // The del statement is not supported at parse time
-    let err = get_parse_err("x = 1\ndel x");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support the 'del' statement");
+fn del_of_a_starred_target_returns_syntax_error() {
+    // `del` accepts names, attributes, subscripts and parenthesized lists of
+    // those. A starred target is rejected by ruff's parser before Monty sees
+    // it, so the message is ruff's rather than Monty's; CPython says
+    // "cannot delete starred".
+    let err = get_parse_err("a = [1]\ndel *a,");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"Invalid delete target");
+}
+
+#[test]
+fn del_statement_compiles_successfully() {
+    // Every target shape `del` accepts, in one statement.
+    let result = MontyRun::new(
+        "class C: pass\nc = C()\nc.a = 1\nd = {'k': 1}\nx = 1\ndel x, d['k'], c.a".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "del should compile for every target shape");
 }
 
 #[test]

@@ -226,6 +226,37 @@ impl<'h> HeapRead<'h, List> {
         Ok(Value::Ref(heap_id))
     }
 
+    /// Removes every item a slice selects (`del lst[1:3]`, `del lst[::2]`).
+    ///
+    /// The selected positions are removed back to front, so each removal leaves
+    /// the positions still to go where they were. An empty selection is a no-op,
+    /// as it is in CPython.
+    fn delitem_slice(&mut self, slice: &super::Slice, vm: &mut VM<'h>) -> RunResult<()> {
+        let len = self.get(vm.heap).items.len();
+        let (start, stop, step) = slice.indices(len)?;
+        // Descending, so `Vec::remove` never shifts a position still to come.
+        let mut doomed: Vec<usize> = Vec::new();
+        let mut index = start;
+        if step > 0 {
+            while index < stop {
+                doomed.push(usize::try_from(index).expect("indices() keeps a forward walk non-negative"));
+                index += step;
+            }
+            doomed.reverse();
+        } else {
+            while index > stop {
+                doomed.push(usize::try_from(index).expect("indices() keeps a backward walk non-negative"));
+                index += step;
+            }
+        }
+        for (count, idx) in doomed.into_iter().enumerate() {
+            vm.heap.tracker.check_time_every(count)?;
+            let removed = self.get_mut(vm.heap).items.remove(idx);
+            removed.drop_with(vm);
+        }
+        Ok(())
+    }
+
     /// Clones the item at the given index with proper refcount management.
     ///
     /// Panics if `index` is out of bounds, so only use it where the length was
@@ -469,6 +500,28 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, List> {
         // Safety: normalized_index is validated to be in [0, len) above
         let idx = usize::try_from(normalized_index).expect("list index validated non-negative");
         Ok(self.get(vm.heap).items[idx].clone_with_heap(vm))
+    }
+
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        if let Value::Ref(id) = key
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
+        {
+            let slice = slice.clone();
+            return self.delitem_slice(&slice, vm);
+        }
+        let index = key.as_index(vm, Type::List)?;
+        let len = i64::try_from(self.get(vm.heap).len()).expect("list length exceeds i64::MAX");
+        let normalized_index = if index < 0 { index + len } else { index };
+        if normalized_index < 0 || normalized_index >= len {
+            return Err(ExcType::list_assignment_index_error());
+        }
+        let idx = usize::try_from(normalized_index).expect("index validated non-negative");
+        // `contains_refs` stays set: it is a conservative "may contain" flag, and
+        // clearing it would need a full rescan of the remaining items.
+        let removed = self.get_mut(vm.heap).items.remove(idx);
+        removed.drop_with(vm);
+        Ok(())
     }
 
     fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h>) -> RunResult<()> {

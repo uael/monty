@@ -288,7 +288,6 @@ pub enum Opcode {
     BinarySubscr = 75,
     /// a[b] = c: pop value, pop index, pop obj.
     StoreSubscr = 76,
-    // NOTE: DeleteSubscr removed - `del` statement not supported by parser
     /// Pop obj, push obj.attr. Operand: u16 name_id.
     LoadAttr = 77,
     /// Pop module, push module.attr for `from ... import`. Operand: u16 name_id.
@@ -298,7 +297,6 @@ pub enum Opcode {
     LoadAttrImport = 78,
     /// Pop value, pop obj, set obj.attr. Operand: u16 name_id.
     StoreAttr = 79,
-    // NOTE: DeleteAttr removed - `del` statement not supported by parser
 
     // === Function Calls ===
     /// Call TOS with n positional args. Operand: u8 arg_count.
@@ -575,6 +573,12 @@ pub enum Opcode {
     /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
     /// `__value__` read. Operand: u16 name_id (the alias's `__name__`).
     MakeTypeAlias = 127,
+
+    // === `del` on containers ===
+    /// `del a[b]`: pop index, pop obj, remove the item.
+    DeleteSubscr = 128,
+    /// `del a.b`: pop obj, remove the attribute. Operand: u16 name_id.
+    DeleteAttr = 129,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -703,6 +707,7 @@ impl Opcode {
             | Self::BeforeWith
             | Self::WithExit
             | Self::WithExceptStart
+            | Self::DeleteSubscr
             | Self::BuildCell => OperandShape::None,
             Self::LoadLocal
             | Self::StoreLocal
@@ -742,6 +747,7 @@ impl Opcode {
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
             | Self::MethodDictMerge
+            | Self::DeleteAttr
             | Self::MakeTypeAlias
             | Self::MatchClass => OperandShape::U16,
             Self::Jump
@@ -964,6 +970,7 @@ impl Opcode {
             (ListToTuple, Operand::None) => 0,
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
+            (DeleteSubscr, Operand::None) => -2,
             (GetIter | Await, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
@@ -1004,6 +1011,7 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
+            (DeleteAttr, Operand::U16(_)) => -1,
             // The thunk is replaced in place by the alias object.
             (MakeTypeAlias, Operand::U16(_)) => 0,
             // Pops the keyword names and the class, plus the subject copy the

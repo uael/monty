@@ -198,6 +198,18 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::RuntimeError, "cannot reuse already awaited coroutine").into()
     }
 
+    /// Creates a `TypeError` for item deletion on a type that does not support it.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object doesn't support item deletion`
+    #[must_use]
+    fn type_error_no_item_deletion(type_: &str) -> RunError {
+        SimpleException::new_msg(
+            ExcType::TypeError,
+            format!("'{type_}' object doesn't support item deletion"),
+        )
+        .into()
+    }
+
     /// Creates a TypeError for item assignment on types that don't support it.
     ///
     /// Matches CPython's format: `TypeError: '{type}' object does not support item assignment`

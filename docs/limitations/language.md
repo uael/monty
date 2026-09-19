@@ -23,11 +23,24 @@ any code runs.
     *expressions* (`(x for x in ...)`) parse but currently materialize to a
     `list` rather than a lazy iterator, a known temporary divergence; see
     `iter__generator_expr_type.py`.
-- **`del` statements** — neither `del x` nor `del d[k]` parse.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
 - **`async for` loops** and **async comprehensions**.
 - **Wildcard imports** (`from m import *`) — raises
     `` NotImplementedError: "Wildcard imports (`from ... import *`) are not supported" ``.
+
+## `del`
+
+`del name`, `del obj.attr`, `del container[key]`, `del lst[i:j]`, several
+targets in one statement (`del a, d[k]`), and a parenthesized list
+(`del (a, b)`) all work, deleting left to right. Divergences:
+
+- **`del` reaches only real instance attributes.** `del obj.attr` works on an
+    instance of a user class and raises `AttributeError` for every other type,
+    including the builtin types whose attributes are computed rather than
+    stored.
+- **Module dunders cannot be deleted.** `del __name__` raises `NameError`,
+    because the module dunders are resolved on read rather than stored. CPython
+    deletes the real module-dict entry.
 
 ## `match` statements
 

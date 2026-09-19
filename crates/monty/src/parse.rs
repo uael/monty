@@ -17,8 +17,8 @@ use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
     exception_private::{ExcType, ExcTypeExt, RunError, SimpleException},
     expressions::{
-        AssignTarget, Callable, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName, Literal,
-        MatchCase, Node, Operator, Pattern, SequenceItem, UnpackTarget,
+        AssignTarget, Callable, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier,
+        ImportName, Literal, MatchCase, Node, Operator, Pattern, SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
     intern::{CompileInterns, StringId},
@@ -370,10 +370,13 @@ impl<'a, 'i> Parser<'a, 'i> {
                 Some(value) => Some(self.parse_expression(*value)?),
                 None => None,
             })),
-            Stmt::Delete(d) => Err(ParseError::not_implemented(
-                "the 'del' statement",
-                self.convert_range(d.range),
-            )),
+            Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+                let mut parsed = Vec::with_capacity(targets.len());
+                for target in targets {
+                    self.parse_delete_targets(target, &mut parsed)?;
+                }
+                Ok(Node::Delete(parsed))
+            }
             Stmt::TypeAlias(ast::StmtTypeAlias {
                 name,
                 type_params,
@@ -1221,6 +1224,58 @@ impl<'a, 'i> Parser<'a, 'i> {
             AstExpr::Starred(ast::ExprStarred { range, .. }) => Err(starred_root_target(self.convert_range(range))),
             other => Ok(AssignTarget::Name(self.parse_identifier(other)?)),
         }
+    }
+
+    /// Flattens one `del` target expression into [`DeleteTarget`]s.
+    ///
+    /// A parenthesized or bracketed list is equivalent to listing its members
+    /// (`del (a, b)` is `del a, b`), so those are flattened away here rather
+    /// than given a nested variant nothing would read.
+    fn parse_delete_targets(&mut self, target: AstExpr, out: &mut Vec<DeleteTarget>) -> Result<(), ParseError> {
+        self.decr_depth_remaining(|| target.range())?;
+        let result = match target {
+            AstExpr::Name(ast::ExprName { id, range, .. }) => {
+                out.push(DeleteTarget::Name(self.identifier(&id, range)));
+                Ok(())
+            }
+            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => {
+                let position = self.convert_range(range);
+                let object = self.parse_expression(*value)?;
+                out.push(DeleteTarget::Attr {
+                    object,
+                    attr: EitherStr::Interned(self.interner.intern(attr.id())),
+                    position,
+                });
+                Ok(())
+            }
+            AstExpr::Subscript(ast::ExprSubscript {
+                value, slice, range, ..
+            }) => {
+                let position = self.convert_range(range);
+                let object = self.parse_expression(*value)?;
+                let index = self.parse_expression(*slice)?;
+                out.push(DeleteTarget::Subscript {
+                    object,
+                    index,
+                    position,
+                });
+                Ok(())
+            }
+            AstExpr::Tuple(ast::ExprTuple { elts, .. }) | AstExpr::List(ast::ExprList { elts, .. }) => {
+                for elt in elts {
+                    self.parse_delete_targets(elt, out)?;
+                }
+                Ok(())
+            }
+            // CPython: `SyntaxError: cannot delete starred`.
+            AstExpr::Starred(s) => Err(ParseError::syntax("cannot delete starred", self.convert_range(s.range))),
+            other => Err(ParseError::syntax(
+                format!("cannot delete {}", describe_expr_kind(&other)),
+                self.convert_range(other.range()),
+            )),
+        };
+        self.depth_remaining += 1;
+        result
     }
 
     /// Wraps `value` in a synthetic zero-argument function whose body returns it.

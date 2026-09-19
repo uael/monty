@@ -2098,7 +2098,7 @@ fn repl_rejected_snippet_locations() {
     for source in [
         "\n\nfrom . import missing",
         "\n\nfrom math import *",
-        "\n\ndel missing",
+        "\n\n1 + 2j",
         "\n\n__name__ = 'changed'",
     ] {
         let error = feed_run_print(&mut repl, &format!("exec({source:?})")).unwrap_err();

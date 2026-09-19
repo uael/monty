@@ -1605,6 +1605,21 @@ impl<'h> VM<'h> {
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
                 }
+                Opcode::DeleteSubscr => {
+                    // Stack order: obj, index (TOS)
+                    let index = self.pop();
+                    let mut obj = self.pop();
+                    let result = obj.py_delitem(index, self);
+                    obj.drop_with(self);
+                    if let Err(e) = result {
+                        catch!(self, e);
+                    }
+                }
+                Opcode::DeleteAttr => {
+                    let name_idx = self.current_frame.fetch_u16();
+                    let name_id = StringId::from_index(name_idx);
+                    try_catch!(self, self.delete_attr(name_id));
+                }
                 Opcode::MakeTypeAlias => {
                     let name_idx = self.current_frame.fetch_u16();
                     let thunk = self.pop();
