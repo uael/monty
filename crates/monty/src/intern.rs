@@ -739,6 +739,11 @@ pub enum StaticStrings {
     Compile,
     /// `itertools.compress()` function.
     Compress,
+    /// The `contextvars.ContextVar` type.
+    #[strum(serialize = "ContextVar")]
+    ContextVar,
+    /// The `contextvars` module.
+    Contextvars,
     /// `Interpolation.conversion` attribute.
     Conversion,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
@@ -1620,6 +1625,8 @@ pub enum StaticStrings {
     Replace,
     /// `@dataclass(repr=...)`.
     Repr,
+    /// `ContextVar.reset()` method.
+    Reset,
     /// `resolution` class constant of the `datetime` classes.
     Resolution,
     /// `Path.resolve()` method — yields a host call.
@@ -1683,6 +1690,9 @@ pub enum StaticStrings {
     Sequence,
     /// `sys.version_info.serial` field.
     Serial,
+    /// `ContextVar.set()` method.
+    #[strum(serialize = "set")]
+    SetMethod,
     /// `typing.Set` marker.
     #[strum(serialize = "Set")]
     SetType,
@@ -1862,6 +1872,9 @@ pub enum StaticStrings {
     Title,
     /// `date.today()` / `datetime.today()` classmethod.
     Today,
+    /// The `contextvars.Token` type.
+    #[strum(serialize = "Token")]
+    Token,
     /// `Counter.total()` method.
     Total,
     /// `timedelta.total_seconds()` method.

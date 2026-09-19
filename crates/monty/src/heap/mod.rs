@@ -2056,6 +2056,22 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 }
             }
         }
+        // Mirrors `py_dec_ref_ids_for_data`: a context variable owns its name,
+        // default and current value, a token its variable and old value.
+        HeapData::ContextVar(var) => {
+            for value in var.owned_values().into_iter().flatten() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::ContextVarToken(token) => {
+            for value in token.owned_values().into_iter().flatten() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
         HeapData::Module(m) => {
             // Module attrs can contain references to heap values
             if !m.has_refs() {
@@ -2234,6 +2250,9 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         // Release the template and interpolation references (mirrors `for_each_child_id`).
         HeapData::Template(template) => template.py_dec_ref_ids(stack),
         HeapData::Interpolation(interpolation) => interpolation.py_dec_ref_ids(stack),
+        // Release the context variable's and token's references (mirrors `for_each_child_id`).
+        HeapData::ContextVar(var) => var.py_dec_ref_ids(stack),
+        HeapData::ContextVarToken(token) => token.py_dec_ref_ids(stack),
         HeapData::Module(m) => m.py_dec_ref_ids(stack),
         HeapData::Coroutine(coro) => {
             // Decrement ref count for namespace values that are heap references

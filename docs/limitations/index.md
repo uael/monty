@@ -76,6 +76,7 @@ The following modules are present:
 | `binascii`        | [base64.md](base64.md)           |
 | `collections`     | [collections.md](collections.md) |
 | `collections.abc` | [collections.md](collections.md) |
+| `contextvars`     | [contextvars.md](contextvars.md) |
 | `copy`            | [copy.md](copy.md)               |
 | `dataclasses`     | [dataclasses.md](dataclasses.md) |
 | `datetime`        | [datetime.md](datetime.md)       |

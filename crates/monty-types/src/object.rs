@@ -1349,6 +1349,12 @@ pub enum MontyType {
     /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
     #[strum(serialize = "typing.TypeAliasType")]
     TypeAliasType,
+    /// `contextvars.ContextVar`, named as CPython's C module names it.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// `contextvars.Token`, what `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
 }
 
 impl fmt::Display for MontyType {

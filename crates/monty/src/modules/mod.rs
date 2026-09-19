@@ -18,6 +18,7 @@ pub(crate) mod base64;
 pub(crate) mod binascii;
 pub(crate) mod collections;
 pub(crate) mod collections_abc;
+pub(crate) mod contextvars;
 pub(crate) mod copy;
 pub(crate) mod dataclasses;
 pub(crate) mod datetime;
@@ -89,6 +90,8 @@ pub(crate) enum StandardLib {
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
+    /// The `contextvars` module exposing `ContextVar` and its `Token`.
+    Contextvars,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -121,6 +124,7 @@ impl StandardLib {
             StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::Time => Some(Self::Time),
+            StaticStrings::Contextvars => Some(Self::Contextvars),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -152,6 +156,7 @@ impl StandardLib {
             Self::CollectionsAbc => collections_abc::create_module(vm),
             Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::Time => time::create_module(vm),
+            Self::Contextvars => contextvars::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

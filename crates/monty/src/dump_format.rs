@@ -294,13 +294,13 @@ mod tests {
 
         assert_eq!(
             variant_order_fingerprint(Type::VARIANTS),
-            0xb733_b3fe_f3bd_be06,
+            0xbe95_7716_99d9_fef9,
             "Type variants changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(variant_order_fingerprint(Type::VARIANTS))
         );
         assert_eq!(
             variant_order_fingerprint(MontyType::VARIANTS),
-            0xd976_26bf_61e3_deb9,
+            0x3d36_719e_ef6d_1eb2,
             "MontyType variants changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(variant_order_fingerprint(MontyType::VARIANTS))
         );
@@ -308,7 +308,7 @@ mod tests {
         // is append-only: a new builtin goes after the last variant.
         assert_eq!(
             variant_order_fingerprint(BuiltinsFunctions::VARIANTS),
-            0x8148_8a02_ab15_82ab,
+            0xe42d_2cd7_2b9e_7745,
             "BuiltinsFunctions variants changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(variant_order_fingerprint(BuiltinsFunctions::VARIANTS))
         );

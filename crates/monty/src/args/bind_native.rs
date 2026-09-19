@@ -300,6 +300,12 @@ pub(crate) struct ParamSpec {
     /// function from CPython's observed behaviour — not derivable from the
     /// field shapes (identical signatures differ by parser generation).
     pub at_most_total: bool,
+    /// Word a positional overflow `at most` even where every positional slot is
+    /// required. `PyArg_ParseTupleAndKeywords` picks its wording from whether
+    /// the format holds any optional parameter at all, so a function whose only
+    /// optional one is keyword-only (`contextvars.ContextVar`) still says `at
+    /// most`, where `_PyArg_UnpackKeywords` would say `exactly`.
+    pub at_most_positional: bool,
     /// Kwarg-free positional overflow uses `_PyArg_CheckPositional` wording
     /// (`{name} expected at most N arguments, got M`) — models `tp_vectorcall`
     /// fast paths (`int`, `str`) that bypass the clinic parser when no
@@ -665,7 +671,7 @@ fn positional_overflow_error(spec: &ParamSpec, n_pos: usize, n_kw: usize) -> Run
         ErrorFamily::CNamed { positional_pivot: true }
             if spec.uses_exact_positional_arity() && n_pos + n_kw <= spec.params.len() =>
         {
-            ExcType::type_error_named_positional(spec.func_name, max, n_pos, true)
+            ExcType::type_error_named_positional(spec.func_name, max, n_pos, !spec.at_most_positional)
         }
         _ if spec.uses_c_method_arity() => ExcType::type_error_method_at_most(spec.func_name, max, n_pos + n_kw, false),
         ErrorFamily::C {
@@ -691,7 +697,7 @@ fn positional_overflow_error(spec: &ParamSpec, n_pos: usize, n_kw: usize) -> Run
             if total > spec.params.len() {
                 ExcType::type_error_method_at_most(spec.func_name, spec.params.len(), total, false)
             } else {
-                let exact = spec.n_required_positional == spec.n_positional;
+                let exact = spec.n_required_positional == spec.n_positional && !spec.at_most_positional;
                 ExcType::type_error_named_positional(spec.func_name, max, n_pos, exact)
             }
         }

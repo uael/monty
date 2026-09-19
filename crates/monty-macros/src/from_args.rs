@@ -30,6 +30,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 }
 
 /// Parsed, validated signature for a single struct deriving `FromArgs`.
+#[expect(clippy::struct_excessive_bools, reason = "one per independent `from_args` modifier")]
 struct Signature {
     struct_ident: Ident,
     /// Function name embedded in error messages (the `{name}()` prefix).
@@ -49,6 +50,10 @@ struct Signature {
     /// wording first, modeling `tp_vectorcall` fast paths (`int`, `str`) that
     /// only fall back to the clinic parser when keywords are present.
     vectorcall: bool,
+    /// Word a positional overflow `at most` even where every positional slot
+    /// is required — what `PyArg_ParseTupleAndKeywords` does once the format
+    /// holds any optional parameter (`contextvars.ContextVar`).
+    at_most_positional: bool,
     /// Override for the function name in the unknown-kwarg error only.
     /// Used by `json.dumps`, which forwards unmatched kwargs to
     /// `JSONEncoder.__init__` and so reports that name instead.
@@ -164,6 +169,7 @@ impl Signature {
             style,
             at_most_total,
             vectorcall,
+            at_most_positional,
             kwarg_error_name,
             bad_arg,
             kwargs_not_supported_yet,
@@ -197,6 +203,7 @@ impl Signature {
             varkwargs_idx,
             at_most_total,
             vectorcall,
+            at_most_positional,
             kwarg_error_name,
             bad_arg,
             kwargs_not_supported_yet,
@@ -248,6 +255,13 @@ impl Signature {
                      — the up-front total-count check is only meaningful for \
                      signatures with a fixed maximum");
             }
+        }
+
+        if self.at_most_positional && !matches!(self.style, Style::C | Style::CNamed) {
+            return err("`at_most_positional` requires `style = c` or `style = c_named` \
+                 — it models `PyArg_ParseTupleAndKeywords`, whose overflow wording turns on \
+                 whether the format holds any optional parameter rather than on the positional \
+                 slots alone");
         }
 
         if self.vectorcall && !(self.at_most_total && self.style == Style::Clinic) {
@@ -447,6 +461,7 @@ impl Signature {
         let varkwargs = self.varkwargs_idx.is_some();
         let at_most_total = self.at_most_total;
         let vectorcall = self.vectorcall;
+        let at_most_positional = self.at_most_positional;
         let kwargs_not_supported_yet = self.kwargs_not_supported_yet;
         let kwarg_error_name = if let Some(name) = &self.kwarg_error_name {
             quote! { ::std::option::Option::Some(#name) }
@@ -465,6 +480,7 @@ impl Signature {
                 varkwargs: #varkwargs,
                 at_most_total: #at_most_total,
                 vectorcall: #vectorcall,
+                at_most_positional: #at_most_positional,
                 kwargs_not_supported_yet: #kwargs_not_supported_yet,
                 kwarg_error_name: #kwarg_error_name,
             };
@@ -735,11 +751,13 @@ fn is_vec_of_value(ty: &Type) -> bool {
 }
 
 /// Parsed `#[from_args(...)]` set on the struct itself.
+#[expect(clippy::struct_excessive_bools, reason = "one per independent `from_args` modifier")]
 struct StructAttrs {
     name: String,
     style: Style,
     at_most_total: bool,
     vectorcall: bool,
+    at_most_positional: bool,
     kwarg_error_name: Option<String>,
     bad_arg: Option<BadArgStyle>,
     kwargs_not_supported_yet: bool,
@@ -751,6 +769,7 @@ fn parse_struct_attrs(attrs: &[syn::Attribute]) -> syn::Result<StructAttrs> {
     let mut style: Option<Style> = None;
     let mut at_most_total = false;
     let mut vectorcall = false;
+    let mut at_most_positional = false;
     let mut kwarg_error_name: Option<String> = None;
     let mut bad_arg: Option<BadArgStyle> = None;
     let mut kwargs_not_supported_yet = false;
@@ -787,6 +806,9 @@ fn parse_struct_attrs(attrs: &[syn::Attribute]) -> syn::Result<StructAttrs> {
                 Ok(())
             } else if meta.path.is_ident("vectorcall") {
                 vectorcall = true;
+                Ok(())
+            } else if meta.path.is_ident("at_most_positional") {
+                at_most_positional = true;
                 Ok(())
             } else if meta.path.is_ident("kwarg_error_name") {
                 let value: LitStr = meta.value()?.parse()?;
@@ -827,6 +849,7 @@ fn parse_struct_attrs(attrs: &[syn::Attribute]) -> syn::Result<StructAttrs> {
         style: style.unwrap_or(Style::Clinic),
         at_most_total,
         vectorcall,
+        at_most_positional,
         kwarg_error_name,
         bad_arg,
         kwargs_not_supported_yet,

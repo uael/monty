@@ -163,6 +163,7 @@ base64: 3.0-
 binascii: 3.0-
 builtins: 3.0-
 collections: 3.0-
+contextvars: 3.7-
 copy: 3.0-
 dataclasses: 3.7-
 datetime: 3.0-

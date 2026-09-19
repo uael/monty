@@ -162,6 +162,10 @@ macro_rules! heap_payloads {
             /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
             /// payload ceiling for a type nothing hot allocates.
             Interpolation(boxed $crate::types::Interpolation),
+            /// A `contextvars.ContextVar` and the value it currently holds.
+            ContextVar(inline $crate::types::ContextVar),
+            /// The `contextvars.Token` a `ContextVar.set()` handed back.
+            ContextVarToken(inline $crate::types::ContextVarToken),
         }
     };
 }
@@ -246,6 +250,10 @@ impl HeapData {
             | Self::TypeAliasType(_)
             | Self::Template(_)
             | Self::Interpolation(_)
+            // A context variable holds whatever was set in it, and its token
+            // holds the variable back.
+            | Self::ContextVar(_)
+            | Self::ContextVarToken(_)
             // A getter is a closure, which can capture the class it belongs to.
             | Self::ClassProperty(_) => true,
             // An instance of a class that inherits `str` holds that class, which
@@ -317,6 +325,8 @@ impl HeapData {
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
             Self::TypeAliasType(_) => Type::TypeAliasType,
+            Self::ContextVar(_) => Type::ContextVar,
+            Self::ContextVarToken(_) => Type::ContextVarToken,
             Self::ClassProperty(_) => Type::Property,
             Self::Template(_) => Type::Template,
             Self::Interpolation(_) => Type::Interpolation,
@@ -691,6 +701,8 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::ClassProperty($value) => $body,
             Self::Template($value) => $body,
             Self::Interpolation($value) => $body,
+            Self::ContextVar($value) => $body,
+            Self::ContextVarToken($value) => $body,
             Self::Cell(_)
             | Self::Exception(_)
             | Self::Module(_)
@@ -1144,6 +1156,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::ClassProperty(value) => value.py_iter(vm),
             Self::Template(value) => value.py_iter(vm),
             Self::Interpolation(value) => value.py_iter(vm),
+            Self::ContextVar(value) => value.py_iter(vm),
+            Self::ContextVarToken(value) => value.py_iter(vm),
             Self::Str(value) => value.py_iter(vm),
             Self::Bytes(value) => value.py_iter(vm),
             Self::List(value) => value.py_iter(vm),
