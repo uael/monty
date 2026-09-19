@@ -21,7 +21,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 **Supported:**
 
 - `def`, `async def`, nested functions, closures, `lambda`
-- Decorators on functions and classes
+- Decorators on functions, classes and methods
 - Simple classes: instance methods, `__init__`, `__repr__`/`__str__`, `__eq__`/`__hash__`, `__iter__`/`__next__`,
     `__contains__`, `__index__`, class variables
 - `@dataclass`, with the `eq=` and `frozen=` options only (every other option raises `NotImplementedError`, and
@@ -46,7 +46,6 @@ They exist for development and for agents debugging code that runs on Monty; mos
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
 
 - Class inheritance and metaclasses (`class Foo(Bar):`)
-- Decorators on methods — so no `@classmethod`, `@staticmethod`, `@property`
 - `yield` / `yield from` — there are no generator functions.
     Generator *expressions* parse, but currently materialise to a `list`
 - `try*` / `except*` exception groups

@@ -358,9 +358,11 @@ every construction request. Divergences:
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).
 - Abstract base classes (`abc.ABC`, `@abstractmethod`).
-- Method decorators — `@classmethod`, `@staticmethod`, `@property`, and any
-    decorator on a `def` inside a class body (rejected at parse time). Decorators
-    on classes and on non-method functions are supported.
+- `classmethod`, `staticmethod` and `property` as decorators. Decorating a
+    method works, but these three are not constructible: `@property` raises
+    `TypeError: cannot create 'property' instances`, and the other two names are
+    not defined. Any other callable decorates a method the way it decorates a
+    function.
 - **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
     are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
     latter with stringized values, see [typing.md](typing.md)). A class decorator
