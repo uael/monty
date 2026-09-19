@@ -22,7 +22,7 @@ Python.
 
 These raise `NameError`:
 
-- **Code objects and imports**: `compile`, `__import__`.
+- **Imports**: `__import__`.
 - **Namespace introspection**: `vars`, `dir`.
 - **Interactive**: `input`, `breakpoint`, `help`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`.
@@ -31,6 +31,12 @@ These raise `NameError`:
 
 `super()` is the biggest practical omission: a class can name one base (see
 [classes.md](classes.md)), but an override cannot call the method it replaces.
+
+## Builtins a type-checked session rejects
+
+Monty's narrowed `builtins.pyi` (`crates/monty-typeshed/vendor/`) lags the interpreter, so a session with type checking
+enabled rejects `compile` and `issubclass` with `unresolved-reference` although both run.
+Feed the call through `eval()` / `exec()`, whose source is never type-checked, or turn type checking off.
 
 ## Behavioural divergences
 

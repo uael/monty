@@ -157,6 +157,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Id => id::builtin_id(vm, args),
             Self::Isinstance => isinstance::builtin_isinstance(vm, args),
             Self::Issubclass => issubclass::builtin_issubclass(vm, args),
+            Self::Compile => eval_exec::builtin_compile(vm, args),
             Self::Len => len::builtin_len(vm, args),
             Self::Map => map::builtin_map(vm, args),
             Self::Max => min_max::builtin_max(vm, args),

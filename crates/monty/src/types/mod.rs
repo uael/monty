@@ -8,6 +8,7 @@
 pub mod bytes;
 pub mod callable_iterator;
 pub mod class;
+mod code;
 pub mod date;
 pub mod datetime;
 pub mod deque;
@@ -50,6 +51,7 @@ pub mod union;
 
 pub(crate) use bytes::{Bytes, BytesIterator};
 pub(crate) use class::{BuiltinBase, Class, DataclassOptions};
+pub(crate) use code::{Code, CodeMode};
 pub(crate) use deque::Deque;
 pub(crate) use dict::{Dict, DictItemIterator, DictKeyIterator, DictValueIterator};
 pub(crate) use dict_view::{DictItemsView, DictKeysView, DictValuesView};

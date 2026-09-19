@@ -44,7 +44,7 @@ pub enum BuiltinsFunctions {
     // Callable - appended at the end, see below
     Chr,
     // Classmethod,
-    // Compile,
+    // compile - appended below, out of alphabetical order
     // complex - handled by Type enum
     // Delattr,
     // dict - handled by Type enum
@@ -124,4 +124,7 @@ pub enum BuiltinsFunctions {
     Callable,
     /// `globals()`, appended after [`Self::Callable`].
     Globals,
+    /// `compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)`,
+    /// appended after [`Self::Globals`].
+    Compile,
 }

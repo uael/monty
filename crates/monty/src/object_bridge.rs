@@ -776,6 +776,8 @@ impl MontyTypeExt for MontyType {
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
             Type::Random => return None,
+            // No host-side code type: a code object crosses as its repr.
+            Type::Code => return None,
             Type::Tuple => Self::Tuple,
             Type::NamedTuple => Self::NamedTuple,
             Type::Dict => Self::Dict,

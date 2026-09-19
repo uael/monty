@@ -849,6 +849,8 @@ pub enum StaticStrings {
     Dist,
     /// `doc` parameter of `property()`.
     Doc,
+    /// Kwarg name `dont_inherit` — `compile(dont_inherit=...)`.
+    DontInherit,
     /// `sys.dont_write_bytecode` attribute.
     DontWriteBytecode,
     /// `re.DOTALL` flag
@@ -991,6 +993,8 @@ pub enum StaticStrings {
     Fields,
     /// Kwarg name `file` — `open(file=...)`.
     File,
+    /// Kwarg name `filename` — `compile(filename=...)`.
+    Filename,
     /// `zip_longest(fillvalue=...)` keyword.
     Fillvalue,
     /// `itertools.filterfalse()` function.

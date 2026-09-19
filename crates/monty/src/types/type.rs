@@ -64,6 +64,8 @@ pub enum Type {
     Float,
     Range,
     Slice,
+    /// A code object, what `compile()` answers. CPython names the type `code`.
+    Code,
     /// The four `datetime` classes are qualified like `collections.deque`:
     /// this is the `tp_name` CPython gives these C types, so it is the
     /// spelling its reprs and type-naming error messages use. `__name__`

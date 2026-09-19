@@ -599,3 +599,33 @@ p = functools.partial(len, Mutator())
         "[[[1, 2, 3]], Repr('functools.partial(<built-in function len>, m)'), Holder(x=[9])]"
     );
 }
+
+/// `compile()` refuses the arguments Monty has nothing to do with: `'single'`
+/// mode, a non-zero `flags`, and an `optimize` level. CPython accepts all
+/// three, so the comparative test-case suite cannot cover the divergence
+/// (documented in `limitations/eval_exec.md`).
+#[test]
+fn compile_refuses_arguments_monty_does_not_model() {
+    for (call, message) in [
+        (
+            "compile('1', 'f.py', 'single')",
+            "NotImplementedError: compile() does not yet support the 'single' mode",
+        ),
+        (
+            "compile('1', 'f.py', 'eval', 1024)",
+            "ValueError: compile(): unrecognised flags",
+        ),
+        (
+            "compile('1', 'f.py', 'eval', 0, False, 2)",
+            "NotImplementedError: compile() does not yet support the optimize argument",
+        ),
+        (
+            "compile('1', 'f.py', 'eval', 0, False, 7)",
+            "ValueError: compile(): invalid optimize value",
+        ),
+    ] {
+        let mut ex = MontyRun::new(call.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+        let err = ex.run_no_limits(vec![]).unwrap_err();
+        assert!(err.to_string().ends_with(message), "{call}: {err}");
+    }
+}
