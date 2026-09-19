@@ -31,6 +31,7 @@ try:
 except StopIteration:
     pass
 
+
 # === a send() that runs the body out raises StopIteration at the caller ===
 def two():
     got = yield 1
@@ -73,6 +74,7 @@ seen = []
 for x in counter(3):
     seen.append(x)
 assert seen == [0, 1, 2]
+
 
 # === unpacking, which is iteration too ===
 def pair():
