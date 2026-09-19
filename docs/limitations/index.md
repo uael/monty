@@ -39,7 +39,8 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)
 - PEP 634 `match` statements, see [language.md](language.md)
 - PEP 695 `type X = ...` aliases, see [typing.md](typing.md)
-- `del`, including `del obj.attr`, `del d[k]` and `del lst[i:j]`
+- Slice assignment and deletion (`lst[i:j] = xs`, `del lst[i:j]`)
+- `del`, including `del obj.attr` and `del d[k]`
 - PEP 750 `t'...'` template strings, see [string_templatelib.md](string_templatelib.md)
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:

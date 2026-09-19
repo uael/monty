@@ -12,16 +12,13 @@ notes below.
 `import string.templatelib as tl` both work.
 
 - **`import string` raises `ModuleNotFoundError`.** Monty has no `string`
-  module; `templatelib` is registered under its full dotted name only.
+    module; `templatelib` is registered under its full dotted name only.
 - **`import string.templatelib` (no alias) is rejected** with
-  `NotImplementedError: importing a submodule without an alias; use \`import
-  string.templatelib as <name>\` or \`from string.templatelib import <name>\``.
-  Monty interns a dotted module path as one name and has no package objects, so
-  the plain form would bind a name no expression can spell; CPython binds
-  `string` and reaches the submodule through it.
+    `NotImplementedError: importing a submodule without an alias; use \`import
+    string.templatelib as <name>\` or \`from string.templatelib import <name>\``. Monty interns a dotted module path as one name and has no package objects, so the plain form would bind a name no expression can spell; CPython binds `string\` and reaches the submodule through it.
 - **The import does not type-check.** The vendored typeshed carries no `string`
-  package, so the module does not resolve during type checking even though it
-  imports and runs.
+    package, so the module does not resolve during type checking even though it
+    imports and runs.
 
 ## Module contents
 
@@ -42,12 +39,12 @@ from a `t"..."` literal.
 ## Behavioural divergences
 
 - **No concatenation.** CPython supports `Template + Template` and
-  `Template + str`; Monty raises
-  `TypeError: unsupported operand type(s) for +: 'string.templatelib.Template' and ...`.
+    `Template + str`; Monty raises
+    `TypeError: unsupported operand type(s) for +: 'string.templatelib.Template' and ...`.
 - **The type objects are not subscriptable.** CPython's `__class_getitem__`
-  makes `Template[Any]` a `types.GenericAlias`; in Monty it raises
-  `TypeError: type 'string.templatelib.Template' is not subscriptable`.
+    makes `Template[Any]` a `types.GenericAlias`; in Monty it raises
+    `TypeError: type 'string.templatelib.Template' is not subscriptable`.
 - **Crossing the host boundary loses the object.** A `Template` or
-  `Interpolation` returned to the host arrives as its `repr()` text
-  (`Template(strings=('a',), interpolations=())`), not as a host
-  `string.templatelib` object and not as anything structured.
+    `Interpolation` returned to the host arrives as its `repr()` text
+    (`Template(strings=('a',), interpolations=())`), not as a host
+    `string.templatelib` object and not as anything structured.
