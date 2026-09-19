@@ -48,9 +48,12 @@ and function-attributes-become-methods), bound methods, class variables
 The 3-arg `type()` form creates classes at runtime with CPython's validation
 order and error wording, but with these divergences:
 
-- **`bases` must be the empty tuple `()`.** Any non-empty bases tuple, even
-    `(object,)`, raises `TypeError: type() bases are not supported`, the
-    runtime counterpart of the parse-time `class Foo(Bar)` rejection.
+- **`bases` holds at most one class, and it must be a class defined in the
+    sandbox.** Two or more raise
+    `NotImplementedError: ... a class with more than one base ...`, because
+    Monty resolves a member by walking one chain and has no linearization to
+    resolve a second base against. A builtin type, including `object`, raises
+    `TypeError: a class can only inherit from a class defined in the sandbox`.
 - **Keywords are always rejected.** CPython forwards extra keywords to
     `__init_subclass__`; Monty has no `__init_subclass__`, but the error
     message matches what `object.__init_subclass__` produces
@@ -351,9 +354,14 @@ every construction request. Divergences:
 
 ## What does NOT exist for user code
 
-- `class Foo(Bar): ...` — no inheritance, no MRO, no `super()` (rejected at
-    parse time: "class inheritance and metaclasses"; the runtime equivalent
-    `type('Foo', (Bar,), {})` raises `TypeError`, see above).
+- Multiple inheritance and the C3 linearization behind it. One base works; two
+    raise, rather than being resolved in the order written (see above).
+- `super()`, in either form. A method reaches its base's version by naming the
+    base class: `Base.m(self)`.
+- `__mro__`, `__bases__` and `__base__`: a class reports no ancestry, so a
+    decorator cannot discover what a class inherits.
+- Inheriting from a builtin type, including `object`, and from a builtin
+    exception type.
 - Metaclasses, `__init_subclass__`, `__set_name__`, and any other
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).

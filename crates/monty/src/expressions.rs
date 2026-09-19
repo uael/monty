@@ -757,13 +757,16 @@ pub enum Node<F> {
         name: Identifier,
         /// The synthetic class-body function: its body is the class statements
         /// in source order. Prepared and compiled exactly like a function; its
-        /// emitted code ends by building the namespace `Dict` and returning the
-        /// `Class` object.
+        /// emitted code ends by building the namespace `Dict` and returning it.
         body: F,
         /// Top-level member names (methods + class vars) in source order.
         /// Each is resolved to a class-body-local slot during prepare; the
         /// compiler uses them to assemble the namespace dict.
         members: Vec<Identifier>,
+        /// Base classes in source order, evaluated in the enclosing scope as
+        /// CPython evaluates them: a base naming something the class body also
+        /// binds must resolve to the enclosing binding, not to the member.
+        bases: Vec<ExprLoc>,
         /// In source order; evaluated in the enclosing scope and applied
         /// bottom-up (`cls = deco(cls)`), like CPython.
         decorators: Vec<ExprLoc>,

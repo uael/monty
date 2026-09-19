@@ -37,13 +37,26 @@ fn simple_classes_compile_successfully() {
 }
 
 #[test]
-fn class_inheritance_returns_not_implemented_error() {
-    let err = get_parse_err("class Foo(Bar): pass");
+fn metaclass_keyword_returns_not_implemented_error() {
+    let err = get_parse_err("class Foo(metaclass=type): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support class inheritance and metaclasses"
+        @"The monty syntax parser does not yet support metaclasses"
     );
+}
+
+#[test]
+fn class_inheritance_compiles_successfully() {
+    // A base list is an ordinary expression list of the enclosing scope; what
+    // it names is checked when the class statement runs.
+    let result = MontyRun::new(
+        "class Base: pass\n\nclass Derived(Base): pass".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "a class with a base should compile");
 }
 
 #[test]

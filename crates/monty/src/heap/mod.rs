@@ -1952,7 +1952,9 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
             }
         }
         HeapData::Class(class) => {
-            // The class namespace holds method/class-variable values.
+            // The class namespace holds method/class-variable values, and the
+            // class owns a reference on each of its bases. Mirrors
+            // `Class::py_dec_ref_ids`.
             for (k, v) in class.namespace() {
                 if let Value::Ref(id) = k {
                     on_child(*id);
@@ -1960,6 +1962,9 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 if let Value::Ref(id) = v {
                     on_child(*id);
                 }
+            }
+            for base in class.bases() {
+                on_child(*base);
             }
         }
         HeapData::Instance(instance) => {

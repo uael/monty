@@ -24,7 +24,10 @@ use crate::{
     os_dispatch::{PendingEffect, release_pending_effect},
     resource_checks::check_estimated_size,
     types::{
-        Dict, Instance, PyTrait, Type, bytes::call_bytes_method, generator::Generator, instance::class_name,
+        Dict, Instance, PyTrait, Type,
+        bytes::call_bytes_method,
+        generator::Generator,
+        instance::{class_member, class_name},
         str::call_str_method,
     },
     value::{EitherStr, VALUE_SIZE, Value},
@@ -1144,14 +1147,9 @@ impl<'h> VM<'h> {
         // The instance now owns a reference to its class object.
         self.heap.inc_ref(class_id);
 
-        // Look up `__init__` in the class namespace (cloned out to release the borrow).
-        let init = match self.heap.get(class_id) {
-            HeapData::Class(class) => class
-                .namespace()
-                .get_by_str("__init__", self.heap, self.interns)
-                .map(|v| v.clone_with_heap(self)),
-            _ => None,
-        };
+        // Look up `__init__` along the class chain (cloned out to release the
+        // borrow), so a subclass that defines none uses its base's.
+        let init = class_member(class_id, "__init__", self);
 
         match init {
             // A dataclass with no user-defined `__init__` binds its fields

@@ -855,9 +855,10 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 name,
                 body,
                 members,
+                bases,
                 decorators,
                 position,
-            } => self.compile_class_def(name, body, members, decorators, *position)?,
+            } => self.compile_class_def(name, body, members, bases, decorators, *position)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
             Node::With {
                 context, target, body, ..
@@ -1354,6 +1355,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         name: &Identifier,
         body: &PreparedFunctionDef,
         members: &[Identifier],
+        bases: &[ExprLoc],
         decorators: &[ExprLoc],
         position: CodeRange,
     ) -> Result<(), CompileError> {
@@ -1368,7 +1370,11 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // let a base name collide with a member of the same name.
         let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
         self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
-        self.code.emit_u16(Opcode::BuildTuple, 0)?;
+        for base in bases {
+            self.compile_expr(base)?;
+        }
+        let base_count = check_collection_size_u16(bases.len(), position)?;
+        self.code.emit_u16(Opcode::BuildTuple, base_count)?;
         // Build the class-body function/closure value on the stack...
         self.emit_make_class_body(body, members, position)?;
         // ...call it with zero args — it runs the body and returns the namespace

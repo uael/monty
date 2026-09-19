@@ -23,7 +23,8 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - `def`, `async def`, nested functions, closures, `lambda`
 - Decorators on functions, classes and methods
 - Simple classes: instance methods, `__init__`, `__repr__`/`__str__`, `__eq__`/`__hash__`, `__iter__`/`__next__`,
-    `__contains__`, `__index__`, class variables, read-only `@property`
+    `__contains__`, `__index__`, class variables, read-only `@property`, and single inheritance from another
+    sandbox class
 - `@dataclass`, with the `eq=` and `frozen=` options only (every other option raises `NotImplementedError`, and
     there is no `field()` or `asdict()`), plus host class instances passed in and out (and host classes the
     sandbox may instantiate when granted)
@@ -45,7 +46,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
 
-- Class inheritance and metaclasses (`class Foo(Bar):`)
+- Metaclasses (`class Foo(metaclass=M):`)
 - `yield` / `yield from` — there are no generator functions.
     Generator *expressions* parse, but currently materialise to a `list`
 - `try*` / `except*` exception groups
@@ -56,7 +57,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 **Missing in other ways:**
 
 - User-defined exception classes.
-    The built-in exception types are a fixed set, and without inheritance you cannot add to it.
+    The built-in exception types are a fixed set, and a class cannot inherit from one, so you cannot add to it.
 - Function attributes.
     `fn.__name__`, `fn.__doc__` and friends raise `AttributeError`, and new attributes cannot be set — so
     `functools.wraps`-style metadata copying and registries keyed on `fn.__name__` have no equivalent.

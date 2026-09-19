@@ -835,15 +835,18 @@ impl<'a, 'i> Parser<'a, 'i> {
     fn parse_class_def(&mut self, class: ast::StmtClassDef) -> Result<ParseNode, ParseError> {
         let position = self.class_keyword_range(&class);
         let decorators = self.parse_decorators(class.decorator_list)?;
-        // `class.arguments` carries base classes and metaclass keywords.
-        if class
-            .arguments
-            .is_some_and(|a| !a.args.is_empty() || !a.keywords.is_empty())
-        {
-            return Err(ParseError::not_implemented(
-                "class inheritance and metaclasses",
-                position,
-            ));
+        // `class.arguments` carries base classes and metaclass keywords. The
+        // bases are ordinary expressions of the enclosing scope, which is where
+        // CPython evaluates them; a keyword there is a metaclass, which Monty
+        // has no notion of.
+        let mut bases = Vec::new();
+        if let Some(arguments) = class.arguments {
+            if !arguments.keywords.is_empty() {
+                return Err(ParseError::not_implemented("metaclasses", position));
+            }
+            for base in arguments.args {
+                bases.push(self.parse_expression(base)?);
+            }
         }
 
         let name = self.identifier(&class.name.id, class.name.range);
@@ -1027,6 +1030,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             name,
             body,
             members,
+            bases,
             decorators,
             position,
         })

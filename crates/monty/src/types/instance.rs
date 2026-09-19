@@ -1,6 +1,7 @@
 use std::{borrow::Cow, fmt::Write};
 
 use monty_types::MontyUuid;
+use smallvec::SmallVec;
 
 use super::{Dict, LazyHeapSet, PyTrait, Type, attribute_name_value};
 use crate::{
@@ -772,10 +773,12 @@ pub(crate) fn class_defines_not_none(class_id: HeapId, dunder: &str, vm: &VM<'_>
 /// `None` member apart from an absent one — CPython's `has_explicit_hash` does
 /// — want this rather than either check.
 pub(crate) fn class_dunder<'v>(class_id: HeapId, dunder: &str, vm: &'v VM<'_>) -> Option<&'v Value> {
-    match vm.heap.get(class_id) {
-        HeapData::Class(class) => class.namespace().get_by_str(dunder, vm.heap, vm.interns),
-        _ => None,
-    }
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| match vm.heap.get(id) {
+            HeapData::Class(class) => class.namespace().get_by_str(dunder, vm.heap, vm.interns),
+            _ => None,
+        })
 }
 
 /// Returns the `HeapId` of `self_id`'s class object.
@@ -848,14 +851,46 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
 pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
-    match vm.heap.get(class_id) {
-        HeapData::Class(class) => class
-            .namespace()
-            .get_by_str(name, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap)),
-        _ => None,
-    }
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| match vm.heap.get(id) {
+            HeapData::Class(class) => class
+                .namespace()
+                .get_by_str(name, vm.heap, vm.interns)
+                .map(|v| v.clone_with_heap(vm.heap)),
+            _ => None,
+        })
 }
+
+/// A class and its bases, derived class first.
+///
+/// The single point every member, dunder, `isinstance` and `issubclass` lookup
+/// walks, so none of them can disagree about what a class inherits. The chain
+/// is acyclic by construction: a base must already exist when the class naming
+/// it is created, so it can never reach forward to the class itself. The depth
+/// cap is a belt-and-braces bound against a chain rebuilt from crafted snapshot
+/// data.
+pub(crate) fn class_chain(class_id: HeapId, vm: &VM<'_>) -> SmallVec<[HeapId; 4]> {
+    let mut chain = SmallVec::new();
+    let mut next = Some(class_id);
+    while let Some(id) = next {
+        if chain.len() >= MAX_CLASS_CHAIN {
+            break;
+        }
+        chain.push(id);
+        next = match vm.heap.get(id) {
+            HeapData::Class(class) => class.bases().first().copied(),
+            _ => None,
+        };
+    }
+    chain
+}
+
+/// How far a class chain is walked before it is treated as broken.
+///
+/// Unreachable from Python: a chain is built one base at a time from classes
+/// that already exist, so it is as deep as the source says and no deeper.
+const MAX_CLASS_CHAIN: usize = 100;
 
 /// Returns a class object's name for error messages / repr.
 ///

@@ -51,9 +51,11 @@ impl Default for DataclassOptions {
 /// work via reference identity, so there is no separate type-id counter.
 ///
 /// Calling a class (`Foo(...)`) constructs an [`Instance`](super::Instance); see
-/// `instantiate_class` in the VM's call module. Inheritance is not yet supported,
-/// but a future `bases: Vec<HeapId>` field would slot in here without disturbing
-/// the rest of the design.
+/// `instantiate_class` in the VM's call module.
+///
+/// Inheritance is single: `bases` holds at most one class, and every lookup
+/// walks that chain derived-first. There is no C3 linearization here because
+/// there is nothing to linearize.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Class {
     /// Class name (e.g. `Foo`), used for `repr` and `__name__`. Interned for
@@ -63,6 +65,11 @@ pub(crate) struct Class {
     name: EitherStr,
     /// Members: method name / class-variable name -> value.
     namespace: Dict,
+    /// The base class, as an OWNED reference, or empty for a root class. A
+    /// `Vec` rather than an `Option` because the field is what `__bases__`
+    /// would report and what a future second base would extend; both
+    /// `py_dec_ref_ids` and the GC child walk must report every id in it.
+    bases: Vec<HeapId>,
     /// The `@dataclass(...)` options this class was decorated with, left at
     /// CPython's defaults for a class that was not. Stands in for the dunders
     /// CPython generates and Monty cannot yet install: baked in at decoration
@@ -80,13 +87,20 @@ impl Class {
     /// Dataclass options start at their defaults; `@dataclass` sets them with
     /// [`HeapRead::set_dataclass_options`] once it has built the class.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>) -> Self {
         Self {
             name,
             namespace,
+            bases,
             options: DataclassOptions::default(),
             uuid: None,
         }
+    }
+
+    /// The base classes, as borrowed ids. Owned by this class.
+    #[must_use]
+    pub fn bases(&self) -> &[HeapId] {
+        &self.bases
     }
 
     /// Boundary identity of the class, generated and stored on first use so
@@ -260,5 +274,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
 impl HeapItem for Class {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         self.namespace.py_dec_ref_ids(stack);
+        // Mirrors the GC child walk in `heap::for_each_child_id`: a class owns
+        // a reference on each of its bases.
+        stack.extend(self.bases.iter().copied());
     }
 }
