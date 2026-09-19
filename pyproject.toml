@@ -95,6 +95,7 @@ known-first-party = ["pydantic_monty"]
 ]
 "crates/monty/test_cases/*.py" = [
     "B018", # useless expression - a bare read is the test when the read itself must raise
+    "BLE001", # blind `except Exception` - the test is that a broad handler catches the narrow raise
     "E722", # bare except - needed for testing try/except with bare except clauses
     "E711", # Comparison to `None` should be `cond is None`
     "E712", # Comparison to True/False - needed for testing boolean behavior

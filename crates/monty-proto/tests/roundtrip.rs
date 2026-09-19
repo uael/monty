@@ -441,6 +441,7 @@ fn unicode_exception(encoding: String, object: Vec<u8>, start: u64, end: u64, re
                 reason,
             })),
         }),
+        user_type: None,
     }
 }
 
@@ -522,6 +523,7 @@ fn json_exception(msg: String, doc: Option<String>, pos: u64, lineno: u64, colno
                 colno,
             })),
         }),
+        user_type: None,
     }
 }
 
@@ -754,6 +756,7 @@ fn name_lookup_results_convert() {
             message: None,
             traceback: vec![].into(),
             data: None,
+            user_type: None,
         })),
     };
     assert!(matches!(

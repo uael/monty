@@ -70,6 +70,12 @@ pub(crate) struct Class {
     /// would report and what a future second base would extend; both
     /// `py_dec_ref_ids` and the GC child walk must report every id in it.
     bases: Vec<HeapId>,
+    /// The builtin exception this class descends from, resolved once at
+    /// creation because the chain cannot change afterwards. `Some` is what
+    /// makes an instance of this class raisable, and the type every existing
+    /// handler, message and host binding keys off; the class's own name is
+    /// carried alongside it so a traceback still reads `Refused: why`.
+    builtin_exc: Option<ExcType>,
     /// The `@dataclass(...)` options this class was decorated with, left at
     /// CPython's defaults for a class that was not. Stands in for the dunders
     /// CPython generates and Monty cannot yet install: baked in at decoration
@@ -87,14 +93,22 @@ impl Class {
     /// Dataclass options start at their defaults; `@dataclass` sets them with
     /// [`HeapRead::set_dataclass_options`] once it has built the class.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, builtin_exc: Option<ExcType>) -> Self {
         Self {
             name,
             namespace,
             bases,
+            builtin_exc,
             options: DataclassOptions::default(),
             uuid: None,
         }
+    }
+
+    /// The builtin exception this class descends from, or `None` for a class
+    /// whose instances are not exceptions.
+    #[must_use]
+    pub fn builtin_exc(&self) -> Option<ExcType> {
+        self.builtin_exc
     }
 
     /// The base classes, as borrowed ids. Owned by this class.

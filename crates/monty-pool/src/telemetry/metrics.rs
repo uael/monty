@@ -1191,6 +1191,7 @@ mod tests {
                 message: None,
                 traceback: vec![].into(),
                 data: None,
+                user_type: None,
             }),
             pb::ext_function_result::Kind::ReturnValue(0),
         ];
@@ -1331,6 +1332,7 @@ mod tests {
                 message: None,
                 traceback: vec![].into(),
                 data: None,
+                user_type: None,
             }),
         })));
 
@@ -1488,6 +1490,7 @@ mod tests {
                 message: None,
                 traceback: vec![].into(),
                 data: None,
+                user_type: None,
             }),
         })));
 

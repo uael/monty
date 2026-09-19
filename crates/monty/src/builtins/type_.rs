@@ -112,7 +112,7 @@ fn create_class(
         return Err(ExcType::type_error_bad_arg_pos("type.__new__", 1, "str", got));
     };
 
-    let base_ids = resolve_bases(bases, vm)?;
+    let (base_ids, builtin_exc) = resolve_bases(bases, vm)?;
 
     let Value::Ref(ns_id) = namespace else {
         let got = namespace.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
@@ -166,17 +166,19 @@ fn create_class(
         class_name,
         namespace_dict,
         base_ids,
+        builtin_exc,
     ))));
     Ok(Value::Ref(class_id))
 }
 
-/// Validates a `type()` bases tuple and answers the base classes it names.
+/// Validates a `type()` bases tuple, answering the base classes it names and
+/// the builtin exception the new class descends from, if any.
 ///
 /// Inheritance is single: a second base would need a linearization Monty does
 /// not have, so it is refused rather than silently resolved in the order
-/// written. A builtin type is refused too, for want of anything to inherit:
-/// a `Class` holds a namespace, and `str` has none.
-fn resolve_bases(bases: &Value, vm: &mut VM<'_>) -> RunResult<Vec<HeapId>> {
+/// written. A builtin type other than an exception is refused too, for want of
+/// anything to inherit: a `Class` holds a namespace, and `str` has none.
+fn resolve_bases(bases: &Value, vm: &mut VM<'_>) -> RunResult<(Vec<HeapId>, Option<ExcType>)> {
     let Value::Ref(id) = bases else {
         let got = bases.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
         return Err(ExcType::type_error_bad_arg_pos("type.__new__", 2, "tuple", got));
@@ -194,7 +196,7 @@ fn resolve_bases(bases: &Value, vm: &mut VM<'_>) -> RunResult<Vec<HeapId>> {
             Value::Ref(base_id) if matches!(vm.heap.get(*base_id), HeapData::Class(_)) => {
                 BaseKind::SandboxClass(*base_id)
             }
-            Value::Builtin(Builtins::ExcType(_)) => BaseKind::BuiltinException,
+            Value::Builtin(Builtins::ExcType(exc)) => BaseKind::BuiltinException(*exc),
             _ => BaseKind::Other,
         })
         .collect();
@@ -205,20 +207,24 @@ fn resolve_bases(bases: &Value, vm: &mut VM<'_>) -> RunResult<Vec<HeapId>> {
         )
         .into());
     }
-    bases
-        .into_iter()
-        .map(|base| match base {
-            BaseKind::SandboxClass(id) => Ok(id),
-            BaseKind::BuiltinException => Err(ExcType::not_implemented(
-                "a class whose base is a builtin exception; only a class defined in the sandbox \
-                 can be inherited from",
-            )
-            .into()),
-            BaseKind::Other => Err(ExcType::type_error(
-                "a class can only inherit from a class defined in the sandbox",
-            )),
-        })
-        .collect()
+    match bases.into_iter().next() {
+        // A sandbox base contributes its own reference, and passes on whatever
+        // builtin exception it descends from.
+        Some(BaseKind::SandboxClass(id)) => {
+            let inherited = match vm.heap.get(id) {
+                HeapData::Class(class) => class.builtin_exc(),
+                _ => None,
+            };
+            Ok((vec![id], inherited))
+        }
+        // A builtin exception is not a heap object, so there is no reference to
+        // take: the class records which one it descends from instead.
+        Some(BaseKind::BuiltinException(exc)) => Ok((Vec::new(), Some(exc))),
+        Some(BaseKind::Other) => Err(ExcType::type_error(
+            "a class can only inherit from a class defined in the sandbox or a builtin exception",
+        )),
+        None => Ok((Vec::new(), None)),
+    }
 }
 
 /// What a value in a `type()` bases tuple turned out to be.
@@ -228,8 +234,9 @@ fn resolve_bases(bases: &Value, vm: &mut VM<'_>) -> RunResult<Vec<HeapId>> {
 enum BaseKind {
     /// A `class` statement's class object: the one base Monty accepts.
     SandboxClass(HeapId),
-    /// A builtin exception type, which a later change will accept.
-    BuiltinException,
+    /// A builtin exception type: the class descends from it, but there is no
+    /// heap object to hold a reference on.
+    BuiltinException(ExcType),
     /// Anything else.
     Other,
 }

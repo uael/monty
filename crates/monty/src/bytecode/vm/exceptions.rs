@@ -10,7 +10,12 @@ use crate::{
     expressions::CmpOperator,
     heap::{DropGuard, HeapData},
     intern::{StaticStrings, StringId},
-    types::{LazyHeapSet, PyTrait, Type},
+    types::{
+        LazyHeapSet, PyTrait, Type,
+        instance::{
+            class_builtin_exc, class_chain, class_name, exception_message, instance_builtin_exc, instance_class,
+        },
+    },
     value::Value,
 };
 
@@ -77,7 +82,11 @@ impl VM<'_> {
     /// `raise`/`Reraise` paths reuse it as the raised object itself.
     /// The `is_raise` flag indicates if this is from a `raise` statement (hide caret).
     pub(crate) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
+        // An instance of a sandbox exception class carries its own name and
+        // message; read before the match so the heap borrow below is free.
+        let sandbox_exc = self.sandbox_exception(exc_value);
         let simple_exc = match exc_value {
+            _ if sandbox_exc.is_some() => sandbox_exc.expect("checked"),
             // Exception instance on heap
             Value::Ref(heap_id) => {
                 if let HeapData::Exception(exc) = self.heap.get(*heap_id) {
@@ -107,6 +116,27 @@ impl VM<'_> {
             snippet_frame: None,
             hide_caret: false,
         })
+    }
+
+    /// A `SimpleException` for an instance of a sandbox exception class, or
+    /// `None` for anything else.
+    ///
+    /// The `ExcType` is the builtin ancestor the class resolved at creation,
+    /// which is what every handler, message and host binding keys off; the
+    /// class's own name rides alongside it so a traceback reads `Refused: why`
+    /// rather than `Exception: why`.
+    fn sandbox_exception(&mut self, exc_value: &Value) -> Option<SimpleException> {
+        let exc_type = instance_builtin_exc(exc_value, self)?;
+        let Value::Ref(id) = exc_value else {
+            unreachable!("instance_builtin_exc answered for a heap instance")
+        };
+        let id = *id;
+        let name = class_name(instance_class(id, self), self.heap, self.interns).into_owned();
+        // Rendered from `args` rather than through a user `__str__`: a raise
+        // cannot run sandbox code while it is unwinding. A class that defines
+        // `__str__` still uses it for `str(exc)`; see `limitations/exceptions.md`.
+        let message = exception_message(id, self).ok().filter(|m| !m.is_empty());
+        Some(SimpleException::new(exc_type, message).with_user_type(name))
     }
 
     /// Runs fused bare `assert test`.
@@ -460,12 +490,19 @@ impl VM<'_> {
     /// earlier element already matched (e.g. `except (TypeError, (ValueError,))`
     /// raising `TypeError` still raises the `TypeError` about catching classes).
     pub(super) fn check_exc_match(&self, exception: &Value, exc_type: &Value) -> Result<bool, RunError> {
-        let exc_type_enum = exception.py_type(self);
         match exc_type {
-            // Single exception class.
-            Value::Builtin(Builtins::ExcType(handler_type)) => {
-                Ok(Self::exc_matches_handler(exc_type_enum, *handler_type))
+            // A sandbox exception class: the raised value matches when its own
+            // class chain reaches this one.
+            Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Class(_)) => {
+                if class_builtin_exc(*id, self).is_none() {
+                    return Err(ExcType::except_invalid_type_error());
+                }
+                Ok(matches!(exception, Value::Ref(exc_id)
+                    if matches!(self.heap.get(*exc_id), HeapData::Instance(inst)
+                        if class_chain(inst.class(), self).contains(id))))
             }
+            // Single exception class.
+            Value::Builtin(Builtins::ExcType(handler_type)) => Ok(self.value_matches_handler(exception, *handler_type)),
             // Flat tuple of exception classes. CPython does not descend into
             // nested tuples in this position, so neither do we.
             Value::Ref(id) => {
@@ -474,7 +511,20 @@ impl VM<'_> {
                     for v in tuple.as_slice() {
                         match v {
                             Value::Builtin(Builtins::ExcType(handler_type)) => {
-                                if !matched && Self::exc_matches_handler(exc_type_enum, *handler_type) {
+                                if !matched && self.value_matches_handler(exception, *handler_type) {
+                                    matched = true;
+                                }
+                            }
+                            // A sandbox exception class in the tuple.
+                            Value::Ref(class_id)
+                                if matches!(self.heap.get(*class_id), HeapData::Class(_))
+                                    && class_builtin_exc(*class_id, self).is_some() =>
+                            {
+                                if !matched
+                                    && matches!(exception, Value::Ref(exc_id)
+                                        if matches!(self.heap.get(*exc_id), HeapData::Instance(inst)
+                                            if class_chain(inst.class(), self).contains(class_id)))
+                                {
                                     matched = true;
                                 }
                             }
@@ -503,6 +553,18 @@ impl VM<'_> {
     /// exception that is a subclass of the handler's class.
     fn exc_matches_handler(exc_type_enum: Type, handler_type: ExcType) -> bool {
         matches!(exc_type_enum, Type::Exception(et) if et.is_subclass_of(handler_type))
+    }
+
+    /// Whether a raised value matches a builtin exception class, whichever of
+    /// the two shapes it has.
+    ///
+    /// A sandbox exception instance matches through the builtin ancestor its
+    /// class resolved at creation.
+    fn value_matches_handler(&self, exception: &Value, handler_type: ExcType) -> bool {
+        match instance_builtin_exc(exception, self) {
+            Some(ancestor) => ancestor.is_subclass_of(handler_type),
+            None => Self::exc_matches_handler(exception.py_type(self), handler_type),
+        }
     }
 }
 

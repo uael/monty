@@ -2362,6 +2362,16 @@ impl ExcTypeExt for ExcType {
 pub(crate) struct SimpleException {
     exc_type: ExcType,
     arg: Option<String>,
+    /// The name of the sandbox class this was raised from, when it was raised
+    /// from one. `exc_type` stays that class's builtin ancestor, so every
+    /// handler and message keeps working; this only changes what a traceback
+    /// and a `repr()` call the exception.
+    ///
+    /// Boxed because `RunError` carries this type through every fallible
+    /// interpreter call, and clippy's `result_large_err` is what holds that
+    /// size down.
+    #[serde(default)]
+    user_type: Option<Box<str>>,
     /// Structured payload (e.g. unicode-error constructor fields), carried
     /// through catch/re-raise so it reaches the public `MontyException` when
     /// the exception escapes the sandbox. No `skip_serializing_if`:
@@ -2380,6 +2390,7 @@ impl From<MontyException> for SimpleException {
     fn from(mut exc: MontyException) -> Self {
         Self {
             exc_type: exc.exc_type(),
+            user_type: exc.user_type().map(|name| name.to_owned().into_boxed_str()),
             data: exc.take_data(),
             arg: exc.into_message(),
         }
@@ -2393,8 +2404,16 @@ impl SimpleException {
         Self {
             exc_type,
             arg,
+            user_type: None,
             data: ExcData::None,
         }
+    }
+
+    /// Names the sandbox class this exception was raised from.
+    #[must_use]
+    pub fn with_user_type(mut self, name: String) -> Self {
+        self.user_type = Some(name.into_boxed_str());
+        self
     }
 
     /// Creates a new exception with the given type and argument message.
@@ -2403,6 +2422,7 @@ impl SimpleException {
         Self {
             exc_type,
             arg: Some(arg.to_string()),
+            user_type: None,
             data: ExcData::None,
         }
     }
@@ -2413,6 +2433,7 @@ impl SimpleException {
         Self {
             exc_type,
             arg: None,
+            user_type: None,
             data: ExcData::None,
         }
     }
@@ -2455,7 +2476,7 @@ impl<'h> HeapRead<'h, SimpleException> {
 impl SimpleException {
     /// Returns the exception formatted as Python would repr it.
     pub fn py_repr_fmt(&self, f: &mut impl Write) -> fmt::Result {
-        let type_str: &'static str = self.exc_type.into();
+        let type_str: &str = self.user_type.as_deref().unwrap_or_else(|| self.exc_type.into());
         write!(f, "{type_str}(")?;
 
         if let Some(arg) = &self.arg {
@@ -2654,7 +2675,11 @@ impl ExceptionRaise {
             traceback.push(*frame);
         }
 
-        MontyException::with_traceback(self.exc.exc_type, self.exc.arg, traceback).with_data(self.exc.data)
+        let exc = MontyException::with_traceback(self.exc.exc_type, self.exc.arg, traceback).with_data(self.exc.data);
+        match self.exc.user_type {
+            Some(name) => exc.with_user_type(name.into_string()),
+            None => exc,
+        }
     }
 }
 

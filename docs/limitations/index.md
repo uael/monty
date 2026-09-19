@@ -24,7 +24,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - Decorators on functions, classes and methods
 - Simple classes: instance methods, `__init__`, `__repr__`/`__str__`, `__eq__`/`__hash__`, `__iter__`/`__next__`,
     `__contains__`, `__index__`, class variables, read-only `@property`, and single inheritance from another
-    sandbox class
+    sandbox class or a builtin exception
 - `@dataclass`, with the `eq=` and `frozen=` options only (every other option raises `NotImplementedError`, and
     there is no `field()` or `asdict()`), plus host class instances passed in and out (and host classes the
     sandbox may instantiate when granted)
@@ -56,8 +56,6 @@ They exist for development and for agents debugging code that runs on Monty; mos
 
 **Missing in other ways:**
 
-- User-defined exception classes.
-    The built-in exception types are a fixed set, and a class cannot inherit from one, so you cannot add to it.
 - Function attributes.
     `fn.__name__`, `fn.__doc__` and friends raise `AttributeError`, and new attributes cannot be set — so
     `functools.wraps`-style metadata copying and registries keyed on `fn.__name__` have no equivalent.

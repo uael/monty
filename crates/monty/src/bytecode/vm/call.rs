@@ -24,11 +24,12 @@ use crate::{
     os_dispatch::{PendingEffect, release_pending_effect},
     resource_checks::check_estimated_size,
     types::{
-        Dict, Instance, PyTrait, Type,
+        Dict, Instance, PyTrait, Type, allocate_tuple,
         bytes::call_bytes_method,
         generator::Generator,
-        instance::{class_member, class_name},
+        instance::{class_builtin_exc, class_member, class_name},
         str::call_str_method,
+        tuple::TupleVec,
     },
     value::{EitherStr, VALUE_SIZE, Value},
 };
@@ -1212,6 +1213,10 @@ impl<'h> VM<'h> {
                 };
                 dataclasses::dataclass_init(self, &class, Value::Ref(instance_id), args)
             }
+            // An exception class with no `__init__` binds its positional
+            // arguments as `args`, which is what `BaseException.__init__` does
+            // and what `str(exc)` and `exc.args` read back.
+            None if class_builtin_exc(class_id, self).is_some() => self.bind_exception_args(instance_id, args),
             None if matches!(args, ArgValues::Empty) => Ok(CallResult::Value(Value::Ref(instance_id))),
             None => {
                 args.drop_with(self);
@@ -1273,6 +1278,36 @@ impl<'h> VM<'h> {
                 }
             }
         }
+    }
+
+    /// Binds `args` on a freshly allocated exception instance, as
+    /// `BaseException.__init__` does, and answers the instance.
+    ///
+    /// Keywords are refused with CPython's own wording: `BaseException` takes
+    /// none, and a class that wants them writes its own `__init__`.
+    fn bind_exception_args(&mut self, instance_id: HeapId, args: ArgValues) -> Result<CallResult, RunError> {
+        let class_id = match self.heap.get(instance_id) {
+            HeapData::Instance(inst) => inst.class(),
+            _ => unreachable!("freshly allocated instance"),
+        };
+        let name = class_name(class_id, self.heap, self.interns).into_owned();
+        let positional = match args.into_pos_only(&name, self.heap) {
+            Ok(positional) => positional,
+            Err(e) => {
+                Value::Ref(instance_id).drop_with(self);
+                return Err(e);
+            }
+        };
+        let positional: TupleVec = positional.collect();
+        let tuple = allocate_tuple(positional, self.heap);
+        let name = Value::InternString(self.interns.intern_static(StaticStrings::Args));
+        let HeapReadOutput::Instance(mut instance) = self.heap.read(instance_id) else {
+            unreachable!("freshly allocated instance")
+        };
+        let replaced = instance.set_attr_unchecked(name, tuple, self)?;
+        replaced.drop_with(self);
+        drop(instance);
+        Ok(CallResult::Value(Value::Ref(instance_id)))
     }
 
     /// Whether `value` is a plain Python function object (`def`, closure, or

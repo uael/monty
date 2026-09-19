@@ -7,7 +7,10 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{HeapData, HeapId},
-    types::{Type, instance::class_chain},
+    types::{
+        Type,
+        instance::{class_builtin_exc, class_chain},
+    },
     value::Value,
 };
 
@@ -43,9 +46,13 @@ fn subject_chain(cls: &Value, vm: &VM<'_>) -> Option<Vec<HeapId>> {
 fn issubclass_check(cls: &Value, chain: &[HeapId], classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match classinfo {
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => Ok(chain.contains(id)),
-        Value::Builtin(Builtins::ExcType(handler)) => {
-            Ok(matches!(cls, Value::Builtin(Builtins::ExcType(exc)) if exc.is_subclass_of(*handler)))
-        }
+        // A sandbox exception class descends from the builtin its chain
+        // resolved at creation; a builtin exception type from itself.
+        Value::Builtin(Builtins::ExcType(handler)) => Ok(match cls {
+            Value::Ref(id) => matches!(class_builtin_exc(*id, vm), Some(exc) if exc.is_subclass_of(*handler)),
+            Value::Builtin(Builtins::ExcType(exc)) => exc.is_subclass_of(*handler),
+            _ => false,
+        }),
         Value::Builtin(Builtins::Type(wanted)) => {
             Ok(matches!(cls, Value::Builtin(Builtins::Type(t)) if is_type_subclass(*t, *wanted)))
         }

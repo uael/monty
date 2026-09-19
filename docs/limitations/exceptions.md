@@ -69,13 +69,32 @@ tracebacks are not preserved across `raise from`.
 
 ## Custom subclasses
 
-A class may inherit from another sandbox class, but not from a builtin
-exception type: `class Foo(Exception):` raises
-`NotImplementedError: ... a class whose base is a builtin exception ...`, so
-there is no way to create a new exception class inside the sandbox. Raising a
-plain user class instance (`raise MyClass()`) fails with
-`TypeError: exceptions must derive from BaseException`. Define custom exception
-types on the host side if needed, or use the built-in subclass that best fits.
+`class Refused(Exception):` works, and so does a subclass of that. An instance
+is raisable and catchable, `args` follows `BaseException`, and the traceback
+names the sandbox class. Raising an instance of a class that does *not* descend
+from a builtin exception still fails with
+`TypeError: exceptions must derive from BaseException`.
+
+Divergences:
+
+- **The type a host sees is the builtin ancestor.** A `MontyException` carries
+    the class name alongside `exc_type`, which stays the nearest builtin the
+    class descends from (`Exception` for `class Refused(Exception)`). A host
+    that matches on the type keeps matching; one that wants the sandbox name
+    reads it from the exception.
+- **A custom `__str__` does not change the traceback.** The message a raise
+    records is rendered from `args`, as `BaseException.__str__` does, because a
+    raise cannot run sandbox code while it is unwinding. `str(exc)` inside the
+    sandbox still dispatches `__str__`.
+- **`__cause__`, `__context__` and `__suppress_context__` do not exist**, on a
+    sandbox exception class as on a builtin one, so `raise X from Y` records
+    nothing.
+- **`__traceback__` is absent**, so an exception cannot be re-raised with a
+    traceback it carries.
+- **`BaseException.__init__` is not callable.** A class that writes its own
+    `__init__` and wants `args` assigns `self.args` itself; there is no
+    `super().__init__(...)` to call, since `super()` does not exist (see
+    [classes.md](classes.md)).
 
 ## Control flow in `finally`
 

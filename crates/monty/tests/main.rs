@@ -373,7 +373,7 @@ fn dynamic_type_with_builtin_base_raises_type_error() {
     let err = ex.run_no_limits(vec![]).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "Traceback (most recent call last):\n  File \"test.py\", line 1, in <module>\n    type('A', (int,), {})\n    ~~~~~~~~~~~~~~~~~~~~~\nTypeError: a class can only inherit from a class defined in the sandbox"
+        "Traceback (most recent call last):\n  File \"test.py\", line 1, in <module>\n    type('A', (int,), {})\n    ~~~~~~~~~~~~~~~~~~~~~\nTypeError: a class can only inherit from a class defined in the sandbox or a builtin exception"
     );
 }
 

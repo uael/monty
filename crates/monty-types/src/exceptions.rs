@@ -20,6 +20,12 @@ pub struct MontyException {
     exc_type: ExcType,
     /// Optional exception message explaining what went wrong
     message: Option<String>,
+    /// The name of the sandbox class the exception was raised from, when it
+    /// was raised from one. `exc_type` is that class's nearest builtin
+    /// ancestor, which is what a host binding reconstructs; this is what the
+    /// traceback and `repr()` call it.
+    #[serde(default)]
+    user_type: Option<String>,
     /// Stack trace of the exception, first is the outermost frame shown first in the traceback
     traceback: Vec<StackFrame>,
     /// Structured payload for exception types that carry more than a message.
@@ -73,10 +79,11 @@ impl fmt::Display for MontyException {
             }
         }
 
+        let type_name = self.type_name();
         if let Some(msg) = &self.message {
-            write!(f, "{}: {}", self.exc_type, msg)
+            write!(f, "{type_name}: {msg}")
         } else {
-            write!(f, "{}", self.exc_type)
+            write!(f, "{type_name}")
         }
     }
 }
@@ -92,9 +99,34 @@ impl MontyException {
         Self {
             exc_type,
             message,
+            user_type: None,
             traceback: vec![],
             data: ExcData::None,
         }
+    }
+
+    /// Names the sandbox class this exception was raised from.
+    ///
+    /// The `exc_type` stays that class's nearest builtin ancestor, so a host
+    /// that matches on the type keeps matching; the name is what the traceback,
+    /// `summary()` and `py_repr()` report.
+    #[must_use]
+    pub fn with_user_type(mut self, name: String) -> Self {
+        self.user_type = Some(name);
+        self
+    }
+
+    /// The sandbox class this exception was raised from, if any.
+    #[must_use]
+    pub fn user_type(&self) -> Option<&str> {
+        self.user_type.as_deref()
+    }
+
+    /// What to call this exception: the sandbox class it was raised from, or
+    /// its builtin type.
+    #[must_use]
+    pub fn type_name(&self) -> &str {
+        self.user_type.as_deref().unwrap_or_else(|| self.exc_type.into())
     }
 
     /// Creates an exception with an explicit traceback.
@@ -109,6 +141,7 @@ impl MontyException {
         Self {
             exc_type,
             message,
+            user_type: None,
             traceback,
             data: ExcData::None,
         }
@@ -166,6 +199,7 @@ impl MontyException {
         Self {
             exc_type: ExcType::RuntimeError,
             message: Some(err.to_string()),
+            user_type: None,
             traceback: vec![],
             data: ExcData::None,
         }
@@ -207,10 +241,11 @@ impl MontyException {
     /// If there's no message, just returns the exception type name.
     #[must_use]
     pub fn summary(&self) -> String {
+        let type_name = self.type_name();
         if let Some(msg) = &self.message {
-            format!("{}: {}", self.exc_type, msg)
+            format!("{type_name}: {msg}")
         } else {
-            self.exc_type.to_string()
+            type_name.to_owned()
         }
     }
 
@@ -220,7 +255,7 @@ impl MontyException {
     /// Uses appropriate quoting for messages containing quotes.
     #[must_use]
     pub fn py_repr(&self) -> String {
-        let type_str: &'static str = self.exc_type.into();
+        let type_str = self.type_name();
         if let Some(msg) = &self.message {
             format!("{}({})", type_str, StringRepr(msg))
         } else {
