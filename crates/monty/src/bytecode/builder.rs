@@ -46,6 +46,11 @@ pub struct CodeBuilder {
     /// Populated during compilation to enable proper NameError messages
     /// when accessing undefined local variables.
     local_names: Vec<Option<StringId>>,
+
+    /// Set when [`Opcode::Yield`] is emitted, making the built [`Code`] a
+    /// generator body. Raised here rather than by the compiler so it always
+    /// describes the instructions actually emitted.
+    is_generator: bool,
 }
 
 impl CodeBuilder {
@@ -447,6 +452,7 @@ impl CodeBuilder {
             self.location_table,
             self.exception_table,
             local_names,
+            self.is_generator,
         )
     }
 
@@ -507,6 +513,7 @@ impl CodeBuilder {
     /// Unconditional terminators enter dead code, where emission is a no-op.
     /// Jump helpers use this path to keep stack-depth tracking centralized.
     fn emit_with_operand(&mut self, op: Opcode, operand: Operand<'_>) -> Result<(), CompileError> {
+        self.is_generator |= op == Opcode::Yield;
         if self.is_dead() {
             return Ok(());
         }

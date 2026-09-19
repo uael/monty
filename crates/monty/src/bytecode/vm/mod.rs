@@ -51,6 +51,7 @@ use crate::{
     types::{
         Dict, LongInt, PyTrait, SessionRandom, allocate_interpolation, allocate_template, allocate_type_alias,
         file::{apply_buffer_store, apply_open_name, apply_write_position},
+        generator::GeneratorState,
         match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
         random::SEED_BYTES,
         str::allocate_string,
@@ -400,6 +401,15 @@ pub struct CallFrame<'code> {
     /// `cleanup_frame_state`, or taken by `serialize` for a snapshot.
     namespace: Option<Box<FrameNamespace>>,
 
+    /// The generator whose body this frame runs, borrowed for as long as the
+    /// frame is on the stack.
+    ///
+    /// `Yield` reads it to know where to lift the frame back into, and
+    /// `ReturnValue` reads it to mark the generator done. `None` for every
+    /// ordinary frame. Borrowed rather than owned: the resumer holds the
+    /// reference that keeps the generator alive across the resume.
+    generator: Option<HeapId>,
+
     /// Whether this frame is a class `__init__` running for `Foo(...)`.
     ///
     /// When `true`, the `ReturnValue` handler discards the frame's return value
@@ -438,6 +448,7 @@ impl<'code> CallFrame<'code> {
             is_parked: false,
             namespace: None,
             is_initializer: false,
+            generator: None,
         }
     }
 
@@ -493,6 +504,7 @@ impl<'code> CallFrame<'code> {
             should_return: false,
             is_parked: false,
             namespace,
+            generator: None,
             is_initializer: false,
         }
     }
@@ -630,6 +642,10 @@ pub struct SerializedFrame {
     #[serde(default)]
     is_initializer: bool,
 
+    /// The generator this frame runs, if any (see `CallFrame.generator`).
+    #[serde(default)]
+    generator: Option<HeapId>,
+
     /// Frame namespace, with ownership of its dict references (see
     /// `CallFrame.namespace`).
     namespace: Option<Box<FrameNamespace>>,
@@ -652,6 +668,7 @@ impl CallFrame<'_> {
             exception_stack_base: self.exception_stack_base(),
             call_offset: self.call_offset,
             is_initializer: self.is_initializer,
+            generator: self.generator,
             namespace: mem::take(&mut self.namespace),
         }
     }
@@ -974,6 +991,7 @@ impl<'h> VM<'h> {
                     is_parked: false,
                     namespace: sf.namespace,
                     is_initializer: sf.is_initializer,
+                    generator: sf.generator,
                 }
             })
             .collect();
@@ -1969,7 +1987,35 @@ impl<'h> VM<'h> {
                     }
                 }
                 // Return
+                Opcode::Yield => {
+                    let value = self.pop();
+                    let Some(gen_id) = self.current_frame.generator else {
+                        value.drop_with(self);
+                        return Err(RunError::internal("Yield outside a generator frame"));
+                    };
+                    if self.suspend_generator(gen_id, value) {
+                        // Driven by a nested `run()`, which takes the value the
+                        // suspend left on the resumer's stack.
+                        return Ok(FrameExit::Return(self.pop()));
+                    }
+                }
+
                 Opcode::ReturnValue => {
+                    // A generator body that returns is exhausted, and its
+                    // resumer hears `StopIteration` rather than the value.
+                    if let Some(gen_id) = self.current_frame.generator {
+                        let value = self.pop();
+                        let stop = self.pop_frame();
+                        self.finish_generator(gen_id);
+                        value.drop_with(self);
+                        let exhausted = ExcType::stop_iteration();
+                        if stop {
+                            // Driven by a nested `run()`, whose boundary this
+                            // exception must not unwind past.
+                            return Err(exhausted);
+                        }
+                        catch!(self, exhausted);
+                    }
                     let value = self.pop();
                     if self.suspended_frames.is_empty() {
                         // Last frame - check if this is main task or spawned task
@@ -2386,6 +2432,151 @@ impl<'h> VM<'h> {
             self.decr_recursion();
         }
         should_return
+    }
+
+    // ====================================================================
+    // Generators
+    // ====================================================================
+
+    /// Lifts the running generator's frame off the stack and back into its
+    /// object, leaving `value` for whoever resumed it.
+    ///
+    /// The mirror of [`resume_generator`](Self::resume_generator), and the
+    /// reason a generator needs no storage of its own while it runs: between
+    /// those two calls its frame is an ordinary frame, so tracebacks, the
+    /// exception table and the recursion budget all see it as one.
+    ///
+    /// Returns whether the popped frame asked the run loop to stop, which is
+    /// how a generator driven by a nested `run()` hands control back.
+    fn suspend_generator(&mut self, gen_id: HeapId, value: Value) -> bool {
+        let base = self.current_frame.stack_base();
+        let exception_base = self.current_frame.exception_stack_base();
+        let ip = self.current_frame.ip;
+        // Taken before popping, so the frame teardown finds nothing of the
+        // generator's left to release.
+        let saved: Vec<Value> = self.stack.drain(base..).collect();
+        let saved_exceptions: Vec<Value> = self.exception_stack.drain(exception_base..).collect();
+        let stop = self.pop_frame();
+        let HeapReadOutput::Generator(mut generator) = self.heap.read(gen_id) else {
+            unreachable!("a generator frame names its generator")
+        };
+        let generator = generator.get_mut(self.heap);
+        generator.ip = ip;
+        generator.stack = saved;
+        generator.exception_stack = saved_exceptions;
+        generator.state = GeneratorState::Suspended;
+        self.push(value);
+        stop
+    }
+
+    /// Puts a generator's frame back on the stack and leaves `sent` on top of
+    /// it, so the `yield` it stopped at evaluates to that value.
+    ///
+    /// Returns [`CallResult::FramePushed`]: the generator runs on the VM's own
+    /// loop, and its next `yield` lands a value on the resumer's operand stack
+    /// exactly where a call's return value would.
+    ///
+    /// # Errors
+    /// `ValueError` when the generator is already running, `StopIteration` when
+    /// it has finished, and `TypeError` for a value sent to one that has not
+    /// started — all three as CPython reports them.
+    pub(crate) fn resume_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<CallResult> {
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("resume_generator called off a generator")
+        };
+        let state = generator.state;
+        let func_id = generator.func_id;
+        match state {
+            GeneratorState::Running => {
+                sent.drop_with(self);
+                return Err(ExcType::value_error_generator_running());
+            }
+            GeneratorState::Done => {
+                sent.drop_with(self);
+                return Err(ExcType::stop_iteration());
+            }
+            GeneratorState::Created if !matches!(sent, Value::None) => {
+                sent.drop_with(self);
+                return Err(ExcType::type_error_send_to_just_started());
+            }
+            GeneratorState::Created | GeneratorState::Suspended => {}
+        }
+
+        let call_offset = self.current_offset();
+        let function = self.interns.get_function(func_id);
+        let code = &function.code;
+        let locals_count = u16::try_from(function.namespace_size).expect("namespace size fits in u16");
+
+        let HeapReadOutput::Generator(mut handle) = self.heap.read(gen_id) else {
+            unreachable!("checked above")
+        };
+        let generator = handle.get_mut(self.heap);
+        let ip = generator.ip;
+        let saved = mem::take(&mut generator.stack);
+        let saved_exceptions = mem::take(&mut generator.exception_stack);
+        let globals = generator.globals;
+        generator.state = GeneratorState::Running;
+        drop(handle);
+
+        let stack_base = self.stack.len();
+        self.stack.extend(saved);
+        let exception_stack_base = self.exception_stack.len();
+        self.exception_stack.extend(saved_exceptions);
+
+        let namespace = function_namespace(globals, &*self.heap);
+        let mut frame = CallFrame::new_function(
+            code,
+            stack_base,
+            locals_count,
+            exception_stack_base,
+            func_id,
+            call_offset,
+            namespace,
+        );
+        frame.ip = ip;
+        frame.generator = Some(gen_id);
+        if let Err(e) = self.push_frame(frame) {
+            // The frame never ran, so its region goes back to the generator
+            // rather than being dropped along with values it still owns.
+            let region: Vec<Value> = self.stack.drain(stack_base..).collect();
+            let exceptions: Vec<Value> = self.exception_stack.drain(exception_stack_base..).collect();
+            let HeapReadOutput::Generator(mut handle) = self.heap.read(gen_id) else {
+                unreachable!("checked above")
+            };
+            let generator = handle.get_mut(self.heap);
+            generator.stack = region;
+            generator.exception_stack = exceptions;
+            generator.state = GeneratorState::Suspended;
+            drop(handle);
+            sent.drop_with(self);
+            return Err(e);
+        }
+        // A generator resumed for the first time starts at the top of its body,
+        // where no `yield` is waiting to take a value.
+        if state == GeneratorState::Created {
+            sent.drop_with(self);
+        } else {
+            self.push(sent);
+        }
+        Ok(CallResult::FramePushed)
+    }
+
+    /// Marks a generator finished and releases whatever it still held.
+    ///
+    /// Called when its body returns and when its frame unwinds, so a generator
+    /// that raised is exhausted exactly like one that returned.
+    pub(super) fn finish_generator(&mut self, gen_id: HeapId) {
+        let HeapReadOutput::Generator(mut handle) = self.heap.read(gen_id) else {
+            unreachable!("a generator frame names its generator")
+        };
+        let generator = handle.get_mut(self.heap);
+        generator.state = GeneratorState::Done;
+        generator.ip = 0;
+        let saved = mem::take(&mut generator.stack);
+        let saved_exceptions = mem::take(&mut generator.exception_stack);
+        drop(handle);
+        saved.drop_with(self);
+        saved_exceptions.drop_with(self);
     }
 
     /// Releases what a finished frame owns: its stack region and namespace.

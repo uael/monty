@@ -18,10 +18,10 @@ fn complex_numbers_return_not_implemented_error() {
 }
 
 #[test]
-fn yield_expressions_return_not_implemented_error() {
-    let err = get_parse_err("def foo():\n    yield 1");
+fn yield_from_expressions_return_not_implemented_error() {
+    let err = get_parse_err("def foo():\n    yield from [1]");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support yield expressions");
+    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support yield from expressions");
 }
 
 #[test]

@@ -282,6 +282,15 @@ pub struct Compiler<'a, 'i> {
     /// Number of `finally` body copies emitted into this code object.
     finally_copies: u16,
 
+    /// Where this body first returns a value, if it does.
+    ///
+    /// Kept because whether that is allowed is only known once the whole body
+    /// is compiled: a `return value` is ordinary until a later `yield` makes
+    /// the body a generator, and a generator's return value belongs on the
+    /// `StopIteration` it raises, which needs an exception carrying a Python
+    /// value rather than a message.
+    value_return: Option<CodeRange>,
+
     /// Whether the compiler is currently compiling module-level code.
     ///
     /// At module level, `Local` scope maps to global opcodes
@@ -321,7 +330,15 @@ struct ScopeFlags {
     /// Rejects `await` at snippet top level and in its class bodies.
     /// Nested function bodies reset this restriction.
     forbid_await: bool,
+    /// Why `yield` cannot appear in the body being compiled, or `None` where it
+    /// can. A message rather than a flag because the reasons differ: outside a
+    /// function it is CPython's own syntax error, while in an `async def` it is
+    /// a body Monty does not compile yet.
+    yield_refusal: Option<&'static str>,
 }
+
+/// CPython's message for a `yield` that is not inside a function.
+const YIELD_OUTSIDE_FUNCTION: &str = "'yield' outside function";
 
 /// Jump targets needed to compile `break` and `continue`.
 struct LoopInfo {
@@ -539,6 +556,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             interns,
             fblocks: Vec::new(),
             finally_copies: 0,
+            value_return: None,
             is_module_scope,
             frame_locals,
             comp_slots: Vec::new(),
@@ -586,6 +604,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             assert_message_annotations: options.assert_message_annotations.enabled(),
             globals_by_name: snippet.unwrap_or(false),
             forbid_await: snippet.is_some(),
+            yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
         };
         let mut compiler = Compiler::new(interns, true, 0, flags);
 
@@ -617,6 +636,11 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // the locals region into the operand-stack region.
         let flags = ScopeFlags {
             forbid_await: false,
+            // An `async def` that yields is an async generator, which needs the
+            // `__aiter__` / `__anext__` protocol rather than this one.
+            yield_refusal: func_def
+                .is_async
+                .then_some("'yield' inside an async function is not supported"),
             ..flags
         };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
@@ -639,7 +663,20 @@ impl<'a, 'i> Compiler<'a, 'i> {
         compiler.code.emit(Opcode::LoadNone)?;
         compiler.code.emit(Opcode::ReturnValue)?;
 
-        Ok(compiler.code.build())
+        let code = compiler.code.build();
+        // A generator's return value belongs on the `StopIteration` its
+        // exhaustion raises, and an exception here carries a message rather
+        // than a Python object. Refused while that is true, so nobody reads a
+        // `StopIteration.value` that was never carried.
+        if code.is_generator()
+            && let Some(position) = compiler.value_return
+        {
+            return Err(CompileError::new(
+                "returning a value from a generator is not supported",
+                position,
+            ));
+        }
+        Ok(code)
     }
 
     /// Compiles statements, retaining `finally` bodies for inline cleanup.
@@ -1394,6 +1431,10 @@ impl<'a, 'i> Compiler<'a, 'i> {
         num_locals: u16,
         flags: ScopeFlags,
     ) -> Result<Code, CompileError> {
+        let flags = ScopeFlags {
+            yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
+            ..flags
+        };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
         compiler.compile_block(body)?;
 
@@ -1738,6 +1779,20 @@ impl<'a, 'i> Compiler<'a, 'i> {
             Expr::LambdaRaw { .. } => {
                 // LambdaRaw should be converted to Lambda during prepare phase
                 unreachable!("Expr::LambdaRaw should not exist after prepare phase")
+            }
+
+            Expr::Yield(value) => {
+                if let Some(refusal) = self.flags.yield_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
+                }
+                // `yield` with no value yields `None`, so the instruction always
+                // has exactly one operand to take.
+                match value {
+                    Some(value) => self.compile_expr(value)?,
+                    None => self.code.emit(Opcode::LoadNone)?,
+                }
+                self.code.set_location(expr_loc.position, None);
+                self.code.emit(Opcode::Yield)?;
             }
 
             Expr::Await(value) => {
@@ -3994,6 +4049,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// exception state preserved as needed.
     fn compile_return(&mut self, expr: Option<&ExprLoc>) -> Result<(), CompileError> {
         if let Some(expr) = expr {
+            if self.value_return.is_none() && !matches!(expr.expr, Expr::Literal(Literal::None)) {
+                self.value_return = Some(expr.position);
+            }
             self.compile_expr(expr)?;
         } else {
             self.code.emit(Opcode::LoadNone)?;

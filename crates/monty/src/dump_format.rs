@@ -275,7 +275,7 @@ mod tests {
     fn serialized_components_match_dump_version() {
         assert_eq!(
             opcode_fingerprint(),
-            0x8418_51a7_ab85_1aac,
+            0x4774_765c_dd62_189e,
             "opcodes changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(opcode_fingerprint())
         );
@@ -294,7 +294,7 @@ mod tests {
 
         assert_eq!(
             variant_order_fingerprint(Type::VARIANTS),
-            0xd1e8_77ae_6175_7890,
+            0xb733_b3fe_f3bd_be06,
             "Type variants changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(variant_order_fingerprint(Type::VARIANTS))
         );

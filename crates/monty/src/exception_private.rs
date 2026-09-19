@@ -1834,6 +1834,27 @@ pub(crate) trait ExcTypeExt: Sized {
         .into()
     }
 
+    /// Creates the `ValueError` for resuming a generator that is running.
+    ///
+    /// Matches CPython's format: `ValueError: generator already executing`
+    #[must_use]
+    fn value_error_generator_running() -> RunError {
+        SimpleException::new_msg(ExcType::ValueError, "generator already executing").into()
+    }
+
+    /// Creates the `TypeError` for `send()`ing a value to an unstarted generator.
+    ///
+    /// Matches CPython's format:
+    /// `TypeError: can't send non-None value to a just-started generator`
+    #[must_use]
+    fn type_error_send_to_just_started() -> RunError {
+        SimpleException::new_msg(
+            ExcType::TypeError,
+            "can't send non-None value to a just-started generator",
+        )
+        .into()
+    }
+
     /// Creates a StopIteration exception for when an iterator is exhausted.
     ///
     /// Matches CPython's format: `StopIteration`

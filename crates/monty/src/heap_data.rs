@@ -107,6 +107,8 @@ macro_rules! heap_payloads {
             Module(boxed $crate::types::Module),
             /// A coroutine object from an async function call.
             Coroutine(inline $crate::asyncio::Coroutine),
+            /// A generator object from calling a function whose body yields.
+            Generator(boxed $crate::types::generator::Generator),
             /// An `asyncio.gather()` result tracking multiple coroutines or tasks.
             GatherFuture(boxed $crate::asyncio::GatherFuture),
             /// An external future driven by the host.
@@ -231,6 +233,7 @@ impl HeapData {
             | Self::CallableIterator(_)
             | Self::Module(_)
             | Self::Coroutine(_)
+            | Self::Generator(_)
             | Self::GatherFuture(_)
             | Self::ExternalFuture(_)
             | Self::Partial(_)
@@ -334,6 +337,7 @@ impl HeapData {
             Self::LongInt(_) => Type::Int,
             Self::Module(_) => Type::Module,
             Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::Generator(_) => Type::Generator,
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
             Self::RePattern(_) => Type::RePattern,
@@ -638,6 +642,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::DictValueIterator($value) => $body,
             Self::SetIterator($value) => $body,
             Self::CallableIterator($value) => $body,
+            Self::Generator($value) => $body,
             Self::Itertools($value) => $body,
             Self::Partial($value) => $body,
             Self::Random($value) => $body,
@@ -917,6 +922,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Exception(e) => e.py_type(vm),
                     Self::Module(_) => Type::Module,
                     Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+                    Self::Generator(_) => Type::Generator,
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
                 }
             }
@@ -1125,6 +1131,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
 
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
         match self {
+            Self::Generator(value) => value.py_iter(vm),
             Self::TypeAliasType(value) => value.py_iter(vm),
             Self::ClassProperty(value) => value.py_iter(vm),
             Self::Template(value) => value.py_iter(vm),
@@ -1194,6 +1201,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Str(value) => value.py_next(vm),
             Self::Bytes(value) => value.py_next(vm),
             Self::List(value) => value.py_next(vm),
+            Self::Generator(value) => value.py_next(vm),
             Self::ListIterator(value) => value.py_next(vm),
             Self::DequeIterator(value) => value.py_next(vm),
             Self::TupleIterator(value) => value.py_next(vm),

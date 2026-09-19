@@ -100,6 +100,9 @@ pub(crate) struct SerializedTaskFrame {
     /// Whether this frame is a class `__init__` (see `CallFrame.is_initializer`).
     #[serde(default)]
     pub is_initializer: bool,
+    /// The generator this frame runs, if any (see `CallFrame.generator`).
+    #[serde(default)]
+    pub generator: Option<HeapId>,
     /// Frame namespace, owning its dict references (see `CallFrame.namespace`).
     pub namespace: Option<Box<FrameNamespace>>,
 }

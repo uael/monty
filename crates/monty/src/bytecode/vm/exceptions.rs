@@ -365,8 +365,17 @@ impl VM<'_> {
             // This is where the caller invoked the function that's failing.
             let call_offset = this.current_frame().call_offset;
 
+            // A generator whose body raises is finished, exactly as one that
+            // returned is: the next resume must report exhaustion rather than
+            // find it still running.
+            let generator = this.current_frame().generator;
+
             // Pop this frame
-            if this.pop_frame() {
+            let stop = this.pop_frame();
+            if let Some(gen_id) = generator {
+                this.finish_generator(gen_id);
+            }
+            if stop {
                 // The frame indicated evaluation should stop - e.g. inside `evaluate_function` - return the error
                 // now to stop unwinding.
                 return ExceptionHandlingResult::Unhandled(error);
@@ -396,9 +405,13 @@ impl VM<'_> {
         while !self.suspended_frames.is_empty() {
             // Get the caller's call-site offset before popping frame
             let call_offset = self.current_frame().call_offset;
+            let generator = self.current_frame().generator;
 
             // Pop this frame (cleans up namespace, etc.)
             self.pop_frame();
+            if let Some(gen_id) = generator {
+                self.finish_generator(gen_id);
+            }
 
             // Add caller frame info to traceback. Resolve the offset against the
             // caller, which is the current frame after the pop above.

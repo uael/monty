@@ -798,7 +798,7 @@ impl MontyTypeExt for MontyType {
             Type::BuiltinFunction => Self::BuiltinFunction,
             Type::Cell => Self::Cell,
             Type::Iterator => Self::Iterator,
-            Type::Coroutine => Self::Coroutine,
+            Type::Coroutine | Type::Generator => Self::Coroutine,
             Type::Module => Self::Module,
             Type::TextIOWrapper => Self::TextIOWrapper,
             Type::BufferedReader => Self::BufferedReader,

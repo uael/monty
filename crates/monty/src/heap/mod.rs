@@ -2069,6 +2069,20 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(globals);
             }
         }
+        // Mirrors `Coroutine` above, and `Generator::py_dec_ref_ids`: a
+        // suspended frame owns every value in both of its saved regions, plus
+        // its globals dict. A generator can hold itself, so this edge is what
+        // lets the collector see such a cycle.
+        HeapData::Generator(generator) => {
+            for value in generator.stack.iter().chain(&generator.exception_stack) {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+            if let Some(globals) = generator.globals {
+                on_child(globals);
+            }
+        }
         HeapData::GatherFuture(gather) => {
             // Add inc_ref'd item HeapIds. Both coroutines and external
             // futures are owned by the gather for its entire lifecycle.
@@ -2216,6 +2230,9 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
             }
             stack.extend(coro.globals);
         }
+        // Mirrors `for_each_child_id` above; the body lives on `Generator` as
+        // its `HeapItem` impl, so the two walkers cannot drift.
+        HeapData::Generator(generator) => generator.py_dec_ref_ids(stack),
         HeapData::GatherFuture(gather) => {
             // Decrement ref count for owned item HeapIds (coroutines and
             // external futures are both owned by the gather).

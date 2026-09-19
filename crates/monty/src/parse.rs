@@ -1581,10 +1581,11 @@ impl<'a, 'i> Parser<'a, 'i> {
                 let value = self.parse_expression(*a.value)?;
                 Ok(ExprLoc::new(self.convert_range(a.range), Expr::Await(Box::new(value))))
             }
-            AstExpr::Yield(y) => Err(ParseError::not_implemented(
-                "yield expressions",
-                self.convert_range(y.range),
-            )),
+            AstExpr::Yield(y) => {
+                let range = self.convert_range(y.range);
+                let value = y.value.map(|v| self.parse_expression(*v)).transpose()?;
+                Ok(ExprLoc::new(range, Expr::Yield(value.map(Box::new))))
+            }
             AstExpr::YieldFrom(y) => Err(ParseError::not_implemented(
                 "yield from expressions",
                 self.convert_range(y.range),

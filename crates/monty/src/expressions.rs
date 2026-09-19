@@ -284,6 +284,13 @@ pub enum Expr {
     /// Raises `TypeError` for non-awaitable values.
     /// Unlike standard Python, `await` is allowed at module level (like Jupyter notebooks).
     Await(Box<ExprLoc>),
+    /// `yield` / `yield value`: suspends the enclosing generator, handing the
+    /// value to whoever resumed it.
+    ///
+    /// It is an expression, not a statement: it evaluates to the value the
+    /// next `send()` passes in, or `None` for a plain `next()`. `yield` with
+    /// no value yields `None`.
+    Yield(Option<Box<ExprLoc>>),
     /// F-string expression containing literal and interpolated parts.
     ///
     /// At evaluation time, each part is processed in sequence:

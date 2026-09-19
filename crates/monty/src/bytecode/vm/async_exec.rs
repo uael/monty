@@ -513,6 +513,7 @@ impl<'h> VM<'h> {
                 exception_stack_base: f.exception_stack_base(),
                 call_offset: f.call_offset,
                 is_initializer: f.is_initializer,
+                generator: f.generator,
                 namespace: f.namespace,
             })
             .collect();
@@ -526,6 +527,7 @@ impl<'h> VM<'h> {
             exception_stack_base: current.exception_stack_base(),
             call_offset: current.call_offset,
             is_initializer: current.is_initializer,
+            generator: current.generator,
             namespace: mem::take(&mut current.namespace),
         });
 
@@ -598,6 +600,7 @@ impl<'h> VM<'h> {
                         is_parked: false,
                         namespace: sf.namespace,
                         is_initializer: sf.is_initializer,
+                        generator: sf.generator,
                     }
                 })
                 .collect();

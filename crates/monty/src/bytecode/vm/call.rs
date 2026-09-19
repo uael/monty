@@ -23,7 +23,10 @@ use crate::{
     modules::dataclasses,
     os_dispatch::{PendingEffect, release_pending_effect},
     resource_checks::check_estimated_size,
-    types::{Dict, Instance, PyTrait, Type, bytes::call_bytes_method, instance::class_name, str::call_str_method},
+    types::{
+        Dict, Instance, PyTrait, Type, bytes::call_bytes_method, generator::Generator, instance::class_name,
+        str::call_str_method,
+    },
     value::{EitherStr, VALUE_SIZE, Value},
 };
 
@@ -460,6 +463,49 @@ impl<'h> VM<'h> {
         }
     }
 
+    /// Runs a generator to its next `yield` from Rust, for the builtins that
+    /// walk an iterator themselves (`list()`, `sorted()`, a comprehension).
+    ///
+    /// The frame is spliced in exactly as [`resume_generator`](VM::resume_generator)
+    /// does; only the driving differs, this being a nested `run()` in the shape
+    /// [`evaluate_function`](Self::evaluate_function) uses. That is also its
+    /// limit: a generator driven from inside a builtin cannot suspend to the
+    /// host, the same restriction every synchronous re-entry here carries.
+    /// `for` and an explicit `next()` do not go through this.
+    ///
+    /// `None` means the generator finished, which is the exhaustion an iterator
+    /// protocol reports by returning nothing rather than by raising.
+    pub(crate) fn drive_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<Option<Value>> {
+        if let Err(e) = self.enter_run_reentry() {
+            sent.drop_with(self);
+            return Err(e.into());
+        }
+        let mut guard = RunReentryGuard::new(self);
+        let this = &mut *guard;
+
+        match this.resume_generator(gen_id, sent) {
+            Ok(CallResult::FramePushed) => {}
+            Ok(other) => return Err(this.unsupported_call_result("generator", other)),
+            // Exhaustion reaches an iterator walk as "no more values".
+            Err(e) if e.is_stop_iteration() => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        this.current_frame_mut().should_return = true;
+        loop {
+            match this.run() {
+                Ok(FrameExit::Return(value)) => return Ok(Some(value)),
+                Ok(exit) => {
+                    let error = this.unsupported_frame_exit("generator", exit);
+                    if let Some(error) = this.handle_exception(error) {
+                        return Err(error);
+                    }
+                }
+                Err(e) if e.is_stop_iteration() => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Converts a direct call suspension into a specific synchronous-context error.
     #[cold]
     fn unsupported_call_result(&mut self, ctx: &'static str, result: CallResult) -> RunError {
@@ -890,8 +936,12 @@ impl<'h> VM<'h> {
     ) -> Result<CallResult, RunError> {
         let func = self.interns.get_function(func_id);
 
+        // Both an `async def` and a body that yields bind their arguments now
+        // and run later, so both hand back an object instead of a frame.
         if func.is_async {
             self.create_coroutine(func_id, func, cells, defaults, globals, args)
+        } else if func.code.is_generator() {
+            self.create_generator(func_id, func, cells, defaults, globals, args)
         } else {
             self.call_sync_function(func_id, func, cells, defaults, globals, args)
         }
@@ -929,6 +979,38 @@ impl<'h> VM<'h> {
         let coroutine_id = this.heap.allocate(HeapData::Coroutine(coroutine));
 
         Ok(CallResult::Value(Value::Ref(coroutine_id)))
+    }
+
+    /// Creates the generator a call to a yielding function hands back.
+    ///
+    /// The same binding as [`create_coroutine`](Self::create_coroutine) — the
+    /// arguments are bound at the call, and the body runs only when something
+    /// resumes it — so the two differ by the object allocated and nothing else.
+    /// The bound namespace becomes the generator's stack region, which is what
+    /// a frame's locals are.
+    fn create_generator(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+        cells: &[HeapId],
+        defaults: &[Value],
+        globals: Option<HeapId>,
+        args: ArgValues,
+    ) -> Result<CallResult, RunError> {
+        let namespace = Vec::with_capacity(func.namespace_size);
+        let mut namespace_guard = DropGuard::new(namespace, self);
+        let (namespace, this) = namespace_guard.as_parts_mut();
+        func.signature.bind(args, defaults, this, func.name, namespace)?;
+        this.install_closure_cells(func, cells, namespace);
+
+        let (namespace, this) = namespace_guard.into_parts();
+        if let Some(globals) = globals {
+            this.heap.inc_ref(globals);
+        }
+        let generator = Generator::new(func_id, namespace, globals);
+        let generator_id = this.heap.allocate(HeapData::Generator(Box::new(generator)));
+
+        Ok(CallResult::Value(Value::Ref(generator_id)))
     }
 
     /// Installs owned cell variables and captured free-var cells into a frame's

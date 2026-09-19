@@ -15,6 +15,7 @@ pub mod dict;
 pub mod dict_view;
 pub mod ext_function;
 pub mod file;
+pub mod generator;
 pub mod generic_alias;
 pub mod host_class;
 pub mod instance;

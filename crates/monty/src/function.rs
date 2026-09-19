@@ -138,6 +138,11 @@ impl Function {
 
     /// Derives the binder-free call plan from authoritative function metadata.
     fn derive_exact_positional_call(&self) -> Option<ExactPositionalCall> {
+        // A body that yields hands back a generator rather than running, which
+        // the binder-free path has no shape for.
+        if self.code.is_generator() {
+            return None;
+        }
         if self.cell_var_slots.is_empty() && self.free_var_slots.is_empty() {
             self.signature.exact_positional_count().map(|count| {
                 if self.is_async {
