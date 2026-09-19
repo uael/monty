@@ -894,6 +894,27 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 } => {
                     new_nodes.push(self.prepare_class_def(name, body, members, decorators, position)?);
                 }
+                Node::TypeAlias {
+                    name,
+                    value:
+                        RawFunctionDef {
+                            name: value_name,
+                            signature,
+                            body,
+                            is_async,
+                        },
+                } => {
+                    // The value thunk is prepared first (it is a nested scope, so
+                    // it captures the *pre*-binding state) and the alias name
+                    // binds afterwards, like any other assignment.
+                    let value = self.prepare_function_def(value_name, &signature, body, is_async)?;
+                    self.names_assigned_in_order.insert(name.name_id);
+                    let name = self.get_id_for_store_target(name)?;
+                    if self.is_class_scope {
+                        self.bound_class_members.insert(name.name_id);
+                    }
+                    new_nodes.push(Node::TypeAlias { name, value });
+                }
                 Node::Global { names, position } => {
                     // At module level, `global` is a no-op since all variables are already global.
                     // In functions, the global declarations are already collected in the first pass
@@ -2615,6 +2636,10 @@ fn collect_scope_info_from_node(
                 collect_assigned_names_from_expr(decorator, assigned_names, interner);
             }
         }
+        Node::TypeAlias { name, .. } => {
+            // Binds the alias name here; the value is a separate scope.
+            assigned_names.insert(name.name_id);
+        }
         Node::ClassDef { name, decorators, .. } => {
             // A class definition binds the class name in this scope, just like a `def`.
             // The class body is a separate scope (handled by the cell-var pass).
@@ -2904,6 +2929,11 @@ fn collect_cell_vars_from_node(
             for decorator in decorators {
                 collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
             }
+        }
+        Node::TypeAlias { value, .. } => {
+            // The thunk is a nested scope of this one, so a local it reads
+            // becomes a cell var exactly as a nested `def`'s would.
+            collect_cell_vars_from_function(&value.signature, &value.body, our_locals, cell_vars, interner);
         }
         Node::ClassDef { body, decorators, .. } => {
             // The class body is a nested scope of *this* scope, like a `def`: any
@@ -3500,6 +3530,11 @@ fn collect_referenced_names_from_node(
             for decorator in decorators {
                 collect_referenced_names_from_expr(decorator, referenced, interner);
             }
+        }
+        Node::TypeAlias { value, .. } => {
+            // The alias binds its name here; the value thunk is a nested scope,
+            // and whatever it reads from ours it reads through that scope.
+            collect_nested_function_references(&value.signature, &value.body, referenced, interner);
         }
         Node::ClassDef { decorators, .. } => {
             // The class body is a separate scope and the name is a binding, so

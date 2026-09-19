@@ -374,7 +374,23 @@ impl<'a, 'i> Parser<'a, 'i> {
                 "the 'del' statement",
                 self.convert_range(d.range),
             )),
-            Stmt::TypeAlias(t) => Err(ParseError::not_implemented("type aliases", self.convert_range(t.range))),
+            Stmt::TypeAlias(ast::StmtTypeAlias {
+                name,
+                type_params,
+                value,
+                ..
+            }) => {
+                // Type parameters are parsed for their syntax only; see
+                // `check_type_params`.
+                self.check_type_params(type_params.as_deref())?;
+                let name = self.parse_identifier(*name)?;
+                // PEP 695 defers the value until `__value__` is read, which is
+                // what lets an alias mention itself (`type Wire = ... list[Wire]`).
+                // A zero-arg function is exactly that deferral, and reuses the
+                // whole closure/scope pipeline.
+                let value = self.parse_thunk(name, *value)?;
+                Ok(Node::TypeAlias { name, value })
+            }
             Stmt::Assign(ast::StmtAssign {
                 mut targets,
                 value,
@@ -924,6 +940,21 @@ impl<'a, 'i> Parser<'a, 'i> {
                         ));
                     }
                 }
+                // `type X = ...` binds a `TypeAliasType` member, like a class var
+                // whose value is deferred.
+                Stmt::TypeAlias(ast::StmtTypeAlias {
+                    name,
+                    type_params,
+                    value,
+                    ..
+                }) => {
+                    self.check_type_params(type_params.as_deref())?;
+                    self.reject_class_body_walrus(&value)?;
+                    let alias = self.parse_identifier(*name)?;
+                    let value = self.parse_thunk(alias, *value)?;
+                    members.push(alias);
+                    body.push(Node::TypeAlias { name: alias, value });
+                }
                 // `pass` and `...` (the common `class C: ...` stub idiom) are
                 // no-ops. A leading string literal is the class docstring and
                 // becomes the synthesized `__doc__` value; later bare string
@@ -1190,6 +1221,47 @@ impl<'a, 'i> Parser<'a, 'i> {
             AstExpr::Starred(ast::ExprStarred { range, .. }) => Err(starred_root_target(self.convert_range(range))),
             other => Ok(AssignTarget::Name(self.parse_identifier(other)?)),
         }
+    }
+
+    /// Wraps `value` in a synthetic zero-argument function whose body returns it.
+    ///
+    /// PEP 695 defers a type alias's right-hand side, and a function is exactly
+    /// that deferral: it reuses the scope, closure and call machinery instead of
+    /// inventing a second kind of suspended expression.
+    fn parse_thunk(&mut self, name: Identifier, value: AstExpr) -> Result<RawFunctionDef, ParseError> {
+        // The synthetic `return` adds a nesting level the source did not have.
+        self.decr_depth_remaining(|| value.range())?;
+        let result = self.parse_expression(value);
+        self.depth_remaining += 1;
+        let body = vec![Node::Return(Some(result?))];
+        Ok(RawFunctionDef {
+            name,
+            signature: ParsedSignature::default(),
+            body,
+            is_async: false,
+        })
+    }
+
+    /// Accepts PEP 695 type parameters (`def f[T]`, `class C[T]`, `type X[T] = ...`)
+    /// without giving them runtime meaning.
+    ///
+    /// Monty stringizes annotations (see `limitations/typing.md`), so a type
+    /// parameter is never *evaluated* in the position that motivates it. Binding
+    /// one would mean inventing a `TypeVar` object, so the names are dropped
+    /// instead and a body that reads one raises `NameError`. The bounds and
+    /// defaults are still walked for the nesting-depth budget, since nothing
+    /// else will look at them.
+    fn check_type_params(&mut self, type_params: Option<&ast::TypeParams>) -> Result<(), ParseError> {
+        for param in type_params.into_iter().flat_map(|p| p.iter()) {
+            let bound = match param {
+                ast::TypeParam::TypeVar(t) => t.bound.as_deref(),
+                ast::TypeParam::TypeVarTuple(_) | ast::TypeParam::ParamSpec(_) => None,
+            };
+            for expr in [bound, param.default()].into_iter().flatten() {
+                self.check_expression_depth(expr)?;
+            }
+        }
+        Ok(())
     }
 
     /// Parses an expression from the ruff AST into Monty's ExprLoc representation.

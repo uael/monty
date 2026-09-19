@@ -667,6 +667,16 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.compile_expr(object)?;
                 self.emit_unpack_store(targets, *targets_position)?;
             }
+            Node::TypeAlias { name, value } => {
+                // The value stays unevaluated inside the alias: PEP 695 defers it
+                // to the first `__value__` read, which is what lets an alias name
+                // itself.
+                self.emit_make_function(value, "type alias value")?;
+                let name_idx = check_name_index_u16(name.name_id, name.position)?;
+                self.code.set_location(name.position, None);
+                self.code.emit_u16(Opcode::MakeTypeAlias, name_idx)?;
+                self.compile_store(name)?;
+            }
             Node::OpAssign { target, op, value } => {
                 let Some(opcode) = operator_to_inplace_opcode(op) else {
                     return Err(CompileError::new(

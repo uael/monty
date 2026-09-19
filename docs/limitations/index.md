@@ -38,6 +38,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - Starred unpacking everywhere CPython allows it
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)
 - PEP 634 `match` statements, see [language.md](language.md)
+- PEP 695 `type X = ...` aliases, see [typing.md](typing.md)
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
 
@@ -47,7 +48,6 @@ They exist for development and for agents debugging code that runs on Monty; mos
     Generator *expressions* parse, but currently materialise to a `list`
 - `del`, both `del x` and `del d[k]`
 - `try*` / `except*` exception groups
-- PEP 695 `type` aliases
 - `async with`, `async for` and async comprehensions
 - Wildcard imports (`from m import *`)
 - Complex literals (`1j`) and t-strings

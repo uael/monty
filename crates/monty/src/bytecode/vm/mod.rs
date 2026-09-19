@@ -49,7 +49,7 @@ use crate::{
     parse::CodeRange,
     run::{Program, SessionTables, VmEnv},
     types::{
-        Dict, LongInt, PyTrait, SessionRandom,
+        Dict, LongInt, PyTrait, SessionRandom, allocate_type_alias,
         file::{apply_buffer_store, apply_open_name, apply_write_position},
         match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
         random::SEED_BYTES,
@@ -1604,6 +1604,12 @@ impl<'h> VM<'h> {
                     let name_idx = self.current_frame.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
+                }
+                Opcode::MakeTypeAlias => {
+                    let name_idx = self.current_frame.fetch_u16();
+                    let thunk = self.pop();
+                    let alias = allocate_type_alias(StringId::from_index(name_idx), thunk, self);
+                    self.push(alias);
                 }
                 Opcode::MatchShape => {
                     let shape = self.current_frame.fetch_u8();

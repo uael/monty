@@ -620,6 +620,7 @@ impl MontyTypeExt for MontyType {
     /// both matches are exhaustive so the compiler enforces totality.
     fn to_internal(&self) -> Type {
         match self {
+            Self::TypeAliasType => Type::TypeAliasType,
             Self::Ellipsis => Type::Ellipsis,
             Self::NotImplementedType => Type::NotImplementedType,
             Self::Type => Type::Type,
@@ -712,6 +713,7 @@ impl MontyTypeExt for MontyType {
     /// routes a sandbox class to [`GraphExporter::sandbox_class_node`] first.
     fn from_internal_static(ty: Type) -> Option<Self> {
         Some(match ty {
+            Type::TypeAliasType => Self::TypeAliasType,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,

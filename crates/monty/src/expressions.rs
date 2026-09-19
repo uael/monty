@@ -746,6 +746,22 @@ pub enum Node<F> {
         /// Source position of the `match` statement (for error reporting).
         position: CodeRange,
     },
+    /// PEP 695 `type X = <value>`.
+    ///
+    /// The value is *not* evaluated here: PEP 695 defers it until `__value__`
+    /// is read, which is what lets an alias mention itself
+    /// (`type Wire = ... | list[Wire] | ...`). It is therefore carried as a
+    /// synthetic zero-argument function riding the same `F` = Raw to Prepared
+    /// pipeline as [`Node::ClassDef`]'s body, and the alias object holds that
+    /// function. Type parameters are parsed and dropped; see
+    /// `limitations/typing.md`.
+    TypeAlias {
+        /// The alias name, bound in the enclosing scope and also the object's
+        /// `__name__`.
+        name: Identifier,
+        /// Thunk whose body is `return <value>`.
+        value: F,
+    },
     /// Global variable declaration. Only present in parsed form, consumed during prepare.
     ///
     /// Declares that the listed names refer to module-level (global) variables,

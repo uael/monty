@@ -571,6 +571,10 @@ pub enum Opcode {
     /// tuple of matched attributes, or `None` when the subject is not an
     /// instance or an attribute is missing.
     MatchClass = 126,
+
+    /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
+    /// `__value__` read. Operand: u16 name_id (the alias's `__name__`).
+    MakeTypeAlias = 127,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -738,6 +742,7 @@ impl Opcode {
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
             | Self::MethodDictMerge
+            | Self::MakeTypeAlias
             | Self::MatchClass => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
@@ -999,6 +1004,8 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
+            // The thunk is replaced in place by the alias object.
+            (MakeTypeAlias, Operand::U16(_)) => 0,
             // Pops the keyword names and the class, plus the subject copy the
             // pattern duplicated for it; pushes the attribute tuple or `None`.
             (MatchClass, Operand::U16(_)) => -2,

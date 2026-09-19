@@ -189,6 +189,9 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         // `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
         | HeapReadOutput::Union(_)
+        // A PEP 695 alias is immutable apart from the `__value__` it memoizes
+        // once, and CPython has no `__copy__` for one either.
+        | HeapReadOutput::TypeAliasType(_)
         // A shallow copy of an immutable container holds the same items, so
         // CPython hands back the original; only `deepcopy` rebuilds these.
         | HeapReadOutput::Tuple(_)
@@ -321,6 +324,7 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         // `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
         | HeapReadOutput::Union(_)
+        | HeapReadOutput::TypeAliasType(_)
         | HeapReadOutput::FunctionDefaults(_) => Ok(source.clone_with_heap(vm.heap)),
         // Refused, with the `TypeError` CPython's pickler raises. Views and
         // iterators are positions into something else; the rest are host

@@ -881,6 +881,9 @@ pub enum StaticStrings {
     /// `__qualname__` — the qualified class name, exposed on namedtuple classes.
     #[strum(serialize = "__qualname__")]
     DunderQualname,
+    /// `TypeAliasType.__value__`, the lazily evaluated alias target.
+    #[strum(serialize = "__value__")]
+    DunderValue,
     /// `Counter.elements()` method.
     Elements,
     /// `repr()`/`str()` text of `Ellipsis`, interned so rendering allocates nothing.
