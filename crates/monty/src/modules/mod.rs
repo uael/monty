@@ -17,6 +17,7 @@ pub(crate) mod asyncio;
 pub(crate) mod base64;
 pub(crate) mod binascii;
 pub(crate) mod collections;
+pub(crate) mod collections_abc;
 pub(crate) mod copy;
 pub(crate) mod dataclasses;
 pub(crate) mod datetime;
@@ -79,6 +80,9 @@ pub(crate) enum StandardLib {
     Random,
     /// The `copy` module providing `copy()` and `deepcopy()`.
     Copy,
+    /// The `collections.abc` module exposing the abstract base classes as
+    /// annotation markers.
+    CollectionsAbc,
     /// The `string.templatelib` module exposing the PEP 750 `Template` and
     /// `Interpolation` type objects (no functions).
     StringTemplatelib,
@@ -114,6 +118,7 @@ impl StandardLib {
             StaticStrings::Binascii => Some(Self::Binascii),
             StaticStrings::Random => Some(Self::Random),
             StaticStrings::Copy => Some(Self::Copy),
+            StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::Time => Some(Self::Time),
             #[cfg(feature = "test-hooks")]
@@ -144,6 +149,7 @@ impl StandardLib {
             Self::Binascii => binascii::create_module(vm),
             Self::Random => random::create_module(vm),
             Self::Copy => copy::create_module(vm),
+            Self::CollectionsAbc => collections_abc::create_module(vm),
             Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::Time => time::create_module(vm),
             #[cfg(feature = "test-hooks")]

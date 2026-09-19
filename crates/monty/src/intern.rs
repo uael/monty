@@ -531,6 +531,9 @@ pub enum StaticStrings {
     /// `base64.a85encode()` function.
     #[strum(serialize = "a85encode")]
     A85Encode,
+    /// `collections.abc`, as the attribute `collections` binds the submodule to.
+    #[strum(serialize = "abc")]
+    Abc,
     /// `sys.abiflags` attribute.
     Abiflags,
     /// Kwarg name `abs_tol` — `math.isclose(abs_tol=...)`.
@@ -717,6 +720,10 @@ pub enum StaticStrings {
     Collect,
     /// Module name for `import collections`.
     Collections,
+    /// Module name for `from collections.abc import ...`. The whole dotted
+    /// path is interned as one string, which is what the import lookup matches.
+    #[strum(serialize = "collections.abc")]
+    CollectionsAbc,
     /// `math.comb()` function.
     Comb,
     /// `itertools.combinations()` function.
@@ -740,6 +747,10 @@ pub enum StaticStrings {
     Copyright,
     /// `math.copysign()` function.
     Copysign,
+    /// `collections.abc.Coroutine` marker. Distinct from the `coroutine` type
+    /// name, which is what `type()` reports for an awaited call.
+    #[strum(serialize = "Coroutine")]
+    CoroutineType,
     /// `math.cos()` function.
     Cos,
     /// `math.cosh()` function.

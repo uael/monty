@@ -68,27 +68,28 @@ They exist for development and for agents debugging code that runs on Monty; mos
 
 The following modules are present:
 
-| Module        | Divergences                      |
-| ------------- | -------------------------------- |
-| `asyncio`     | [asyncio.md](asyncio.md)         |
-| `base64`      | [base64.md](base64.md)           |
-| `binascii`    | [base64.md](base64.md)           |
-| `collections` | [collections.md](collections.md) |
-| `copy`        | [copy.md](copy.md)               |
-| `dataclasses` | [dataclasses.md](dataclasses.md) |
-| `datetime`    | [datetime.md](datetime.md)       |
-| `functools`   | [functools.md](functools.md)     |
-| `itertools`   | [itertools.md](itertools.md)     |
-| `json`        | [json.md](json.md)               |
-| `math`        | [math.md](math.md)               |
-| `os`          | [os.md](os.md)                   |
-| `pathlib`     | [pathlib.md](pathlib.md)         |
-| `random`      | [random.md](random.md)           |
-| `re`          | [re.md](re.md)                   |
-| `sys`         | [sys.md](sys.md)                 |
-| `time`        | [time.md](time.md)               |
-| `typing`      | [typing.md](typing.md)           |
-| `unicodedata` | [unicodedata.md](unicodedata.md) |
+| Module            | Divergences                      |
+| ----------------- | -------------------------------- |
+| `asyncio`         | [asyncio.md](asyncio.md)         |
+| `base64`          | [base64.md](base64.md)           |
+| `binascii`        | [base64.md](base64.md)           |
+| `collections`     | [collections.md](collections.md) |
+| `collections.abc` | [collections.md](collections.md) |
+| `copy`            | [copy.md](copy.md)               |
+| `dataclasses`     | [dataclasses.md](dataclasses.md) |
+| `datetime`        | [datetime.md](datetime.md)       |
+| `functools`       | [functools.md](functools.md)     |
+| `itertools`       | [itertools.md](itertools.md)     |
+| `json`            | [json.md](json.md)               |
+| `math`            | [math.md](math.md)               |
+| `os`              | [os.md](os.md)                   |
+| `pathlib`         | [pathlib.md](pathlib.md)         |
+| `random`          | [random.md](random.md)           |
+| `re`              | [re.md](re.md)                   |
+| `sys`             | [sys.md](sys.md)                 |
+| `time`            | [time.md](time.md)               |
+| `typing`          | [typing.md](typing.md)           |
+| `unicodedata`     | [unicodedata.md](unicodedata.md) |
 
 Each covers only part of its CPython surface — often a small part. `itertools`
 is the exception: every name it exports is implemented.

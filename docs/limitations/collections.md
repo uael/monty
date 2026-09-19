@@ -10,12 +10,35 @@ the type objects themselves (like `deque`), so `type(d) is defaultdict` and
 
 ## Not implemented
 
-`OrderedDict`, `ChainMap`, `UserDict`, `UserList`, `UserString`, and the
-`collections.abc` submodule. Importing one raises
+`OrderedDict`, `ChainMap`, `UserDict`, `UserList` and `UserString`. Importing
+one raises
 `ImportError: cannot import name 'OrderedDict' from 'collections' (unknown location)` (or `AttributeError`
-as an attribute); `import collections.abc` raises `ModuleNotFoundError`. The
-narrowed typeshed stub makes `from collections import OrderedDict` a type error
-too, rather than something that type-checks and then fails at runtime.
+as an attribute). The narrowed typeshed stub makes
+`from collections import OrderedDict` a type error too, rather than something
+that type-checks and then fails at runtime.
+
+## `collections.abc`
+
+The submodule exists and exports `Callable`, `Coroutine`, `Generator`,
+`Iterable`, `Iterator`, `Mapping` and `Sequence`. It is annotations only:
+
+- **Each name is the same object `typing` exports under that name**, a
+    `typing._SpecialForm`, not an abstract base class. `repr(Callable)` is
+    `typing.Callable` where CPython writes `<class 'collections.abc.Callable'>`,
+    and `collections.abc.Callable is typing.Callable` holds where CPython says
+    they differ.
+- **None of them is callable, subscriptable or usable with `isinstance`.**
+    `Callable[[int], int]` raises
+    `TypeError: 'typing._SpecialForm' object is not subscriptable`, the same
+    refusal the `typing` name gets (see [typing.md](typing.md)). An annotation
+    is never evaluated, so writing one costs nothing.
+- **Every other name CPython exports is missing**, including `Hashable`,
+    `Awaitable`, `Container`, `Set`, `MutableMapping` and the rest:
+    `from collections.abc import Hashable` raises
+    `ImportError: cannot import name 'Hashable' from 'collections.abc' (unknown location)`.
+- **`import collections.abc` needs an alias**, as every dotted module does:
+    write `import collections.abc as abc`, `from collections import abc`, or
+    `from collections.abc import ...`. See [modules.md](modules.md).
 
 ## `deque`
 
