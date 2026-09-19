@@ -76,7 +76,7 @@ impl VM<'_> {
     /// Borrows the value so callers that already own one can keep it — the
     /// `raise`/`Reraise` paths reuse it as the raised object itself.
     /// The `is_raise` flag indicates if this is from a `raise` statement (hide caret).
-    pub(super) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
+    pub(crate) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
         let simple_exc = match exc_value {
             // Exception instance on heap
             Value::Ref(heap_id) => {

@@ -2,9 +2,10 @@
 
 A function whose body contains `yield` returns a generator: the call binds the
 arguments, and the body runs only when something resumes it. `next()`, `send()`,
-`for`, unpacking, and every builtin that walks an iterator drive it. A generator
-is its own iterator, `finally` blocks run where they stand, and a body that
-raises leaves the generator exhausted exactly as a return does.
+`close()`, `throw()`, `for`, unpacking, and every builtin that walks an
+iterator drive it. A generator is its own iterator, `finally` blocks run where
+they stand, and a body that raises leaves the generator exhausted exactly as a
+return does.
 
 While it runs, a generator's frame is an ordinary frame on the VM's own frame
 stack; `yield` lifts it back off into the generator object. Its saved state is
@@ -15,8 +16,6 @@ here can hold.
 
 - **`yield from`** raises `NotImplementedError: yield from expressions` when the
     code is parsed.
-- **`close()` and `throw()`** are absent: a generator answers `__iter__`,
-    `__next__` and `send` only, and any other attribute raises `AttributeError`.
 - **Async generators.** A `yield` inside an `async def` is refused at compile
     time with `'yield' inside an async function is not supported`, rather than
     building something that does not answer `__aiter__` / `__anext__`.
@@ -27,7 +26,11 @@ here can hold.
     of dropped silently. Bare `return`, and falling off the end, work and raise a
     plain `StopIteration`.
 - **`gi_frame`, `gi_running`, `gi_code`, `gi_yieldfrom`** and the rest of the
-    introspection attributes are absent.
+    introspection attributes are absent. A generator answers `__iter__`,
+    `__next__`, `send`, `close` and `throw`; any other attribute raises
+    `AttributeError`.
+- **`throw()` takes an exception instance only.** CPython also accepts the
+    older `throw(type, value, traceback)` form, deprecated there since 3.12.
 
 ## Divergences
 
@@ -35,7 +38,8 @@ here can hold.
     blocks.** CPython closes a generator when it is finalized, which runs them.
     Destruction here is an iterative heap walk that cannot re-enter the VM to run
     Python, so the saved frame's values are released and its `finally` blocks are
-    not. A generator driven to exhaustion runs them normally, where they stand.
+    not. An explicit `close()` runs them, and a generator driven to exhaustion
+    runs them normally, where they stand.
 
 - **A generator driven from inside a builtin cannot suspend to the host.**
     `for x in gen` and an explicit `next(gen)` put the generator's frame on the

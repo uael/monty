@@ -1834,6 +1834,20 @@ pub(crate) trait ExcTypeExt: Sized {
         .into()
     }
 
+    /// Creates the `GeneratorExit` that `close()` throws into a generator.
+    #[must_use]
+    fn generator_exit() -> RunError {
+        SimpleException::new_none(ExcType::GeneratorExit).into()
+    }
+
+    /// Creates the `RuntimeError` for a generator that yields while closing.
+    ///
+    /// Matches CPython's format: `RuntimeError: generator ignored GeneratorExit`
+    #[must_use]
+    fn runtime_error_generator_ignored_exit() -> RunError {
+        SimpleException::new_msg(ExcType::RuntimeError, "generator ignored GeneratorExit").into()
+    }
+
     /// Creates the `ValueError` for resuming a generator that is running.
     ///
     /// Matches CPython's format: `ValueError: generator already executing`
@@ -2761,6 +2775,12 @@ impl RunError {
     /// Matching only `Exc` prevents uncatchable errors being mistaken for exhaustion.
     pub(crate) fn is_stop_iteration(&self) -> bool {
         matches!(self, Self::Exc(raise) if matches!(raise.exc.exc_type(), ExcType::StopIteration))
+    }
+
+    /// Whether this is the `GeneratorExit` a `close()` threw in, which is how
+    /// a generator ends well rather than an error to report.
+    pub(crate) fn is_generator_exit(&self) -> bool {
+        matches!(self, Self::Exc(raise) if matches!(raise.exc.exc_type(), ExcType::GeneratorExit))
     }
 
     /// Wraps a host exception so it builds a traceback but bypasses `except`.

@@ -12,6 +12,7 @@ use super::{LazyHeapSet, PyTrait, Type, py_trait::PyObjectIdentity};
 use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
+    defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::{HashValue, identity_hash},
     heap::{DropWithContext, HeapId, HeapItem, HeapObjectRead},
@@ -170,6 +171,17 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Generator> {
             "send" => {
                 let value = args.get_one_arg("send", vm.heap)?;
                 vm.resume_generator(self_id, value)
+            }
+            // Ends the body where it stands, running its `finally` blocks.
+            "close" => {
+                args.check_zero_args("close", vm.heap)?;
+                vm.close_generator(self_id).map(|()| CallResult::Value(Value::None))
+            }
+            // Raises at the `yield`, so the body's own handlers get their turn.
+            "throw" => {
+                let value = args.get_one_arg("throw", vm.heap)?;
+                defer_drop!(value, vm);
+                Err(vm.throw_into_generator(self_id, value))
             }
             other => {
                 let other = other.to_owned();

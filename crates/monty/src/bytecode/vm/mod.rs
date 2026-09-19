@@ -2015,6 +2015,9 @@ impl<'h> VM<'h> {
                             return Err(exhausted);
                         }
                         catch!(self, exhausted);
+                        // The handler is now current, so the rest of this arm,
+                        // which belongs to an ordinary return, must not run.
+                        continue;
                     }
                     let value = self.pop();
                     if self.suspended_frames.is_empty() {
@@ -2469,39 +2472,21 @@ impl<'h> VM<'h> {
         stop
     }
 
-    /// Puts a generator's frame back on the stack and leaves `sent` on top of
-    /// it, so the `yield` it stopped at evaluates to that value.
+    /// Puts a generator's frame back on the stack, leaving it current.
     ///
-    /// Returns [`CallResult::FramePushed`]: the generator runs on the VM's own
-    /// loop, and its next `yield` lands a value on the resumer's operand stack
-    /// exactly where a call's return value would.
+    /// The mirror of [`suspend_generator`](Self::suspend_generator): the saved
+    /// region goes back onto the VM stack at whatever base it now has, and the
+    /// frame is rebuilt around it at the instruction it stopped on. The caller
+    /// decides what the resumed frame meets first — a sent value, or an
+    /// exception raised at the `yield`.
     ///
-    /// # Errors
-    /// `ValueError` when the generator is already running, `StopIteration` when
-    /// it has finished, and `TypeError` for a value sent to one that has not
-    /// started — all three as CPython reports them.
-    pub(crate) fn resume_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<CallResult> {
+    /// The generator must be resumable; callers check that first so each can
+    /// word its own refusal.
+    pub(super) fn splice_generator_frame(&mut self, gen_id: HeapId) -> RunResult<()> {
         let HeapData::Generator(generator) = self.heap.get(gen_id) else {
-            unreachable!("resume_generator called off a generator")
+            unreachable!("splice_generator_frame called off a generator")
         };
-        let state = generator.state;
         let func_id = generator.func_id;
-        match state {
-            GeneratorState::Running => {
-                sent.drop_with(self);
-                return Err(ExcType::value_error_generator_running());
-            }
-            GeneratorState::Done => {
-                sent.drop_with(self);
-                return Err(ExcType::stop_iteration());
-            }
-            GeneratorState::Created if !matches!(sent, Value::None) => {
-                sent.drop_with(self);
-                return Err(ExcType::type_error_send_to_just_started());
-            }
-            GeneratorState::Created | GeneratorState::Suspended => {}
-        }
-
         let call_offset = self.current_offset();
         let function = self.interns.get_function(func_id);
         let code = &function.code;
@@ -2548,6 +2533,43 @@ impl<'h> VM<'h> {
             generator.exception_stack = exceptions;
             generator.state = GeneratorState::Suspended;
             drop(handle);
+            return Err(e);
+        }
+        // Handler lookup reads `instruction_ip`, so an exception thrown in at
+        // the `yield` finds the resumed frame's own `try` blocks.
+        self.instruction_ip = ip;
+        Ok(())
+    }
+
+    /// Puts a generator's frame back on the stack and leaves `sent` on top of
+    /// it, so the `yield` it stopped at evaluates to that value.
+    ///
+    /// Returns [`CallResult::FramePushed`]: the generator runs on the VM's own
+    /// loop, and its next `yield` lands a value on the resumer's operand stack
+    /// exactly where a call's return value would.
+    ///
+    /// # Errors
+    /// `ValueError` when the generator is already running, `StopIteration` when
+    /// it has finished, and `TypeError` for a value sent to one that has not
+    /// started — all three as CPython reports them.
+    pub(crate) fn resume_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<CallResult> {
+        let state = self.generator_state(gen_id);
+        match state {
+            GeneratorState::Running => {
+                sent.drop_with(self);
+                return Err(ExcType::value_error_generator_running());
+            }
+            GeneratorState::Done => {
+                sent.drop_with(self);
+                return Err(ExcType::stop_iteration());
+            }
+            GeneratorState::Created if !matches!(sent, Value::None) => {
+                sent.drop_with(self);
+                return Err(ExcType::type_error_send_to_just_started());
+            }
+            GeneratorState::Created | GeneratorState::Suspended => {}
+        }
+        if let Err(e) = self.splice_generator_frame(gen_id) {
             sent.drop_with(self);
             return Err(e);
         }
@@ -2559,6 +2581,71 @@ impl<'h> VM<'h> {
             self.push(sent);
         }
         Ok(CallResult::FramePushed)
+    }
+
+    /// Where a generator is in its life.
+    fn generator_state(&self, gen_id: HeapId) -> GeneratorState {
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("generator_state called off a generator")
+        };
+        generator.state
+    }
+
+    /// Raises `error` inside a suspended generator, at the `yield` it stopped
+    /// at.
+    ///
+    /// The frame goes back on the stack and the error is returned rather than
+    /// raised here, so the run loop unwinds from the generator's own frame:
+    /// its `try` blocks get their turn, its traceback names its own lines, and
+    /// a body that catches the exception carries on to its next `yield`.
+    ///
+    /// The exception is built after the frame is on the stack, so it records
+    /// the `yield` as its raise site and the traceback names the generator's
+    /// own line rather than the caller's.
+    ///
+    /// # Errors
+    /// The thrown error itself when the body does not catch it, and the
+    /// generator's own refusals when it cannot be resumed.
+    pub(crate) fn throw_into_generator(&mut self, gen_id: HeapId, exception: &Value) -> RunError {
+        match self.generator_state(gen_id) {
+            GeneratorState::Running => ExcType::value_error_generator_running(),
+            // Nothing is suspended to raise at, so it raises where it was asked
+            // and leaves the generator exhausted, as CPython does.
+            GeneratorState::Created | GeneratorState::Done => {
+                self.finish_generator(gen_id);
+                self.make_exception(exception, true)
+            }
+            GeneratorState::Suspended => match self.splice_generator_frame(gen_id) {
+                Ok(()) => self.make_exception(exception, true),
+                Err(e) => e,
+            },
+        }
+    }
+
+    /// Ends a suspended generator by throwing `GeneratorExit` into it, running
+    /// its `finally` blocks where they stand.
+    ///
+    /// Driven by a nested `run()` because the answer is how the body ended,
+    /// which only running it can say. A body that swallows the exit and yields
+    /// again is refused, as CPython refuses it: a generator does not get to
+    /// decline being closed.
+    ///
+    /// # Errors
+    /// `RuntimeError` when the body yields again, and anything else the body
+    /// raises on its way out. `GeneratorExit` and `StopIteration` are the two
+    /// ways of ending well and are swallowed.
+    pub(crate) fn close_generator(&mut self, gen_id: HeapId) -> RunResult<()> {
+        match self.generator_state(gen_id) {
+            GeneratorState::Running => return Err(ExcType::value_error_generator_running()),
+            // Never started or already over: there are no `finally` blocks
+            // waiting, so closing is done the moment it is asked for.
+            GeneratorState::Created | GeneratorState::Done => {
+                self.finish_generator(gen_id);
+                return Ok(());
+            }
+            GeneratorState::Suspended => {}
+        }
+        self.drive_generator_close(gen_id)
     }
 
     /// Marks a generator finished and releases whatever it still held.

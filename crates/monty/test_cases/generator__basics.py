@@ -31,6 +31,23 @@ try:
 except StopIteration:
     pass
 
+# === a send() that runs the body out raises StopIteration at the caller ===
+def two():
+    got = yield 1
+    if got:
+        return
+    yield 2
+
+
+e = two()
+assert next(e) == 1
+try:
+    e.send('stop')
+    raise AssertionError('expected StopIteration')
+except StopIteration:
+    pass
+
+
 # === send() resumes it with a value, which the yield evaluates to ===
 s = counter(10)
 assert next(s) == 0

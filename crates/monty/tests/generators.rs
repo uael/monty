@@ -66,20 +66,56 @@ fn yield_outside_a_function_is_refused() {
     assert!(error.contains("'yield' outside function"), "{error}");
 }
 
-/// The surface is `__iter__`, `__next__` and `send`; `close` and `throw` are
-/// not here yet, and say so rather than being quietly absent.
+/// The surface is `__iter__`, `__next__`, `send`, `close` and `throw`. The
+/// introspection attributes are not here, and say so rather than being
+/// quietly absent.
 #[test]
-fn the_surface_is_iter_next_and_send() {
+fn the_surface_is_the_five_methods() {
     let mut repl = session();
     feed(&mut repl, "def f():\n    yield 1\ng = f()");
     assert_eq!(feed(&mut repl, "g.__next__() == 1"), t(true));
-    for method in ["close", "throw", "gi_frame", "gi_running"] {
-        let error = feed_err(&mut repl, &format!("f().{method}"));
+    assert_eq!(feed(&mut repl, "f().close() is None"), t(true));
+    for attr in ["gi_frame", "gi_running", "gi_code", "gi_yieldfrom"] {
+        let error = feed_err(&mut repl, &format!("f().{attr}"));
         assert!(
-            error.contains(&format!("'generator' object has no attribute '{method}'")),
+            error.contains(&format!("'generator' object has no attribute '{attr}'")),
             "{error}"
         );
     }
+}
+
+/// Closing or throwing into a generator that is mid-step is the one
+/// re-entrancy its frame cannot answer, because the frame is already on the
+/// stack. CPython answers the same way.
+#[test]
+fn a_running_generator_can_be_neither_closed_nor_thrown_into() {
+    let mut repl = session();
+    feed(
+        &mut repl,
+        "holder = [None]\ndef f():\n    holder[0].close()\n    yield 1\nholder[0] = f()",
+    );
+    let error = feed_err(&mut repl, "next(holder[0])");
+    assert!(error.contains("generator already executing"), "{error}");
+
+    feed(
+        &mut repl,
+        "box = [None]\ndef g():\n    box[0].throw(ValueError('x'))\n    yield 1\nbox[0] = g()",
+    );
+    let thrown = feed_err(&mut repl, "next(box[0])");
+    assert!(thrown.contains("generator already executing"), "{thrown}");
+}
+
+/// `GeneratorExit` is a `BaseException`, so a broad `except Exception` cannot
+/// be used to refuse a close. Asserted by catching rather than by
+/// `issubclass`, which this build does not have.
+#[test]
+fn generator_exit_is_not_an_exception() {
+    let mut repl = session();
+    feed(
+        &mut repl,
+        "def catches_base():\n    try:\n        raise GeneratorExit()\n    except Exception:\n        return 'exception'\n    except BaseException:\n        return 'base'",
+    );
+    assert_eq!(feed(&mut repl, "catches_base() == 'base'"), t(true));
 }
 
 /// Resuming a generator from inside itself is the one re-entrancy its frame

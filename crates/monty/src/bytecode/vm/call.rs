@@ -33,6 +33,16 @@ use crate::{
     value::{EitherStr, VALUE_SIZE, Value},
 };
 
+/// How a generator's close ended: exiting or returning is closing well, and
+/// anything else is the body's own error to report.
+fn close_outcome(error: RunError) -> RunResult<()> {
+    if error.is_generator_exit() || error.is_stop_iteration() {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 /// Result of executing a call or attribute method.
 ///
 /// Used by the `exec_*` methods and `py_call_attr` implementations to communicate
@@ -505,6 +515,46 @@ impl<'h> VM<'h> {
                 }
                 Err(e) if e.is_stop_iteration() => return Ok(None),
                 Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Runs a suspended generator's `GeneratorExit` to its conclusion, for
+    /// [`close_generator`](VM::close_generator).
+    ///
+    /// A nested `run()` in the shape [`evaluate_function`](Self::evaluate_function)
+    /// uses, because closing has to observe how the body ended rather than
+    /// hand a value back: exiting, returning, yielding again, or raising
+    /// something of its own are four different answers.
+    pub(super) fn drive_generator_close(&mut self, gen_id: HeapId) -> RunResult<()> {
+        if let Err(e) = self.enter_run_reentry() {
+            return Err(e.into());
+        }
+        let mut guard = RunReentryGuard::new(self);
+        let this = &mut *guard;
+
+        let error = match this.splice_generator_frame(gen_id) {
+            Ok(()) => ExcType::generator_exit(),
+            Err(e) => return Err(e),
+        };
+        this.current_frame_mut().should_return = true;
+        if let Some(error) = this.handle_exception(error) {
+            return close_outcome(error);
+        }
+        loop {
+            match this.run() {
+                // A `yield` inside the unwind: the body declined to close.
+                Ok(FrameExit::Return(value)) => {
+                    value.drop_with(this);
+                    return Err(ExcType::runtime_error_generator_ignored_exit());
+                }
+                Ok(exit) => {
+                    let error = this.unsupported_frame_exit("generator close", exit);
+                    if let Some(error) = this.handle_exception(error) {
+                        return close_outcome(error);
+                    }
+                }
+                Err(error) => return close_outcome(error),
             }
         }
     }
