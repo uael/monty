@@ -1362,14 +1362,23 @@ impl<'a, 'i> Compiler<'a, 'i> {
         for decorator in decorators {
             self.compile_expr(decorator)?;
         }
+        // `type(name, bases, namespace)`: the name and the bases tuple are
+        // pushed here, in the enclosing scope, because that is where CPython
+        // evaluates a base expression. Evaluating one in the class body would
+        // let a base name collide with a member of the same name.
+        let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
+        self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
+        self.code.emit_u16(Opcode::BuildTuple, 0)?;
         // Build the class-body function/closure value on the stack...
-        self.emit_make_class_body(body, members, name, position)?;
-        // ...call it with zero args — it runs the body and returns the `Class`.
-        // Record the class statement as the call site so a traceback from inside
-        // the class body attributes this frame to the `class` statement (like
-        // CPython) rather than falling back to `CodeRange::default()`.
+        self.emit_make_class_body(body, members, position)?;
+        // ...call it with zero args — it runs the body and returns the namespace
+        // dict. Record the class statement as the call site so a traceback from
+        // inside the class body attributes this frame to the `class` statement
+        // (like CPython) rather than falling back to `CodeRange::default()`.
         self.code.set_location(position, None);
         self.code.emit_u8(Opcode::CallFunction, 0)?;
+        // ...and the 3-arg `type()` builtin turns the three into the class.
+        self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         // Each call consumes the callable below the current value: `deco(value)`.
         // Reversed so the bottom-most (last pushed) applies first, and located at
         // its own decorator so a traceback pins the one that raised, like CPython.
@@ -1393,30 +1402,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
         &mut self,
         body: &PreparedFunctionDef,
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
     ) -> Result<(), CompileError> {
         let flags = self.flags;
         self.emit_make_callable(body, "class body", |interns, namespace_size| {
-            Self::compile_class_body(
-                &body.body,
-                members,
-                class_name,
-                position,
-                interns,
-                namespace_size,
-                flags,
-            )
+            Self::compile_class_body(&body.body, members, position, interns, namespace_size, flags)
         })
     }
 
     /// Compiles a class body, mirroring
     /// [`compile_function_body`](Self::compile_function_body) but replacing the
-    /// implicit `LoadNone; ReturnValue` tail with a `type(name, (), {...})`
-    /// call: push the class name and an empty bases tuple, then for each
+    /// implicit `LoadNone; ReturnValue` tail with the namespace dict: for each
     /// member (in source order) push `LoadConst <name>` and the member's value
-    /// from its class-body slot, build the namespace dict, and call the 3-arg
-    /// `type()` builtin (which builds the `Class`), then `ReturnValue`.
+    /// from its class-body slot, build the dict, and return it. The caller
+    /// passes it to the 3-arg `type()` builtin along with the class name and
+    /// the bases, both of which belong to the enclosing scope.
     ///
     /// Members are plain locals (the prepare phase forces class-body locals to
     /// never be cells — see `prepare_class_def`), so [`compile_name`](Self::compile_name)
@@ -1425,7 +1425,6 @@ impl<'a, 'i> Compiler<'a, 'i> {
     fn compile_class_body(
         body: &[PreparedNode],
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
         interns: &mut CompileInterns<'_>,
         num_locals: u16,
@@ -1442,12 +1441,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // should point at the class statement, not the last member's line.
         compiler.code.set_location(position, None);
 
-        // type(name, (), {members...}): push the name and empty bases tuple...
-        let class_name_const = compiler.code.add_const(Value::InternString(class_name.name_id))?;
-        compiler.code.emit_u16(Opcode::LoadConst, class_name_const)?;
-        compiler.code.emit_u16(Opcode::BuildTuple, 0)?;
-
-        // ...then the namespace dict: (name, value) for each member in order.
+        // The namespace dict: (name, value) for each member in source order.
+        // The caller turns it into the class, because the name and the bases
+        // belong to the enclosing scope.
         for member in members {
             let name_const = compiler.code.add_const(Value::InternString(member.name_id))?;
             compiler.code.emit_u16(Opcode::LoadConst, name_const)?;
@@ -1455,11 +1451,6 @@ impl<'a, 'i> Compiler<'a, 'i> {
         }
         let member_count = check_collection_size_u16(members.len(), position)?;
         compiler.code.emit_u16(Opcode::BuildDict, member_count)?;
-
-        // ...and call the 3-arg type() builtin, which builds the class object.
-        compiler
-            .code
-            .emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         compiler.code.emit(Opcode::ReturnValue)?;
 
         Ok(compiler.code.build())
