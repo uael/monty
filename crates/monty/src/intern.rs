@@ -976,6 +976,8 @@ pub enum StaticStrings {
     /// `namedtuple(field_names=...)` keyword argument.
     #[strum(serialize = "field_names")]
     FieldNames,
+    /// `dataclasses.fields()` function.
+    Fields,
     /// Kwarg name `file` — `open(file=...)`.
     File,
     /// `zip_longest(fillvalue=...)` keyword.
