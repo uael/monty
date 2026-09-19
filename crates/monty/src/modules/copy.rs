@@ -195,6 +195,7 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         | HeapReadOutput::TypeAliasType(_)
         | HeapReadOutput::Template(_)
         | HeapReadOutput::Interpolation(_)
+        | HeapReadOutput::ClassProperty(_)
         // A shallow copy of an immutable container holds the same items, so
         // CPython hands back the original; only `deepcopy` rebuilds these.
         | HeapReadOutput::Tuple(_)
@@ -330,6 +331,7 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::TypeAliasType(_)
         | HeapReadOutput::Template(_)
         | HeapReadOutput::Interpolation(_)
+        | HeapReadOutput::ClassProperty(_)
         | HeapReadOutput::FunctionDefaults(_) => Ok(source.clone_with_heap(vm.heap)),
         // Refused, with the `TypeError` CPython's pickler raises. Views and
         // iterators are positions into something else; the rest are host

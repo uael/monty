@@ -2022,6 +2022,12 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 on_child(*id);
             }
         }),
+        // Mirrors `py_dec_ref_ids_for_data`: a property owns its getter.
+        HeapData::ClassProperty(property) => {
+            if let Value::Ref(id) = property.fget() {
+                on_child(*id);
+            }
+        }
         // Mirrors `py_dec_ref_ids_for_data`: a template owns its two tuples and
         // an interpolation its four fields.
         HeapData::Template(template) => {
@@ -2197,6 +2203,8 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::Union(union) => union.py_dec_ref_ids(stack),
         // Release the alias's thunk and memoized value (mirrors `for_each_child_id`).
         HeapData::TypeAliasType(alias) => alias.py_dec_ref_ids(stack),
+        // Release the getter (mirrors `for_each_child_id`).
+        HeapData::ClassProperty(property) => property.py_dec_ref_ids(stack),
         // Release the template and interpolation references (mirrors `for_each_child_id`).
         HeapData::Template(template) => template.py_dec_ref_ids(stack),
         HeapData::Interpolation(interpolation) => interpolation.py_dec_ref_ids(stack),

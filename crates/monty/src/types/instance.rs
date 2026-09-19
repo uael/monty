@@ -121,6 +121,22 @@ impl<'h> HeapRead<'h, Instance> {
             [name, value].drop_with(vm);
             return Err(exc);
         }
+        // A `@property` is a data descriptor: it owns the name on the class, so
+        // a write cannot quietly shadow it with an instance attribute. Monty
+        // stores no setter, so every property is read-only.
+        if let Some(attr) = name.as_either_str(vm.heap) {
+            let attr = attr.as_str(vm.interns).to_owned();
+            if let Some(member) = class_member(class_id, &attr, vm) {
+                let is_property =
+                    matches!(member, Value::Ref(id) if matches!(vm.heap.get(id), HeapData::ClassProperty(_)));
+                member.drop_with(vm);
+                if is_property {
+                    let class = class_name(class_id, vm.heap, vm.interns).into_owned();
+                    [name, value].drop_with(vm);
+                    return Err(ExcType::attribute_error_no_setter(&attr, &class));
+                }
+            }
+        }
         self.set_attr_unchecked(name, value, vm)
     }
 
@@ -531,6 +547,19 @@ impl HeapItem for BoundMethod {
 pub(crate) fn instance_getattr(self_id: HeapId, attr: &EitherStr, vm: &mut VM<'_>) -> RunResult<CallResult> {
     let attr_str = attr.as_str(vm.interns);
     if let Some(value) = instance_attr(self_id, attr_str, vm) {
+        // A `@property` is computed on every read, so the member is the getter
+        // rather than the answer. The call goes through the ordinary call path,
+        // which lets the getter push a frame and even suspend to the host.
+        if let Value::Ref(id) = value
+            && let HeapData::ClassProperty(property) = vm.heap.get(id)
+        {
+            let fget = property.fget().clone_with_heap(vm.heap);
+            value.drop_with(vm);
+            vm.heap.inc_ref(self_id);
+            let result = vm.call_function(&fget, ArgValues::One(Value::Ref(self_id)));
+            fget.drop_with(vm);
+            return result;
+        }
         Ok(CallResult::Value(value))
     } else {
         let class_id = instance_class(self_id, vm);

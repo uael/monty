@@ -358,11 +358,22 @@ every construction request. Divergences:
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).
 - Abstract base classes (`abc.ABC`, `@abstractmethod`).
-- `classmethod`, `staticmethod` and `property` as decorators. Decorating a
-    method works, but these three are not constructible: `@property` raises
-    `TypeError: cannot create 'property' instances`, and the other two names are
-    not defined. Any other callable decorates a method the way it decorates a
-    function.
+- `classmethod` and `staticmethod`. Decorating a method works, but neither name
+    is defined, so neither decorator can be written. Any other callable decorates
+    a method the way it decorates a function; `property` is described below.
+- **A `property` is read-only.** `property(fget)` takes the getter alone;
+    `fset`, `fdel` and `doc` raise
+    `NotImplementedError: property() does not yet support the {name} argument`,
+    and `property()` with no getter raises `TypeError: property() takes a getter`
+    where CPython builds a property that raises on read. `p.setter` /
+    `p.getter` / `p.deleter` raise `AttributeError`, so there is no way to add
+    a setter later either. Writing through one raises CPython's own
+    `AttributeError: property '<name>' of '<class>' object has no setter`.
+- **A `property` is looked up on the instance's own class only.** CPython
+    resolves a data descriptor before the instance `__dict__`; Monty reads the
+    instance `__dict__` first, so an attribute bound before the class gained the
+    property would shadow it. Nothing in the sandbox can produce that ordering
+    today, since a write to a name the class binds as a property is refused.
 - **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
     are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
     latter with stringized values, see [typing.md](typing.md)). A class decorator

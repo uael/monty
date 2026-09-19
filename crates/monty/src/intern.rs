@@ -836,6 +836,8 @@ pub enum StaticStrings {
     Discard,
     /// `math.dist()` function.
     Dist,
+    /// `doc` parameter of `property()`.
+    Doc,
     /// `sys.dont_write_bytecode` attribute.
     DontWriteBytecode,
     /// `re.DOTALL` flag
@@ -967,6 +969,10 @@ pub enum StaticStrings {
     /// `repr()`/`str()` text of `False`, interned so rendering allocates nothing.
     #[strum(serialize = "False")]
     FalseRepr,
+    /// `fdel` parameter of `property()`.
+    Fdel,
+    /// `fget` parameter of `property()`.
+    Fget,
     /// `namedtuple(field_names=...)` keyword argument.
     #[strum(serialize = "field_names")]
     FieldNames,
@@ -1031,6 +1037,8 @@ pub enum StaticStrings {
     /// `typing.FrozenSet` marker.
     #[strum(serialize = "FrozenSet")]
     FrozenSet,
+    /// `fset` parameter of `property()`.
+    Fset,
     /// `Path.__fspath__()` method, answered without host I/O.
     #[strum(serialize = "__fspath__")]
     Fspath,

@@ -998,6 +998,19 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::TypeError, format!("cannot convert '{type_}' object to bytes")).into()
     }
 
+    /// Creates the `AttributeError` a write to a read-only `@property` raises.
+    ///
+    /// Matches CPython's format:
+    /// `AttributeError: property '{attr}' of '{class}' object has no setter`
+    #[must_use]
+    fn attribute_error_no_setter(attr: &str, class: &str) -> RunError {
+        SimpleException::new_msg(
+            ExcType::AttributeError,
+            format!("property '{attr}' of '{class}' object has no setter"),
+        )
+        .into()
+    }
+
     /// Creates a TypeError for calling a non-callable type.
     ///
     /// Matches CPython's format: `TypeError: cannot create '{type}' instances`

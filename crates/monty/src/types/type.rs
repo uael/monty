@@ -19,7 +19,7 @@ use crate::{
         dict::{DictKind, dict_fromkeys},
         instance::class_name,
         long_int::{INT_MAX_STR_DIGITS, bigint_to_f64_checked},
-        path,
+        path, property,
         str::StringRepr,
         time,
         timedelta::{self, DAY_MICROSECONDS, MAX_TIMEDELTA_DAYS, MIN_TIMEDELTA_DAYS},
@@ -761,6 +761,8 @@ impl Type {
                 defer_drop!(v, vm);
                 Ok(Value::Bool(v.py_bool(vm)?))
             }
+
+            Self::Property => property::property_init(vm, args),
 
             // CPython words this one differently from the other uncallable types.
             Self::Union => {
