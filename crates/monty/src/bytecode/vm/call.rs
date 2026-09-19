@@ -117,6 +117,20 @@ pub(crate) enum CallResult {
         call: OsFunctionCall,
         effect: PendingEffect,
     },
+    /// The call raises, and the handler must bind the object it raises rather
+    /// than one rebuilt from the error.
+    ///
+    /// `generator.throw(exc)` is the call that needs this: the exception is the
+    /// caller's own object, and an instance of a sandbox exception class is
+    /// only of that class while the handler binds it. An error carries a
+    /// message and not a Python value, so it cannot carry the object; the raise
+    /// goes to the loop instead, which raises it the way `raise` does.
+    Raised {
+        error: Box<RunError>,
+        /// The object to bind, for a value worth keeping; see
+        /// [`VM::keeps_identity`].
+        value: Option<Value>,
+    },
 }
 
 impl<C: ContainsHeap> DropWithContext<C> for CallResult {
@@ -129,6 +143,11 @@ impl<C: ContainsHeap> DropWithContext<C> for CallResult {
             Self::OsCall(call) => call.drop_with(heap),
             Self::AttrLookup { effect, .. } => effect.drop_with(heap),
             Self::FramePushed => {}
+            Self::Raised { value, .. } => {
+                if let Some(value) = value {
+                    value.drop_with(heap);
+                }
+            }
             Self::OsCallWithEffect { call, effect } => {
                 call.drop_with(heap);
                 // Discarded before it ever became a `FrameExit`.
@@ -564,6 +583,18 @@ impl<'h> VM<'h> {
     /// Converts a direct call suspension into a specific synchronous-context error.
     #[cold]
     pub(super) fn unsupported_call_result(&mut self, ctx: &'static str, result: CallResult) -> RunError {
+        // A raise is no suspension: it stands as it is here. Only the object it
+        // would have bound goes, as it does anywhere a nested run rebuilds an
+        // exception from the error alone.
+        let result = match result {
+            CallResult::Raised { error, value } => {
+                if let Some(value) = value {
+                    value.drop_with(self);
+                }
+                return *error;
+            }
+            other => other,
+        };
         let error = match &result {
             CallResult::External(function_name, _) => ExcType::not_implemented(format!(
                 "{ctx}: external function '{}' is not yet supported in this context",
@@ -602,7 +633,9 @@ impl<'h> VM<'h> {
             CallResult::AwaitValue(_) => {
                 ExcType::not_implemented(format!("{ctx}: awaiting a value is not yet supported in this context"))
             }
-            CallResult::Value(_) | CallResult::FramePushed => unreachable!("completed calls are handled above"),
+            CallResult::Value(_) | CallResult::FramePushed | CallResult::Raised { .. } => {
+                unreachable!("completed calls and raises are handled above")
+            }
         };
         result.drop_with(self);
         error.into()

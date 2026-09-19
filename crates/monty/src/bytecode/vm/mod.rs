@@ -158,6 +158,14 @@ macro_rules! handle_call_result {
         match $result {
             Ok(CallResult::Value(result)) => $self.push(result),
             Ok(CallResult::FramePushed) => {}
+            Ok(CallResult::Raised { error, value }) => {
+                // Raised the way `raise` does, so the handler binds the object
+                // the call raised rather than one rebuilt from the error.
+                if let Some(result) = $self.handle_exception_with_value(*error, value) {
+                    return Err(result);
+                }
+                yield_if_parked!($self);
+            }
             Ok(CallResult::External(name, args)) => {
                 let call_id = $self.allocate_call_id();
                 let name_load_ip = $self.ext_function_load_ip.take();
@@ -1954,23 +1962,11 @@ impl<'h> VM<'h> {
                 Opcode::Raise => {
                     let exc = self.pop();
                     let error = self.make_exception(&exc, true); // is_raise=true, hide caret
-                    // Re-raise an instance as-is so `raise e` preserves `e`'s
-                    // identity, like CPython. A bare type or non-exception has
-                    // nothing to reuse and rebuilds from the error.
-                    // An instance of a sandbox exception class is kept for the
-                    // same reason: the handler must bind the object that was
-                    // raised, with its own attributes, not a rebuilt base.
-                    let raised = match &exc {
-                        Value::Ref(id)
-                            if matches!(self.heap.get(*id), HeapData::Exception(_))
-                                || instance_builtin_exc(&exc, self).is_some() =>
-                        {
-                            Some(exc)
-                        }
-                        _ => {
-                            exc.drop_with(self);
-                            None
-                        }
+                    let raised = if self.keeps_identity(&exc) {
+                        Some(exc)
+                    } else {
+                        exc.drop_with(self);
+                        None
                     };
                     if let Some(result) = self.handle_exception_with_value(error, raised) {
                         return Err(result);
@@ -2674,35 +2670,66 @@ impl<'h> VM<'h> {
         generator.state
     }
 
-    /// Raises `error` inside a suspended generator, at the `yield` it stopped
-    /// at, or inside the innermost generator it is delegating to.
+    /// Raises `exception` inside a suspended generator, at the `yield` it
+    /// stopped at, or inside the innermost generator it is delegating to.
     ///
-    /// The frame goes back on the stack and the error is returned rather than
-    /// raised here, so the run loop unwinds from the generator's own frame:
-    /// its `try` blocks get their turn, its traceback names its own lines, and
-    /// a body that catches the exception carries on to its next `yield`.
+    /// The frame goes back on the stack and the raise is handed to the loop
+    /// rather than made here, so the loop unwinds from the generator's own
+    /// frame: its `try` blocks get their turn, its traceback names its own
+    /// lines, and a body that catches the exception carries on to its next
+    /// `yield`.
     ///
     /// The exception is built after the frames are on the stack, so it records
     /// the `yield` as its raise site and the traceback names the generator's
     /// own line rather than the caller's.
     ///
     /// # Errors
-    /// The thrown error itself when the body does not catch it, and the
-    /// generator's own refusals when it cannot be resumed.
-    pub(crate) fn throw_into_generator(&mut self, gen_id: HeapId, exception: &Value) -> RunError {
+    /// The generator's own refusals when it cannot be resumed. The thrown
+    /// exception is no error here: it is the [`CallResult::Raised`] the loop
+    /// makes, which is what binds the object the caller threw.
+    pub(crate) fn throw_into_generator(&mut self, gen_id: HeapId, exception: &Value) -> RunResult<CallResult> {
         match self.generator_state(gen_id) {
-            GeneratorState::Running => ExcType::value_error_generator_running(),
+            GeneratorState::Running => Err(ExcType::value_error_generator_running()),
             // Nothing is suspended to raise at, so it raises where it was asked
             // and leaves the generator exhausted, as CPython does.
             GeneratorState::Created | GeneratorState::Done => {
                 self.finish_generator(gen_id);
-                self.make_exception(exception, true)
+                Ok(self.raise_of(exception))
             }
-            GeneratorState::Suspended => match self.splice_delegation_chain(gen_id) {
-                Ok(()) => self.make_exception(exception, true),
-                Err(e) => e,
-            },
+            GeneratorState::Suspended => {
+                self.splice_delegation_chain(gen_id)?;
+                Ok(self.raise_of(exception))
+            }
         }
+    }
+
+    /// A raise for the loop to make, which binds `exception` itself.
+    ///
+    /// The object goes with it, so the handler binds what the caller threw and
+    /// not a rebuilt base: an instance of a sandbox exception class is only of
+    /// that class while its own object is bound.
+    fn raise_of(&mut self, exception: &Value) -> CallResult {
+        let value = self
+            .keeps_identity(exception)
+            .then(|| exception.clone_with_heap(self.heap));
+        CallResult::Raised {
+            error: Box::new(self.make_exception(exception, true)),
+            value,
+        }
+    }
+
+    /// Whether a raise must bind this object rather than one rebuilt from the
+    /// error it becomes.
+    ///
+    /// True for an exception instance, so `raise e` keeps `e`'s identity as
+    /// CPython does, and for an instance of a sandbox exception class, which is
+    /// of that class only while its own object is bound. A bare type and a
+    /// value that is no exception have nothing worth keeping.
+    fn keeps_identity(&self, exception: &Value) -> bool {
+        let Value::Ref(id) = exception else {
+            return false;
+        };
+        matches!(self.heap.get(*id), HeapData::Exception(_)) || instance_builtin_exc(exception, self).is_some()
     }
 
     /// Puts back the frame the exception belongs in, and every frame that

@@ -173,3 +173,46 @@ assert next(loop) == 0
 assert next(loop) == 1
 assert loop.close() is None
 assert seen == [0, 1]
+
+
+# === throw() binds the object it was given, so a sandbox exception class catches ===
+class Refused(Exception):
+    pass
+
+
+class Worse(Refused):
+    pass
+
+
+def catcher():
+    try:
+        yield 1
+    except Refused as exc:
+        yield 'caught ' + str(exc)
+
+
+c = catcher()
+assert next(c) == 1
+assert c.throw(Refused('why')) == 'caught why'
+
+# a subclass of a sandbox class is caught by the class it descends from
+w = catcher()
+assert next(w) == 1
+assert w.throw(Worse('worse')) == 'caught worse'
+
+# one that never started raises where it was asked, and is still that class there
+unstarted = catcher()
+try:
+    unstarted.throw(Refused('early'))
+    raise AssertionError('expected Refused')
+except Refused as exc:
+    assert str(exc) == 'early'
+
+# and so does one that is over
+over = catcher()
+assert list(over) == [1]
+try:
+    over.throw(Refused('gone'))
+    raise AssertionError('expected Refused')
+except Refused as exc:
+    assert str(exc) == 'gone'

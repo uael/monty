@@ -19,9 +19,11 @@ here can hold.
     time with `'yield' inside an async function is not supported`, rather than
     building something that does not answer `__aiter__` / `__anext__`.
 - **`gi_frame`, `gi_running`, `gi_code`, `gi_yieldfrom`** and the rest of the
-    introspection attributes are absent. A generator answers `__iter__`,
-    `__next__`, `send`, `close` and `throw`; any other attribute raises
-    `AttributeError`.
+    introspection attributes are absent. `__iter__`, `__next__`, `send`,
+    `close` and `throw` are answered when they are called on a generator, and
+    any other name raises `AttributeError`. Reading one of the five rather than
+    calling it raises `AttributeError` too, as reading any builtin method
+    does.
 - **`throw()` takes an exception instance only.** CPython also accepts the
     older `throw(type, value, traceback)` form, deprecated there since 3.12.
 

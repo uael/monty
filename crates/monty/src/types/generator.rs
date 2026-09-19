@@ -205,7 +205,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Generator> {
             "throw" => {
                 let value = args.get_one_arg("throw", vm.heap)?;
                 defer_drop!(value, vm);
-                Err(vm.throw_into_generator(self_id, value))
+                vm.throw_into_generator(self_id, value)
             }
             other => {
                 let other = other.to_owned();
