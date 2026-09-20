@@ -47,9 +47,8 @@ pub struct CodeBuilder {
     /// when accessing undefined local variables.
     local_names: Vec<Option<StringId>>,
 
-    /// Set when [`Opcode::Yield`] is emitted, making the built [`Code`] a
-    /// generator body. Raised here rather than by the compiler so it always
-    /// describes the instructions actually emitted.
+    /// Set when the body holds a `yield` or a `yield from`, making the built
+    /// [`Code`] a generator body; see [`CodeBuilder::mark_generator`].
     is_generator: bool,
 }
 
@@ -461,6 +460,15 @@ impl CodeBuilder {
         )
     }
 
+    /// Marks the body a generator, which a `yield` or a `yield from` does.
+    ///
+    /// The compiler marks it from those expressions and not from
+    /// [`Opcode::Yield`], because an `await` emits a `Yield` too and awaiting
+    /// does not make a generator; see `Expr::Await`.
+    pub fn mark_generator(&mut self) {
+        self.is_generator = true;
+    }
+
     /// Records the current location in the location table if set.
     ///
     /// Returns a `CompileError` if the bytecode offset has grown past
@@ -518,7 +526,6 @@ impl CodeBuilder {
     /// Unconditional terminators enter dead code, where emission is a no-op.
     /// Jump helpers use this path to keep stack-depth tracking centralized.
     fn emit_with_operand(&mut self, op: Opcode, operand: Operand<'_>) -> Result<(), CompileError> {
-        self.is_generator |= op == Opcode::Yield;
         if self.is_dead() {
             return Ok(());
         }
