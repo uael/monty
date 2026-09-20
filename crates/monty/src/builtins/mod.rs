@@ -40,6 +40,7 @@ mod setattr;
 mod sorted;
 mod sum;
 mod type_;
+mod vars;
 mod zip;
 
 use std::{fmt, fmt::Write, str::FromStr};
@@ -152,6 +153,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Getattr => return getattr::builtin_getattr(vm, args),
             Self::Hasattr => return hasattr::builtin_hasattr(vm, args),
             Self::Globals => globals::builtin_globals(vm, args),
+            Self::Vars => vars::builtin_vars(vm, args),
             Self::Hash => hash::builtin_hash(vm, args),
             Self::Hex => hex::builtin_hex(vm, args),
             Self::Id => id::builtin_id(vm, args),

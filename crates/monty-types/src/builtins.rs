@@ -95,7 +95,7 @@ pub enum BuiltinsFunctions {
     // Super,
     // tuple - handled by Type enum
     Type,
-    // Vars,
+    // Vars - appended at the end, see below
     Zip,
     // __import__ - not planned
     // Appended out of alphabetical order: the discriminant is emitted as a
@@ -127,4 +127,6 @@ pub enum BuiltinsFunctions {
     /// `compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)`,
     /// appended after [`Self::Globals`].
     Compile,
+    /// `vars(object=...)`, appended after [`Self::Compile`].
+    Vars,
 }

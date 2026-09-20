@@ -9,7 +9,8 @@ Python.
 `abs`, `all`, `any`, `bin`, `callable`, `chr`, `divmod`, `enumerate`, `eval`, `exec`,
 `filter`, `format`, `getattr`, `globals`, `hasattr`, `hash`, `hex`, `id`, `isinstance`,
 `issubclass`, `iter`, `len`, `locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`,
-`pow`, `print`, `repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
+`pow`, `print`, `repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `vars`,
+`zip`.
 `eval`, `exec`, `globals` and `locals` are described in [eval_exec.md](eval_exec.md).
 
 ## Implemented type constructors (also builtins)
@@ -23,7 +24,7 @@ Python.
 These raise `NameError`:
 
 - **Imports**: `__import__`.
-- **Namespace introspection**: `vars`, `dir`.
+- **Namespace introspection**: `dir`.
 - **Interactive**: `input`, `breakpoint`, `help`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`.
 - **Construction / coercion**: `bytearray`, `complex`, `memoryview`, `ascii`.
@@ -162,6 +163,15 @@ Feed the call through `eval()` / `exec()`, whose source is never type-checked, o
     those (see [typing.md](typing.md)), or a tuple of those. Passing a
     host-supplied dataclass / namedtuple as the second argument raises
     `TypeError`.
+- **`vars(obj)` gives a copy, not the live `__dict__`** — CPython hands back the
+    object's own mapping, so `vars(obj)['x'] = 1` sets the attribute. Monty
+    builds a fresh dict of the namespace, so a write to it never reaches the
+    object, the way `globals()` and `locals()` already answer here (see
+    [eval_exec.md](eval_exec.md)). `vars()` with no argument is `locals()`, as
+    in CPython. Only a module, a class and an instance carry a namespace; every
+    other object raises
+    `TypeError: vars() argument must have __dict__ attribute`.
+
 - **`type` is a built-in function, not the class `type`.** `repr(type)` reads
     `<built-in function type>` and `type(type)` reads
     `<class 'builtin_function_or_method'>`, where CPython reads
