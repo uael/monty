@@ -1419,6 +1419,10 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 // LambdaRaw should be converted to Lambda during prepare phase
                 unreachable!("Expr::LambdaRaw should not exist after prepare phase")
             }
+            Expr::GenExprRaw { .. } => {
+                // GenExprRaw should be converted to Lambda during prepare phase
+                unreachable!("Expr::GenExprRaw should not exist after prepare phase")
+            }
 
             Expr::YieldFrom(value) => {
                 if let Some(refusal) = self.flags.yield_refusal {
