@@ -60,9 +60,11 @@ order and error wording, but with these divergences:
     message matches what `object.__init_subclass__` produces
     (`A.__init_subclass__() takes no keyword arguments`).
 - Only `__doc__` is synthesized into the namespace when absent (as `None`,
-    matching CPython). CPython also sets `__module__`, `__qualname__`,
-    `__dict__`, `__weakref__`, etc.; those attributes raise `AttributeError`
-    in Monty, as for compiled classes.
+    matching CPython). CPython also sets `__qualname__`, `__dict__`,
+    `__weakref__`, etc.; those attributes raise `AttributeError` in Monty, as
+    for compiled classes. `__module__` is answered, but it is not in the
+    namespace: it is read after it, so a class that binds the name itself
+    shadows the answer.
 - **Non-string namespace keys raise `TypeError`**
     (`non-string key (int) in the namespace of class 'A'`). CPython accepts
     them with only a `RuntimeWarning`; Monty has no warnings machinery, so it
@@ -509,11 +511,12 @@ every construction request. Divergences:
     `@dataclass(frozen=True)` instance, which it writes to and `obj.x = v`
     refuses — the same escape hatch CPython's generated `__init__` uses. On a
     class object it does not write at all, where `Foo.x = v` sets a class member.
-- Introspection attributes other than `__name__`, `__doc__`, `__annotations__`
-    and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`, `Foo.__bases__`,
-    `Foo.__mro__`, `Foo.__qualname__`, `Foo.__module__`, and explicit
+- Introspection attributes other than `__name__`, `__module__`, `__doc__`,
+    `__annotations__` and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`,
+    `Foo.__bases__`, `Foo.__mro__`, `Foo.__qualname__`, and explicit
     `obj.__repr__()` / `obj.__str__()` calls when the class defines none, all
-    raise `AttributeError`.
+    raise `AttributeError`. `Foo.__module__` reads `'__main__'` for every
+    class, because Monty runs one module, which is what `__name__` reads too.
 - Class-body statements other than a `def`, a simple `name [: T] = <expr>`
     variable assignment, `pass`, `...`, or a docstring, e.g. `if`/`for`/`while`
     in the class body, or tuple/multiple assignment targets (rejected at parse

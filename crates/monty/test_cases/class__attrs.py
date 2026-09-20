@@ -173,6 +173,15 @@ Point.self_ref = None
 assert Point.self_ref is None
 
 
+# === a class of its own shadows the module name ===
+class Named:
+    __module__ = 'named'
+
+
+assert Named.__module__ == 'named'
+assert Named().__module__ == 'named'
+
+
 # === isinstance against `type` reads whether the value is a class ===
 class Plain:
     pass

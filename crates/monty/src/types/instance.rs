@@ -21,6 +21,7 @@ use crate::{
         copy::{Memo, PyDeepCopy, deep_copy, deep_copy_attrs},
         dataclasses::{self, DataclassHash},
     },
+    types::class::class_default,
     value::{EitherStr, Value},
 };
 
@@ -949,6 +950,10 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 }
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
+///
+/// A class attribute Monty synthesizes rather than keeping in a namespace is
+/// read last, as CPython reads one the class itself binds first; see
+/// [`class_default`].
 pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
     class_chain(class_id, vm)
         .into_iter()
@@ -959,6 +964,7 @@ pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<
                 .map(|v| v.clone_with_heap(vm.heap)),
             _ => None,
         })
+        .or_else(|| class_default(name, vm))
 }
 
 /// A class and its bases, derived class first.

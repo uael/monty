@@ -14,6 +14,7 @@ use crate::{
         BorrowedHeapReadMut, DropGuard, DropWithContext, HeapId, HeapItem, HeapObjectRead, HeapRead,
         heap_read_ref_as_field_mut,
     },
+    intern::StaticStrings,
     types::{Union, str::allocate_string},
     value::{EitherStr, Value},
 };
@@ -277,10 +278,13 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
         // Otherwise look up a member (method or class variable) in the namespace.
         match self.get(vm.heap).namespace.get_by_str(attr_str, vm.heap, vm.interns) {
             Some(value) => Ok(Some(CallResult::Value(value.clone_with_heap(vm.heap)))),
-            None => Err(ExcType::attribute_error_type(
-                self.get(vm.heap).name.as_str(vm.interns),
-                attr_str,
-            )),
+            None => match class_default(attr_str, vm) {
+                Some(value) => Ok(Some(CallResult::Value(value))),
+                None => Err(ExcType::attribute_error_type(
+                    self.get(vm.heap).name.as_str(vm.interns),
+                    attr_str,
+                )),
+            },
         }
     }
 
@@ -302,7 +306,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
             .get(vm.heap)
             .namespace
             .get_by_str(attr_str, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap));
+            .map(|v| v.clone_with_heap(vm.heap))
+            .or_else(|| class_default(attr_str, vm));
         if let Some(member) = member {
             defer_drop!(member, vm);
             vm.call_function(member, args)
@@ -314,6 +319,17 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
             ))
         }
     }
+}
+
+/// A class attribute Monty synthesizes rather than keeping in the namespace,
+/// which is `__module__` alone.
+///
+/// Monty runs one module, so every class is written in `__main__`, which is
+/// what `__name__` reads there too. In CPython this is an ordinary entry of the
+/// class dict, so it is read after the namespace: a class that binds the name
+/// itself shadows it, and an instance of the class inherits it.
+pub(crate) fn class_default(attr: &str, vm: &VM<'_>) -> Option<Value> {
+    (attr == "__module__").then(|| Value::InternString(vm.interns.intern_static(StaticStrings::DunderMain)))
 }
 
 impl HeapItem for Class {
