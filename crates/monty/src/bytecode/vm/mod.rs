@@ -60,16 +60,13 @@ use crate::{
     value::{EitherStr, Value},
 };
 
-/// Result of executing Await opcode.
+/// What the VM must do after an await could not settle where it stood.
 ///
-/// Indicates what the VM should do after awaiting a value:
-/// - `ValueReady`: the awaited value resolved immediately, push it
-/// - `FramePushed`: a new frame was pushed for coroutine execution
-/// - `Yield`: all tasks blocked, yield to caller with pending futures
+/// A wait that settles leaves its value on the stack and reports nothing, so
+/// this says only which of the two ways it did not: another task took over, or
+/// none could and the host must resolve what is pending.
 enum AwaitResult {
-    /// The awaited value resolved immediately (e.g., resolved ExternalFuture).
-    ValueReady(Value),
-    /// A new frame was pushed to execute a coroutine.
+    /// Another task's frame is now the current one.
     FramePushed,
     /// All tasks are blocked - yield to caller with pending futures.
     Yield(Vec<CallId>),
@@ -213,12 +210,12 @@ macro_rules! handle_call_result {
             Ok(CallResult::AwaitValue(value)) => {
                 // Push the value and implicitly await it (used by asyncio.run())
                 $self.push(value);
-                match $self.exec_get_awaitable() {
-                    Ok(AwaitResult::ValueReady(value)) => $self.push(value),
-                    Ok(AwaitResult::FramePushed) => {}
-                    Ok(AwaitResult::Yield(pending_calls)) => {
+                match $self.await_pushed() {
+                    Ok(None) => {}
+                    Ok(Some(AwaitResult::Yield(pending_calls))) => {
                         return Ok(FrameExit::ResolveFutures(pending_calls));
                     }
+                    Ok(Some(AwaitResult::FramePushed)) => {}
                     Err(e) => catch!($self, e),
                 }
             }
@@ -2055,7 +2052,13 @@ impl<'h> VM<'h> {
                         .expect("Send offset resolved to a negative or overflowing IP");
                     self.current_frame.delegating = Some(Delegation { yield_ip, done_ip });
                     match self.send_to_receiver(done_ip) {
-                        Ok(()) => {}
+                        Ok(None) => {}
+                        // A future the host must resolve: every task is blocked,
+                        // so control goes back to it.
+                        Ok(Some(AwaitResult::Yield(pending_calls))) => {
+                            return Ok(FrameExit::ResolveFutures(pending_calls));
+                        }
+                        Ok(Some(AwaitResult::FramePushed)) => {}
                         Err(e) => catch!(self, e),
                     }
                 }
@@ -2110,9 +2113,6 @@ impl<'h> VM<'h> {
                         // Spawned task completed - handle task completion
                         let result = self.handle_task_completion(value);
                         match result {
-                            Ok(AwaitResult::ValueReady(v)) => {
-                                self.push(v);
-                            }
                             Ok(AwaitResult::FramePushed) => {}
                             Ok(AwaitResult::Yield(pending)) => {
                                 // All tasks blocked - return to host
@@ -2166,21 +2166,10 @@ impl<'h> VM<'h> {
                     }
                 }
                 // Async/Await
+                // Leaves what drives the wait on the stack; the `Send` loop the
+                // compiler emits after this steps it.
                 Opcode::Await => {
-                    let result = self.exec_get_awaitable();
-                    match result {
-                        Ok(AwaitResult::ValueReady(value)) => {
-                            self.push(value);
-                        }
-                        Ok(AwaitResult::FramePushed) => {}
-                        Ok(AwaitResult::Yield(pending_calls)) => {
-                            // All tasks are blocked - return control to host
-                            return Ok(FrameExit::ResolveFutures(pending_calls));
-                        }
-                        Err(e) => {
-                            catch!(self, e);
-                        }
-                    }
+                    try_catch!(self, self.exec_get_awaitable());
                 }
                 // Unpacking - route through exception handling
                 Opcode::UnpackSequence => {
@@ -2877,24 +2866,33 @@ impl<'h> VM<'h> {
     /// the VM's own loop and can suspend to the host like any other. Any other
     /// iterator is stepped in place: it has no `send`, so only `None` may be
     /// passed to it, which is all a bare `yield from` over an iterable does.
-    fn send_to_receiver(&mut self, done_ip: usize) -> RunResult<()> {
+    fn send_to_receiver(&mut self, done_ip: usize) -> RunResult<Option<AwaitResult>> {
         let sent = self.pop();
         let Value::Ref(receiver_id) = *self.peek() else {
             sent.drop_with(self);
             let name = self.peek().py_type_name(self).into_owned();
             return Err(ExcType::type_error_not_iterator(&name));
         };
+        // A future drives its own wait rather than taking a value, so it is
+        // polled where a generator would be sent to.
+        if matches!(
+            self.heap.get(receiver_id),
+            HeapData::GatherFuture(_) | HeapData::ExternalFuture(_)
+        ) {
+            sent.drop_with(self);
+            return self.poll_future_receiver(receiver_id, done_ip);
+        }
         if matches!(self.heap.get(receiver_id), HeapData::Generator(_)) {
             return match self.resume_generator(receiver_id, sent) {
                 Ok(CallResult::FramePushed) => {
                     self.current_frame.delegated_return = Some(done_ip);
-                    Ok(())
+                    Ok(None)
                 }
                 // A generator already finished has nothing left to delegate to,
                 // so the delegation ends with the `None` it would have returned.
                 Err(e) if e.is_stop_iteration() => {
                     self.finish_delegation(done_ip, Value::None);
-                    Ok(())
+                    Ok(None)
                 }
                 Ok(other) => Err(self.unsupported_call_result("yield from", other)),
                 Err(e) => Err(e),
@@ -2918,7 +2916,7 @@ impl<'h> VM<'h> {
             // with `None`, as it does in CPython.
             self.finish_delegation(done_ip, Value::None);
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Ends a delegation in place: the receiver goes, `result` takes its

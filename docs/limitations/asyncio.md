@@ -61,9 +61,11 @@ time (see [language.md](language.md)).
     protocols do not exist.
 - Async comprehensions (`[x async for x in ...]`) are rejected at parse
     time.
-- There is no `__await__` protocol. Awaitables are only the things Monty
-    knows internally: coroutines from `async def`, gather futures, and external
-    function call futures returned by host bindings.
+- **`asyncio.run()` takes only what drives its own wait**: a coroutine, a
+    gather future or an external function call future. An object with
+    `__await__` is refused with
+    `TypeError: '{type}' object can't be awaited`, where CPython awaits it.
+    An ordinary `await` accepts it.
 
 ## `asyncio.sleep()` waits at the call, not at the `await`
 

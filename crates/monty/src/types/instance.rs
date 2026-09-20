@@ -867,6 +867,19 @@ pub(crate) fn class_dunder<'v>(class_id: HeapId, dunder: &str, vm: &'v VM<'_>) -
         })
 }
 
+/// The sandbox class of a heap value, or `None` for one that has no class.
+///
+/// An instance of a class that inherits `str` is a `Str` that holds its class
+/// rather than an `Instance` (see [`crate::types::str::Str`]), so a dunder
+/// dispatch that must find either one asks here instead of [`instance_class`].
+pub(crate) fn value_class(id: HeapId, vm: &VM<'_>) -> Option<HeapId> {
+    match vm.heap.get(id) {
+        HeapData::Instance(instance) => Some(instance.class),
+        HeapData::Str(s) => s.class(),
+        _ => None,
+    }
+}
+
 /// Returns the `HeapId` of `self_id`'s class object.
 pub(crate) fn instance_class(self_id: HeapId, vm: &VM<'_>) -> HeapId {
     match vm.heap.get(self_id) {

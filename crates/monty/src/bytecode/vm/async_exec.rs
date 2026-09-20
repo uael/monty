@@ -13,11 +13,12 @@ use smallvec::{SmallVec, smallvec};
 
 use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, function_namespace, stack_index};
 use crate::{
+    args::ArgValues,
     asyncio::{
         AwaitedGather, Awaiter, CallId, ExternalFuture, ExternalFutureState, GatherFuture, GatherState,
         PendingChildren, TaskId,
     },
-    bytecode::vm::scheduler::SerializedTaskFrame,
+    bytecode::{CallResult, vm::scheduler::SerializedTaskFrame},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{
@@ -27,8 +28,9 @@ use crate::{
     object_bridge::MontyObjectExt,
     run_progress::{ExtFunctionResult, ExtFunctionResultExt},
     types::{
-        List, Type,
-        generator::{Generator, GeneratorKind, GeneratorState},
+        List,
+        generator::{GeneratorKind, GeneratorState},
+        instance::{call_member_bound, class_defines, class_member, value_class},
     },
     value::Value,
 };
@@ -40,78 +42,127 @@ impl<'h> VM<'h> {
         next == Some(&(Opcode::Await as u8)) && self.scheduler.can_await_eagerly()
     }
 
-    /// Executes the Await opcode.
+    /// Executes the Await opcode: leaves on the stack what drives the wait.
     ///
-    /// Pops the awaitable from the stack and handles it based on its type:
-    /// - a coroutine: validates it has not run, then splices its frame in
-    /// - `ExternalFuture`: blocks until resolved or yields if not ready
-    /// - `GatherFuture`: spawns tasks for coroutines and tracks external futures
-    ///
-    /// Returns `AwaitResult` indicating what action the VM should take.
-    pub(super) fn exec_get_awaitable(&mut self) -> Result<AwaitResult, RunError> {
-        let this = self;
-        let awaitable = this.pop();
-        defer_drop!(awaitable, this);
-
-        let awaiter = Awaiter::Task(
-            this.scheduler
-                .current_task_id()
-                .expect("exec_get_awaitable called without a current task"),
-        );
-
-        match awaitable {
-            Value::Ref(heap_id) => {
-                let heap_id = *heap_id;
-                let poll = match this.heap.read(heap_id) {
-                    HeapReadOutput::Generator(coro) => return this.await_coroutine(coro),
-                    HeapReadOutput::GatherFuture(gather) => this.await_gather_future(gather, awaiter)?,
-                    HeapReadOutput::ExternalFuture(mut fut) => this.await_external_future(&mut fut, awaiter)?,
-                    _ => return Err(ExcType::object_not_awaitable(&awaitable.py_type_name(this))),
-                };
-                match poll {
-                    Poll::Ready(value) => Ok(AwaitResult::ValueReady(value)),
-                    Poll::Pending => {
-                        this.scheduler.block_current_on(heap_id, this.heap);
-                        this.switch_or_yield()
-                    }
+    /// A coroutine, an `ExternalFuture` and a `GatherFuture` drive their own
+    /// wait and stay where they are, for the `Send` loop after this to step.
+    /// Anything else must define `__await__`, and what that hands back takes
+    /// its place, which is the receiver `Send` then delegates into.
+    pub(super) fn exec_get_awaitable(&mut self) -> Result<(), RunError> {
+        let Value::Ref(id) = *self.peek() else {
+            let name = self.peek().py_type_name(self).into_owned();
+            return Err(ExcType::object_not_awaitable(&name));
+        };
+        match self.heap.get(id) {
+            // A plain generator is no awaitable, which its own kind says.
+            HeapData::Generator(saved) if saved.kind == GeneratorKind::Coroutine => {
+                if saved.state == GeneratorState::Created {
+                    Ok(())
+                } else {
+                    Err(ExcType::cannot_reuse_already_awaited_coroutine())
                 }
             }
-            _ => Err(ExcType::object_not_awaitable(&awaitable.py_type_name(this))),
+            HeapData::GatherFuture(_) | HeapData::ExternalFuture(_) => Ok(()),
+            _ => self.await_dunder(id),
         }
     }
 
-    /// Awaits a coroutine by splicing its frame in as a delegation.
+    /// Puts what an object's own `__await__` hands back in its place.
     ///
-    /// A coroutine is a saved frame (see [`GeneratorKind`]), so awaiting one is
-    /// resuming it. The coroutine stays on the awaiter's stack as the receiver
-    /// and the resumed frame carries `delegated_return`, so the value the body
-    /// returns takes its place where the `await` stands, exactly as the result
-    /// of a `yield from` does. A plain generator is not awaitable.
-    fn await_coroutine(&mut self, coro: HeapObjectRead<'h, Generator>) -> Result<AwaitResult, RunError> {
-        let coro_id = coro.id();
-        let saved = coro.get(self.heap);
-        let (kind, state) = (saved.kind, saved.state);
-        drop(coro);
-        if kind != GeneratorKind::Coroutine {
-            let name = Type::Generator.name(self.heap, self.interns).into_owned();
+    /// CPython awaits anything whose type defines `__await__` and hands back an
+    /// iterator, and the `Send` loop drives that iterator exactly as a
+    /// `yield from` drives one.
+    ///
+    /// The awaitable leaves the stack before the call, so a `__await__` that is
+    /// a generator function hands its generator straight back into the slot the
+    /// awaitable held, and one that is an ordinary function runs as a frame
+    /// whose return value lands in that same slot. Either way the `Send` that
+    /// follows finds its receiver there.
+    fn await_dunder(&mut self, id: HeapId) -> Result<(), RunError> {
+        let this = self;
+        let member = value_class(id, this)
+            .filter(|class_id| class_defines(*class_id, "__await__", this))
+            .and_then(|class_id| class_member(class_id, "__await__", this));
+        let Some(member) = member else {
+            let name = this.peek().py_type_name(this).into_owned();
+            return Err(ExcType::object_not_awaitable(&name));
+        };
+        defer_drop!(member, this);
+        // `call_member_bound` takes its own reference on the awaitable for the
+        // `self` it binds, so the stack gives its one up first.
+        let awaitable = this.pop();
+        defer_drop!(awaitable, this);
+        match call_member_bound(member, id, ArgValues::Empty, this)? {
+            CallResult::Value(receiver) => {
+                this.push(receiver);
+                Ok(())
+            }
+            // The frame's own `ReturnValue` pushes the receiver into the slot
+            // the awaitable just left.
+            CallResult::FramePushed => Ok(()),
+            other => Err(this.unsupported_call_result("__await__", other)),
+        }
+    }
+
+    /// Polls a future the `await` loop is waiting on.
+    ///
+    /// A future settles the `await` rather than yielding through it, so a ready
+    /// one ends the delegation with its value. A pending one belongs to the
+    /// scheduler from here: the frame gives the future up and stands at the end
+    /// of the loop, so the value the host later resolves lands exactly where
+    /// the `await` left off.
+    pub(super) fn poll_future_receiver(
+        &mut self,
+        receiver_id: HeapId,
+        done_ip: usize,
+    ) -> RunResult<Option<AwaitResult>> {
+        let awaiter = Awaiter::Task(
+            self.scheduler
+                .current_task_id()
+                .expect("a future is awaited without a current task"),
+        );
+        let poll = match self.heap.read(receiver_id) {
+            HeapReadOutput::GatherFuture(gather) => self.await_gather_future(gather, awaiter)?,
+            HeapReadOutput::ExternalFuture(mut future) => self.await_external_future(&mut future, awaiter)?,
+            _ => unreachable!("poll_future_receiver is reached off a future alone"),
+        };
+        match poll {
+            Poll::Ready(value) => {
+                self.finish_delegation(done_ip, value);
+                Ok(None)
+            }
+            Poll::Pending => {
+                self.scheduler.block_current_on(receiver_id, self.heap);
+                self.pop().drop_with(self);
+                // Only where the frame resumes moves. `instruction_ip` stays on
+                // the `Send`, so a refusal while the task is parked names the
+                // `await` the wait belongs to rather than the line after it.
+                self.current_frame.ip = done_ip;
+                self.current_frame.delegating = None;
+                self.switch_or_yield().map(Some)
+            }
+        }
+    }
+
+    /// Awaits the value on top of the stack where no `Send` loop was compiled,
+    /// which is how `asyncio.run()` hands a coroutine back from Rust.
+    ///
+    /// Nothing here can take a value a receiver yields, so only what drives its
+    /// own wait may be awaited; an object with `__await__` is refused rather
+    /// than half driven. See `limitations/asyncio.md`.
+    pub(super) fn await_pushed(&mut self) -> RunResult<Option<AwaitResult>> {
+        self.exec_get_awaitable()?;
+        let drives_itself = matches!(*self.peek(), Value::Ref(id) if matches!(
+            self.heap.get(id),
+            HeapData::Generator(_) | HeapData::GatherFuture(_) | HeapData::ExternalFuture(_)
+        ));
+        if !drives_itself {
+            let name = self.peek().py_type_name(self).into_owned();
             return Err(ExcType::object_not_awaitable(&name));
         }
-        if state != GeneratorState::Created {
-            return Err(ExcType::cannot_reuse_already_awaited_coroutine());
-        }
-        // The `await` resumes here once the body returns, which is where
-        // `finish_delegation` puts the frame back.
         let done_ip = self.current_frame.ip;
-        self.heap.inc_ref(coro_id);
-        self.push(Value::Ref(coro_id));
-        if let Err(e) = self.splice_generator_frame(coro_id) {
-            // The receiver never became one, so it goes rather than waiting for
-            // a delegation that will not end.
-            self.pop().drop_with(self);
-            return Err(e);
-        }
-        self.current_frame.delegated_return = Some(done_ip);
-        Ok(AwaitResult::FramePushed)
+        self.push(Value::None);
+        self.send_to_receiver(done_ip)
     }
 
     /// Awaits a gather future from the user's `await gather` site.

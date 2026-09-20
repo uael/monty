@@ -1803,12 +1803,32 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 if self.flags.forbid_await {
                     return Err(CompileError::new("'await' outside function", expr_loc.position));
                 }
-                // Await expressions: compile the inner expression, then emit Await
-                // Await handles a coroutine, an ExternalFuture and a GatherFuture
+                // The same delegation loop `yield from` compiles to, which is
+                // how CPython compiles an `await` too:
+                //
+                //   <value>; Await       receiver
+                //   LoadNone             receiver, None: the first send
+                // start:
+                //   Send -> done         receiver, yielded  (or jumps to done)
+                //   Yield                receiver, sent-in
+                //   Jump start
+                // done:                  what the receiver settled on
+                //
+                // `Await` leaves what drives the wait: a coroutine, a future,
+                // or what the object's own `__await__` handed back. `Send`
+                // steps it, and the `Yield` between the two is reached only by
+                // a `__await__` that yields, which is how a word of a model
+                // says an act to whoever drives its frame.
                 self.compile_expr(value)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
                 self.code.emit(Opcode::Await)?;
+                self.code.emit(Opcode::LoadNone)?;
+                let start = self.code.current_jump_target();
+                let done = self.code.emit_jump(Opcode::Send)?;
+                self.code.emit(Opcode::Yield)?;
+                self.code.emit_jump_to(Opcode::Jump, start)?;
+                self.code.patch_jump(done)?;
             }
 
             Expr::Slice { lower, upper, step } => {

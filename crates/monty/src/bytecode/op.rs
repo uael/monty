@@ -404,16 +404,15 @@ pub enum Opcode {
     ReturnValue = 101,
 
     // === Async/Await ===
-    /// Await the TOS value.
+    /// Replace the TOS awaitable with what drives the wait.
     ///
-    /// Handles a coroutine, an `ExternalFuture` and a `GatherFuture`.
-    /// For a coroutine: validates it has not run, then splices its frame in as
-    /// a delegation, so the value its body returns lands where the `await` is.
-    /// For `ExternalFuture`: if resolved, pushes result; if pending, blocks task.
-    /// For `GatherFuture`: spawns all coroutines as tasks and blocks until completion.
+    /// A coroutine, an `ExternalFuture` and a `GatherFuture` drive their own
+    /// wait and stay where they are. Anything else must define `__await__`,
+    /// and what that hands back takes its place. The `Send` loop the compiler
+    /// emits after this steps whichever it is; see `Expr::Await`.
     ///
     /// Raises `TypeError` if TOS is not awaitable.
-    /// Raises `RuntimeError` if coroutine/future has already been awaited.
+    /// Raises `RuntimeError` if the coroutine has already been awaited.
     Await = 102,
 
     // === Generators ===
