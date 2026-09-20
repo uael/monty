@@ -194,10 +194,6 @@ impl<'h> PyValue<'h> {
             Self::Cell(cell) => Ok(write!(f, "<cell: {} object>", cell.get(vm.heap).0.py_type_name(vm))?),
             Self::Exception(e) => Ok(e.get(vm.heap).py_repr_fmt(f)?),
             Self::Module(m) => Ok(write!(f, "<module '{}'>", m.get(vm.heap).name_str(vm.interns))?),
-            Self::Coroutine(coro) => {
-                let func = vm.interns.get_function(coro.get(vm.heap).func_id);
-                Ok(write!(f, "<coroutine object {}>", vm.interns.get_str(func.name.name_id))?)
-            }
             Self::GatherFuture(gather) => Ok(write!(f, "<gather({})>", gather.get(vm.heap).item_count())?),
             Self::ExternalFuture(fut) => Ok(write!(f, "<coroutine external_future({})>", fut.get(vm.heap).call_id.raw())?),
         })
@@ -221,7 +217,7 @@ impl<'h> PyTrait<'h> for PyValue<'h> {
             Self::Cell(_) => Type::Cell,
             Self::Exception(e) => e.py_type(vm),
             Self::Module(_) => Type::Module,
-            Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
         })
     }
 
