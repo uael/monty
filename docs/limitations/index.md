@@ -35,9 +35,8 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - f-strings (including the `=` debug form), `str.format()` and `format()`, with `!r` / `!s` / `!a` conversions,
     format specs and nested replacement fields
 - `async` / `await`, and the five functions of `asyncio`, see [asyncio.md](asyncio.md)
-- Generator functions: `def` with `yield`, `yield from`, and the `send` / `close` / `throw` surface,
-    see [generators.md](generators.md).
-    Generator *expressions* parse, but currently materialise to a `list`
+- Generators: `def` with `yield`, `yield from`, generator expressions, and the
+    `send` / `close` / `throw` surface, see [generators.md](generators.md)
 - `import x`, `import x.y`, `from x import y, z as w`
 - Starred unpacking everywhere CPython allows it
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)

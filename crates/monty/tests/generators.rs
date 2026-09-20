@@ -201,14 +201,42 @@ fn a_delegating_generator_survives_dump_and_load() {
     assert_eq!(feed(&mut back, "log == ['closed']"), t(true));
 }
 
-/// A generator expression is still a list comprehension, so it is eager and is
-/// a `list`. Only `def`-with-`yield` builds a generator today.
+/// A generator expression is a generator, and it is lazy: its body runs one
+/// element at a time, and the outermost iterable alone is read when the
+/// expression is written.
 #[test]
-fn a_generator_expression_is_not_yet_lazy() {
+fn a_generator_expression_is_lazy() {
     let mut repl = session();
-    assert_eq!(feed(&mut repl, "type(x for x in [1, 2]).__name__ == 'list'"), t(true));
-    feed(&mut repl, "def f():\n    yield 1");
-    assert_eq!(feed(&mut repl, "type(f()).__name__ == 'generator'"), t(true));
+    assert_eq!(
+        feed(&mut repl, "type(x for x in [1, 2]).__name__ == 'generator'"),
+        t(true)
+    );
+    feed(&mut repl, "seen = []");
+    feed(&mut repl, "def note(x):\n    seen.append(x)\n    return x");
+    feed(&mut repl, "g = (note(x) for x in range(3))");
+    assert_eq!(feed(&mut repl, "seen == []"), t(true));
+    assert_eq!(feed(&mut repl, "next(g) == 0"), t(true));
+    assert_eq!(feed(&mut repl, "seen == [0]"), t(true));
+    assert_eq!(feed(&mut repl, "list(g) == [1, 2]"), t(true));
+}
+
+/// A generator expression stops at a call to the host the way any other
+/// generator does: the frame it suspends in is saved with the rest of them.
+/// `send` is what reaches it, because a walk that drives the generator for you
+/// cannot cross a host call; see `limitations/generators.md`.
+#[test]
+fn a_generator_expression_survives_a_host_call() {
+    let code = "\
+g = (fetch(x) for x in [1])
+first = g.send(None)
+first == 42 and next(g, 'end') == 'end'
+";
+    let call = start(code).into_function_call().expect("the host is asked");
+    assert_eq!(call.function_name, "fetch");
+    let done = call
+        .resume(ExtFunctionResult::Return(MontyObject::int(42)), PrintWriter::Stdout)
+        .unwrap();
+    assert_eq!(done.into_complete(), Some(t(true)));
 }
 
 /// A delegation that spans a call to the host comes back whole. The frame that

@@ -7,7 +7,7 @@ use crate::{
     fstring::FStringPart,
     intern::{BytesId, LongIntId, StringId},
     namespace::NamespaceId,
-    parse::{CodeRange, ParsedSignature, Try},
+    parse::{CodeRange, ParseNode, ParsedSignature, Try},
     tstring::ParsedTemplate,
     value::{EitherStr, Marker, Value},
 };
@@ -364,6 +364,27 @@ pub enum Expr {
         signature: ParsedSignature,
         /// The lambda body expression (not yet prepared).
         body: Box<ExprLoc>,
+    },
+    /// Raw generator expression from the parser, before preparation.
+    ///
+    /// A generator expression is an implicit generator function that the
+    /// parser writes out: the loops and filters become `for` and `if`
+    /// statements around a `yield` of the element, and the outermost
+    /// iterable becomes the one parameter. The call that makes the
+    /// generator is an [`Self::IndirectCall`] the parser wraps this in, so
+    /// the outermost iterable is read where the expression is written and
+    /// everything after it is read one element at a time.
+    ///
+    /// The prepare phase turns this into [`Self::Lambda`], because a prepared
+    /// generator expression is a prepared anonymous function and nothing
+    /// after prepare needs to tell the two apart.
+    GenExprRaw {
+        /// The interned `<genexpr>` name ID.
+        name_id: StringId,
+        /// The one parameter, `.0`, which no Python name can collide with.
+        signature: ParsedSignature,
+        /// The nested `for` and `if` statements, innermost a `yield`.
+        body: Vec<ParseNode>,
     },
     /// Lambda expression: `lambda args: body` (prepared form).
     ///

@@ -1270,6 +1270,22 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 // Convert the raw lambda into a prepared lambda expression
                 return self.prepare_lambda(name_id, &signature, &body, position);
             }
+            Expr::GenExprRaw {
+                name_id,
+                signature,
+                body,
+            } => {
+                // PEP 572 gives a walrus inside a generator expression to the
+                // scope that holds the expression, so its slot is taken here,
+                // before the body is prepared in a scope of its own.
+                let mut outward_walrus = AHashSet::new();
+                collect_genexpr_walrus(&body, &mut outward_walrus, self.interner);
+                for &name in &outward_walrus {
+                    self.ensure_scope_slot(name, position)?;
+                    self.names_assigned_in_order.insert(name);
+                }
+                return self.prepare_anon_function(name_id, &signature, body, &outward_walrus, position);
+            }
             Expr::Lambda { .. } => {
                 // Lambda should only be created during prepare, never during parsing
                 unreachable!("Expr::Lambda should not exist before prepare phase")
@@ -2067,11 +2083,8 @@ impl<'i, 'g> Prepare<'i, 'g> {
     /// Prepares a lambda expression, converting it into a prepared function definition.
     ///
     /// Lambdas are essentially anonymous functions with an implicit return of their body
-    /// expression. This method follows the same preparation logic as `prepare_function_def`
-    /// but:
-    /// - Uses `<lambda>` as the function name (not registered in scope)
-    /// - Wraps the body expression as `Node::Return(body)`
-    /// - Returns `ExprLoc` with `Expr::Lambda` instead of `PreparedNode`
+    /// expression, so the body becomes one `Node::Return(body)` and the rest is
+    /// [`Self::prepare_anon_function`].
     fn prepare_lambda(
         &mut self,
         lambda_name_id: StringId,
@@ -2079,26 +2092,57 @@ impl<'i, 'g> Prepare<'i, 'g> {
         body: &ExprLoc,
         position: CodeRange,
     ) -> Result<ExprLoc, ParseError> {
-        // Create a synthetic <lambda> name identifier (not registered in scope)
+        let body_nodes = vec![Node::Return(Some(body.clone()))];
+        self.prepare_anon_function(lambda_name_id, parsed_sig, body_nodes, &AHashSet::new(), position)
+    }
+
+    /// Prepares a function that has no binding name: a lambda or a generator
+    /// expression.
+    ///
+    /// This follows the same preparation logic as `prepare_function_def` but
+    /// takes the name (`<lambda>` or `<genexpr>`) as given, registers it in no
+    /// scope, and gives back an `ExprLoc` that holds `Expr::Lambda`, which is
+    /// the prepared form of both.
+    ///
+    /// `outward_walrus` names the targets of walrus operators that bind in the
+    /// scope of the caller and not in this one, which PEP 572 makes the rule
+    /// for a generator expression. The caller allocates their slots first.
+    fn prepare_anon_function(
+        &mut self,
+        anon_name_id: StringId,
+        parsed_sig: &ParsedSignature,
+        body_nodes: Vec<ParseNode>,
+        outward_walrus: &AHashSet<StringId>,
+        position: CodeRange,
+    ) -> Result<ExprLoc, ParseError> {
+        // Create a synthetic name identifier (not registered in scope)
         let lambda_name = Identifier::new_with_scope(
-            lambda_name_id,
+            anon_name_id,
             position,
-            // Slot 0 is the trivial placeholder; the lambda name never lands
-            // in a namespace because lambdas don't have a binding name.
+            // Slot 0 is the trivial placeholder; the name never lands in a
+            // namespace because these functions have no binding name.
             NamespaceId::new(0).expect("slot 0 fits in u16"),
             NameScope::Local,
         );
 
-        // Wrap the body expression as a return statement for scope analysis
-        let body_as_node: ParseNode = Node::Return(Some(body.clone()));
-        let body_nodes = vec![body_as_node];
-
         // Extract param names from the parsed signature for scope analysis
         let param_names: Vec<StringId> = parsed_sig.param_names().collect();
 
-        // Pass 1: Collect scope information from the lambda body
-        // (Lambdas can't have global/nonlocal declarations, but can have nested functions)
-        let scope_info = collect_function_scope_info(&body_nodes, &param_names, self.interner);
+        // Pass 1: Collect scope information from the body
+        // (Neither form can hold global/nonlocal declarations, but both can hold nested functions)
+        let mut scope_info = collect_function_scope_info(&body_nodes, &param_names, self.interner);
+
+        // A walrus that binds outward is no local of ours: it is a global when
+        // the caller is the module and a cell of the caller otherwise, which is
+        // what the two declarations below say.
+        for name in outward_walrus {
+            scope_info.assigned_names.remove(name);
+            if self.is_module_scope() {
+                scope_info.global_names.insert(*name);
+            } else {
+                scope_info.nonlocal_names.insert(*name);
+            }
+        }
 
         // Build enclosing_locals: names that are local to this scope or
         // captured from any enclosing scope (see `child_enclosing_locals`).
@@ -2128,13 +2172,13 @@ impl<'i, 'g> Prepare<'i, 'g> {
             self.interner,
         )?;
 
-        // Prepare the lambda body
+        // Prepare the body
         let prepared_body = inner_prepare.prepare_nodes(body_nodes)?;
 
-        // Move the lambda's per-function state out so its `GlobalsRef` is
+        // Move the function's per-function state out so its `GlobalsRef` is
         // released before we touch `self`'s function state.
         let PrepareState::Function(inner_state) = mem::replace(&mut inner_prepare.state, PrepareState::Module) else {
-            unreachable!("lambda preparer was constructed with new_function");
+            unreachable!("anonymous preparer was constructed with new_function");
         };
         let FunctionState {
             locals: inner_locals,
@@ -2201,7 +2245,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             }
         }
 
-        // Create the prepared function definition (lambdas are never async)
+        // Create the prepared function definition (neither form is ever async)
         let func_def = PreparedFunctionDef {
             name: lambda_name,
             signature,
@@ -2947,8 +2991,35 @@ fn collect_assigned_names_from_expr(
         }
         // Lambda bodies have their own scope - walrus inside them doesn't affect us
         Expr::LambdaRaw { .. } | Expr::Lambda { .. } => {}
+        // A generator expression has a scope of its own, but PEP 572 gives a
+        // walrus inside it to this scope, exactly as it does in the other
+        // comprehensions.
+        Expr::GenExprRaw { body, .. } => collect_genexpr_walrus(body, assigned_names, interner),
         // Leaf expressions don't contain walrus operators
         Expr::Literal(_) | Expr::Builtin(_) | Expr::Name(_) => {}
+    }
+}
+
+/// Collects the walrus targets of a generator expression body, which bind in
+/// the scope that holds the expression and not in the generator's own.
+///
+/// The body is the shape `Parser::parse_generator_expression` writes: `for`
+/// and `if` statements around one `yield`. The loop targets are the generator's
+/// own and are left out; every expression beside them is scanned.
+fn collect_genexpr_walrus(body: &[ParseNode], assigned_names: &mut AHashSet<StringId>, interner: &CompileInterns<'_>) {
+    for node in body {
+        match node {
+            Node::For { iter, body, .. } => {
+                collect_assigned_names_from_expr(iter, assigned_names, interner);
+                collect_genexpr_walrus(body, assigned_names, interner);
+            }
+            Node::If { test, body, .. } => {
+                collect_assigned_names_from_expr(test, assigned_names, interner);
+                collect_genexpr_walrus(body, assigned_names, interner);
+            }
+            Node::Expr(expr) => collect_assigned_names_from_expr(expr, assigned_names, interner),
+            _ => unreachable!("a generator expression body holds only `for`, `if` and the `yield`"),
+        }
     }
 }
 
@@ -3379,6 +3450,18 @@ fn collect_cell_vars_from_expr(
                 extended_locals.insert(*param_id);
             }
             collect_cell_vars_from_expr(body, &extended_locals, cell_vars, interner);
+        }
+        Expr::GenExprRaw { signature, body, .. } => {
+            collect_cell_vars_from_function(signature, body, our_locals, cell_vars, interner);
+            // A walrus inside the generator expression writes to this scope, so
+            // the name it writes needs a cell exactly as a `nonlocal` would.
+            let mut walrus = AHashSet::new();
+            collect_genexpr_walrus(body, &mut walrus, interner);
+            for name in &walrus {
+                if our_locals.contains(name) {
+                    cell_vars.insert(*name);
+                }
+            }
         }
         // Recurse into sub-expressions
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
@@ -3916,6 +3999,25 @@ fn collect_referenced_names_from_expr(
             for param in &signature.kwargs {
                 if let Some(ref default) = param.default {
                     collect_referenced_names_from_expr(default, referenced, interner);
+                }
+            }
+        }
+        Expr::GenExprRaw { signature, body, .. } => {
+            // Everything the body binds -- the parameter, the loop targets and
+            // any walrus -- is the generator's own, so only the rest is free
+            // here. The signature carries no defaults, so there is nothing of
+            // it to read in this scope.
+            let mut bound: AHashSet<StringId> = signature.param_names().collect();
+            let mut nested_global = AHashSet::new();
+            let mut nested_nonlocal = AHashSet::new();
+            let mut body_refs: AHashSet<StringId> = AHashSet::new();
+            for node in body {
+                collect_scope_info_from_node(node, &mut nested_global, &mut nested_nonlocal, &mut bound, interner);
+                collect_referenced_names_from_node(node, &mut body_refs, interner);
+            }
+            for name in body_refs {
+                if !bound.contains(&name) {
+                    referenced.insert(name);
                 }
             }
         }

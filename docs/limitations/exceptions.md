@@ -143,8 +143,10 @@ before comparison, so traceback tests cannot catch it.
 
 An exception raised inside a Python callable that native code invokes
 *synchronously* — the `key=`/predicate/function argument of `map`, `filter`,
-`sorted`/`min`/`max`, and a user-defined
-`__iter__`/`__next__`/`__contains__`/`__repr__`/`__str__` — omits the **calling**
+`sorted`/`min`/`max`, a user-defined
+`__iter__`/`__next__`/`__contains__`/`__repr__`/`__str__`, and the body of a
+generator that something walks for you (`for`, `next()`, `list()`, a
+comprehension; see [generators.md](generators.md)) — omits the **calling**
 frame from its traceback; the callee frame is present.
 CPython shows both. The re-entrant call path (`evaluate_function`) does not
 splice the host call site into the traceback. The exception type and message
