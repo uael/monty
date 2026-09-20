@@ -7,6 +7,7 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{HeapData, HeapId, HeapRead, HeapReadOutput},
+    intern::StaticStrings,
     types::{
         PyTrait, Tuple, Type,
         instance::{class_chain, instance_builtin_exc},
@@ -34,6 +35,8 @@ pub fn builtin_isinstance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> 
 ///   chain
 /// - Host classes: `isinstance(obj, Point)` for a `HostClassType` (exact class
 ///   id; the host sends no bases)
+/// - The abstract base classes of `collections.abc`: `isinstance(x, Iterable)`,
+///   answered from what the value is; see [`abc_instance`]
 /// - Tuples (possibly nested) of the above
 pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match classinfo {
@@ -68,8 +71,37 @@ pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) 
             };
             isinstance_check_tuple(obj, &members, vm)
         }
+        // An abstract base class of `collections.abc`, which is a marker here
+        // rather than a class; see [`abc_instance`].
+        Value::Marker(marker) => abc_instance(obj, marker.0, vm),
         _ => Err(ExcType::isinstance_arg2_error()),
     }
+}
+
+/// Whether `obj` is an instance of one of the abstract base classes
+/// `collections.abc` and `typing` export.
+///
+/// CPython answers these through `__subclasshook__` and a registry, neither of
+/// which Monty has, so each one is answered from what the value is. The seven
+/// below are the ones a real type stands behind; every other marker is no class
+/// to test against and raises as it did before. See `limitations/collections.md`.
+fn abc_instance(obj: &Value, marker: StaticStrings, vm: &mut VM<'_>) -> RunResult<bool> {
+    let held = obj.py_type(vm);
+    Ok(match marker {
+        // The same answer `callable()` gives, which leaves out an instance of
+        // a class with a `__call__`: Monty dispatches none.
+        StaticStrings::Callable => obj.is_callable(vm.heap),
+        StaticStrings::CoroutineType => held == Type::Coroutine,
+        StaticStrings::Generator => held == Type::Generator,
+        StaticStrings::Iterable => obj.py_is_iterable(vm),
+        StaticStrings::IteratorType => obj.py_is_iterator(vm),
+        StaticStrings::Mapping => matches!(held, Type::Dict | Type::DefaultDict | Type::Counter),
+        StaticStrings::Sequence => matches!(
+            held,
+            Type::Str | Type::Bytes | Type::List | Type::Tuple | Type::NamedTuple | Type::Range | Type::Deque
+        ),
+        _ => return Err(ExcType::isinstance_arg2_error()),
+    })
 }
 
 /// Whether `obj` is a host instance whose class entry is `class_id` (exact
@@ -105,56 +137,19 @@ fn instance_of_namedtuple_class(obj: &Value, class_id: HeapId, vm: &VM<'_>) -> b
 }
 
 /// Recursively walks a tuple of classinfo entries.
+///
+/// Each entry is answered by [`isinstance_check`], so the two can never drift:
+/// an entry is read out of the tuple and owned for the length of its check,
+/// because the check needs the VM and the tuple is in the heap it holds.
 fn isinstance_check_tuple<'h>(obj: &Value, tuple: &HeapRead<'h, Tuple>, vm: &mut VM<'h>) -> RunResult<bool> {
     let len = tuple.get(vm.heap).as_slice().len();
     let mut guard = vm.recursion_guard()?;
     let vm = &mut *guard;
     for i in 0..len {
-        match &tuple.get(vm.heap).as_slice()[i] {
-            Value::Builtin(Builtins::Type(t)) => {
-                if obj.py_type(vm).is_instance_of(*t) {
-                    return Ok(true);
-                }
-            }
-            Value::Builtin(Builtins::ExcType(exc)) => {
-                if matches!(obj.py_type(vm), Type::Exception(et) if et.is_subclass_of(*exc)) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => {
-                if instance_of_class(obj, *id, vm) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::NamedTupleClass(_)) => {
-                if instance_of_namedtuple_class(obj, *id, vm) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::HostClassType(_)) => {
-                if instance_of_host_class(obj, *id, vm) {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(nested_id) if let HeapReadOutput::Tuple(nested) = vm.heap.read(*nested_id) => {
-                if isinstance_check_tuple(obj, &nested, vm)? {
-                    return Ok(true);
-                }
-            }
-            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::GenericAlias(_)) => {
-                return Err(ExcType::isinstance_parameterized_generic());
-            }
-            Value::Ref(id) if let HeapData::Union(union) = vm.heap.get(*id) => {
-                let args = union.args(vm.heap);
-                defer_drop!(args, vm);
-                let Some(HeapReadOutput::Tuple(members)) = args.read_heap(vm) else {
-                    unreachable!("Union::args is always a tuple")
-                };
-                if isinstance_check_tuple(obj, &members, vm)? {
-                    return Ok(true);
-                }
-            }
-            _ => return Err(ExcType::isinstance_arg2_error()),
+        let entry = tuple.get(vm.heap).as_slice()[i].clone_with_heap(vm.heap);
+        defer_drop!(entry, vm);
+        if isinstance_check(obj, entry, vm)? {
+            return Ok(true);
         }
     }
     Ok(false)

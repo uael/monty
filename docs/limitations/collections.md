@@ -20,15 +20,30 @@ that type-checks and then fails at runtime.
 ## `collections.abc`
 
 The submodule exists and exports `Callable`, `Coroutine`, `Generator`,
-`Iterable`, `Iterator`, `Mapping` and `Sequence`. It is annotations only:
+`Iterable`, `Iterator`, `Mapping` and `Sequence`. They answer `isinstance`, and
+name a type in an annotation, and nothing else:
 
 - **Each name is the same object `typing` exports under that name**, a
     `typing._SpecialForm`, not an abstract base class. `repr(Callable)` is
     `typing.Callable` where CPython writes `<class 'collections.abc.Callable'>`,
     and `collections.abc.Callable is typing.Callable` holds where CPython says
     they differ.
-- **None of them is callable, subscriptable or usable with `isinstance`.**
-    `Callable[[int], int]` raises
+- **`isinstance` answers from what the value is**, because there is no
+    `__subclasshook__` and no registry here. A sandbox class that defines
+    `__iter__` is an `Iterable` and one that defines `__iter__` and `__next__`
+    is an `Iterator`, as in CPython, but `Sequence` and `Mapping` are the
+    built-in types alone: `Sequence` is `str`, `bytes`, `list`, `tuple`, a
+    `namedtuple`, `range` and `deque`, and `Mapping` is `dict`, `defaultdict`
+    and `Counter`. A class of your own is neither, where CPython lets one
+    register. `issubclass(list, Sequence)` raises
+    `TypeError: issubclass() arg 2 must be a class, or tuple of classes`.
+- **`Callable` reads False for an instance of a class with a `__call__`**,
+    because Monty dispatches no `__call__`; it is the answer `callable()`
+    gives, see [classes.md](classes.md).
+- **`Iterator` reads False for `map`, `filter`, `zip`, `enumerate` and
+    `reversed`**, which are eager here and give a `list`, so they read as a
+    `Sequence` instead; see [builtins.md](builtins.md).
+- **None of them is callable or subscriptable.** `Callable[[int], int]` raises
     `TypeError: 'typing._SpecialForm' object is not subscriptable`, the same
     refusal the `typing` name gets (see [typing.md](typing.md)). An annotation
     is never evaluated, so writing one costs nothing.
