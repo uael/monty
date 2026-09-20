@@ -562,7 +562,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         globals: &NameMap,
         options: CompileOptions,
     ) -> Result<Code, CompileError> {
-        Self::compile_module_inner(nodes, interns, globals, options, None)
+        Self::compile_module_inner(nodes, interns, globals, options, None, false)
     }
 
     /// Compiles a prepared `eval()` / `exec()` snippet, rejecting top-level await.
@@ -574,17 +574,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
         globals: &NameMap,
         options: CompileOptions,
         globals_by_name: bool,
+        top_level_await: bool,
     ) -> Result<Code, CompileError> {
-        Self::compile_module_inner(nodes, interns, globals, options, Some(globals_by_name))
+        Self::compile_module_inner(nodes, interns, globals, options, Some(globals_by_name), top_level_await)
     }
 
-    /// Shared module compiler; `snippet` is `Some(globals_by_name)` for eval/exec.
+    /// Shared module compiler; `snippet` is `Some(globals_by_name)` for
+    /// eval/exec, and `top_level_await` is what
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` lets one of those do.
     fn compile_module_inner(
         nodes: &[PreparedNode],
         interns: &mut CompileInterns<'_>,
         globals: &NameMap,
         options: CompileOptions,
         snippet: Option<bool>,
+        top_level_await: bool,
     ) -> Result<Code, CompileError> {
         check_namespace_size_u16(globals.len(), "module")?;
         // Module frames have `locals_count = 0` at runtime (globals live in
@@ -593,7 +597,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         let flags = ScopeFlags {
             assert_message_annotations: options.assert_message_annotations.enabled(),
             globals_by_name: snippet.unwrap_or(false),
-            forbid_await: snippet.is_some(),
+            forbid_await: snippet.is_some() && !top_level_await,
             yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
         };
         let mut compiler = Compiler::new(interns, true, 0, flags);
@@ -1776,6 +1780,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.code.set_location(expr_loc.position, None);
                 // A generator is its own iterator, so this passes one straight
                 // through and calls `iter()` on anything else.
+                self.code.mark_generator();
                 self.code.emit(Opcode::GetIter)?;
                 self.code.emit(Opcode::LoadNone)?;
                 let start = self.code.current_jump_target();
@@ -1796,6 +1801,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     None => self.code.emit(Opcode::LoadNone)?,
                 }
                 self.code.set_location(expr_loc.position, None);
+                self.code.mark_generator();
                 self.code.emit(Opcode::Yield)?;
             }
 
@@ -1822,6 +1828,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.compile_expr(value)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
+                self.code.mark_coroutine();
                 self.code.emit(Opcode::Await)?;
                 self.code.emit(Opcode::LoadNone)?;
                 let start = self.code.current_jump_target();

@@ -38,3 +38,4 @@
 
 # env for performance tests
 .env
+*.pending-snap

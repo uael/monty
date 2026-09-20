@@ -13,6 +13,7 @@ use crate::{
     intern::StaticStrings,
 };
 
+pub(crate) mod ast;
 pub(crate) mod asyncio;
 pub(crate) mod base64;
 pub(crate) mod binascii;
@@ -47,6 +48,8 @@ pub(crate) enum StandardLib {
     Typing,
     /// The `asyncio` module providing async/await support (only `run()` and `gather()` implemented).
     Asyncio,
+    /// The `ast` module, which here is `PyCF_ALLOW_TOP_LEVEL_AWAIT` alone.
+    Ast,
     /// The `pathlib` module providing object-oriented filesystem paths.
     Pathlib,
     /// The `os` module providing operating system interface (only `getenv()` implemented).
@@ -106,6 +109,7 @@ impl StandardLib {
             StaticStrings::Sys => Some(Self::Sys),
             StaticStrings::Typing => Some(Self::Typing),
             StaticStrings::Asyncio => Some(Self::Asyncio),
+            StaticStrings::Ast => Some(Self::Ast),
             StaticStrings::Pathlib => Some(Self::Pathlib),
             StaticStrings::Os => Some(Self::Os),
             StaticStrings::Math => Some(Self::Math),
@@ -138,6 +142,7 @@ impl StandardLib {
             Self::Sys => sys::create_module(vm),
             Self::Typing => typing::create_module(vm),
             Self::Asyncio => asyncio::create_module(vm),
+            Self::Ast => ast::create_module(vm),
             Self::Pathlib => pathlib::create_module(vm),
             Self::Os => os::create_module(vm),
             Self::Math => math::create_module(vm),

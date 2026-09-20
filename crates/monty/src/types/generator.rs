@@ -14,7 +14,7 @@ use std::fmt::Write;
 use super::{LazyHeapSet, PyTrait, Type, py_trait::PyObjectIdentity};
 use crate::{
     args::ArgValues,
-    bytecode::{CallResult, VM},
+    bytecode::{CallResult, FrameNamespace, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     hash::{HashValue, identity_hash},
@@ -131,9 +131,10 @@ pub(crate) struct Generator {
     /// Where it is in its life; see [`GeneratorState`].
     pub state: GeneratorState,
 
-    /// Owned reference to the `exec()` / `eval()` globals dict the function was
-    /// defined under; `None` when its globals are module slots.
-    pub globals: Option<HeapId>,
+    /// The namespace the body resolves names through, owned by this object as
+    /// a frame owns its own; `None` when locals are stack slots and globals are
+    /// module slots, which is every ordinary function.
+    pub namespace: Option<Box<FrameNamespace>>,
 
     /// The `yield from` this is suspended inside, if it is inside one; see
     /// [`Delegation`]. Set at every suspend, so it never speaks of a
@@ -145,17 +146,22 @@ impl Generator {
     /// Creates an unstarted generator or coroutine holding its call's bound
     /// arguments.
     ///
-    /// `namespace` is the frame's locals region, filled the way a call fills
-    /// it, and `globals` is already inc_ref'd for this object.
-    pub fn new(kind: GeneratorKind, func_id: FunctionId, namespace: Vec<Value>, globals: Option<HeapId>) -> Self {
+    /// `locals` is the frame's stack region, filled the way a call fills it,
+    /// and `namespace` is already inc_ref'd for this object.
+    pub fn new(
+        kind: GeneratorKind,
+        func_id: FunctionId,
+        locals: Vec<Value>,
+        namespace: Option<Box<FrameNamespace>>,
+    ) -> Self {
         Self {
             func_id,
             kind,
             ip: 0,
-            stack: namespace,
+            stack: locals,
             exception_stack: Vec::new(),
             state: GeneratorState::Created,
-            globals,
+            namespace,
             delegating: None,
         }
     }
@@ -173,14 +179,16 @@ impl Generator {
 impl HeapItem for Generator {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         // Mirrors the GC's child walk in `heap/mod.rs`: the saved frame owns
-        // every value in both regions, plus its globals dict.
+        // every value in both regions, plus every id of its namespace.
         for value in &mut self.stack {
             value.py_dec_ref_ids(stack);
         }
         for value in &mut self.exception_stack {
             value.py_dec_ref_ids(stack);
         }
-        stack.extend(self.globals.take());
+        if let Some(namespace) = self.namespace.take() {
+            stack.extend(namespace.owned_ids());
+        }
     }
 }
 

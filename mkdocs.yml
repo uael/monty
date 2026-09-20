@@ -59,6 +59,7 @@ nav:
       - typing: 'limitations/typing.md'
       - asyncio: 'limitations/asyncio.md'
       - Standard library modules: 'limitations/modules.md'
+      - ast: 'limitations/ast.md'
       - base64: 'limitations/base64.md'
       - collections: 'limitations/collections.md'
       - contextvars: 'limitations/contextvars.md'

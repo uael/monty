@@ -34,7 +34,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - `with` statements, for files and for classes implementing `__enter__` / `__exit__`
 - f-strings (including the `=` debug form), `str.format()` and `format()`, with `!r` / `!s` / `!a` conversions,
     format specs and nested replacement fields
-- `async` / `await`, and `asyncio.run` / `asyncio.gather` / `asyncio.sleep`
+- `async` / `await`, and the five functions of `asyncio`, see [asyncio.md](asyncio.md)
 - Generator functions: `def` with `yield`, `yield from`, and the `send` / `close` / `throw` surface,
     see [generators.md](generators.md).
     Generator *expressions* parse, but currently materialise to a `list`
@@ -60,8 +60,8 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - Function attributes.
     `fn.__name__`, `fn.__doc__` and friends raise `AttributeError`, and new attributes cannot be set — so
     `functools.wraps`-style metadata copying and registries keyed on `fn.__name__` have no equivalent.
-- `compile`, `globals`, `__import__` and `super` — all raise `NameError`.
-    `eval` and `exec` exist (source text only), and so does `locals()`; see [eval_exec.md](eval_exec.md).
+- `__import__` and `super` — both raise `NameError`.
+    `compile`, `eval`, `exec`, `globals` and `locals` exist; see [eval_exec.md](eval_exec.md).
 - Third-party packages.
     There is no `sys.path` and no site-packages.
 
@@ -71,6 +71,7 @@ The following modules are present:
 
 | Module            | Divergences                      |
 | ----------------- | -------------------------------- |
+| `ast`             | [ast.md](ast.md)                 |
 | `asyncio`         | [asyncio.md](asyncio.md)         |
 | `base64`          | [base64.md](base64.md)           |
 | `binascii`        | [base64.md](base64.md)           |
@@ -122,8 +123,9 @@ Each links to the page that owns it, which is where the full account lives:
 - **Only the class dunders listed above are dispatched.** `__lt__`, `__len__`, `__getitem__`, `__call__` and the
     arithmetic dunders raise `TypeError` as if undefined, while `__bool__` and the `__getattr__` family are ignored
     silently, so an instance is always truthy ([classes.md](classes.md)).
-- **There is no event loop inside the sandbox.** `async` / `await` work, and `asyncio` exposes exactly three functions:
-    `run`, `gather`, which runs host calls concurrently, and `sleep`, which asks the host to wait.
+- **There is no event loop to schedule with inside the sandbox.** `async` / `await` work, and `asyncio` exposes five
+    functions: `run`, `gather`, which runs host calls concurrently, `sleep`, which asks the host to wait,
+    `get_running_loop`, whose loop answers only that it is running, and `current_task`, which is always `None`.
     `create_task` and everything else do not exist
     ([asyncio.md](asyncio.md)).
 - **Only UTF-8, ASCII, UTF-16 and UTF-32 codecs exist.** `latin-1` and friends raise `LookupError`

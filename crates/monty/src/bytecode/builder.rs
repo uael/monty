@@ -51,6 +51,10 @@ pub struct CodeBuilder {
     /// generator body. Raised here rather than by the compiler so it always
     /// describes the instructions actually emitted.
     is_generator: bool,
+    /// Whether the body awaits, so a snippet compiled with
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` becomes a coroutine rather than running
+    /// where it stands.
+    is_coroutine: bool,
 }
 
 impl CodeBuilder {
@@ -453,7 +457,22 @@ impl CodeBuilder {
             self.exception_table,
             local_names,
             self.is_generator,
+            self.is_coroutine,
         )
+    }
+
+    /// Marks the body a generator, which a `yield` or a `yield from` does.
+    ///
+    /// Tracked from the expressions rather than from the `Yield` instruction,
+    /// because an `await` compiles to one too and awaiting does not make a
+    /// generator; see the `Send` loop in `Expr::Await`.
+    pub fn mark_generator(&mut self) {
+        self.is_generator = true;
+    }
+
+    /// Marks the body one that awaits; see [`CodeBuilder::is_coroutine`].
+    pub fn mark_coroutine(&mut self) {
+        self.is_coroutine = true;
     }
 
     /// Records the current location in the location table if set.
@@ -513,7 +532,6 @@ impl CodeBuilder {
     /// Unconditional terminators enter dead code, where emission is a no-op.
     /// Jump helpers use this path to keep stack-depth tracking centralized.
     fn emit_with_operand(&mut self, op: Opcode, operand: Operand<'_>) -> Result<(), CompileError> {
-        self.is_generator |= op == Opcode::Yield;
         if self.is_dead() {
             return Ok(());
         }

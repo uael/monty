@@ -19,6 +19,7 @@ in the next feed, and after a dump (see [random.md](random.md)).
 
 | Module               | See                                            |
 | -------------------- | ---------------------------------------------- |
+| `ast`                | [ast.md](ast.md)                               |
 | `asyncio`            | [asyncio.md](asyncio.md)                       |
 | `base64`             | [base64.md](base64.md)                         |
 | `binascii`           | [base64.md](base64.md)                         |

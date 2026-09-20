@@ -1059,10 +1059,8 @@ impl<'h> VM<'h> {
 
         // 4. Create Coroutine on heap; it carries its own reference to the globals dict.
         let (namespace, this) = namespace_guard.into_parts();
-        if let Some(globals) = globals {
-            this.heap.inc_ref(globals);
-        }
-        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, namespace, globals);
+        let namespace_of = function_namespace(globals, &*this.heap);
+        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, namespace, namespace_of);
         let coroutine_id = this.heap.allocate(HeapData::Generator(Box::new(coroutine)));
 
         Ok(CallResult::Value(Value::Ref(coroutine_id)))
@@ -1091,10 +1089,8 @@ impl<'h> VM<'h> {
         this.install_closure_cells(func, cells, namespace);
 
         let (namespace, this) = namespace_guard.into_parts();
-        if let Some(globals) = globals {
-            this.heap.inc_ref(globals);
-        }
-        let generator = Generator::new(GeneratorKind::Generator, func_id, namespace, globals);
+        let namespace_of = function_namespace(globals, &*this.heap);
+        let generator = Generator::new(GeneratorKind::Generator, func_id, namespace, namespace_of);
         let generator_id = this.heap.allocate(HeapData::Generator(Box::new(generator)));
 
         Ok(CallResult::Value(Value::Ref(generator_id)))

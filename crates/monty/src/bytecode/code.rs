@@ -46,13 +46,15 @@ pub struct Code {
     /// drift from the instructions it describes.
     #[serde(default)]
     is_generator: bool,
+    /// Whether the body awaits; see [`Code::is_coroutine`].
+    is_coroutine: bool,
 }
 
 impl Code {
     /// Creates an empty code object for tests that only need VM context.
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
-        Self::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), false)
+        Self::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), false, false)
     }
 
     /// Creates a new Code object with all components.
@@ -66,6 +68,7 @@ impl Code {
         exception_table: Vec<ExceptionEntry>,
         local_names: Vec<StringId>,
         is_generator: bool,
+        is_coroutine: bool,
     ) -> Self {
         Self {
             bytecode,
@@ -74,7 +77,16 @@ impl Code {
             exception_table,
             local_names,
             is_generator,
+            is_coroutine,
         }
+    }
+
+    /// Whether this body awaits, so a snippet compiled with
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` hands back a coroutine rather than
+    /// running where it stands, as CPython's `CO_COROUTINE` decides.
+    #[must_use]
+    pub fn is_coroutine(&self) -> bool {
+        self.is_coroutine
     }
 
     /// Whether this body yields, so calling it builds a generator.
@@ -147,6 +159,7 @@ impl Clone for Code {
             exception_table: self.exception_table.clone(),
             local_names: self.local_names.clone(),
             is_generator: self.is_generator,
+            is_coroutine: self.is_coroutine,
         }
     }
 }

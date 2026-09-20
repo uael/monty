@@ -751,6 +751,8 @@ pub enum StaticStrings {
     Conversion,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
+    /// Module name for `import ast`.
+    Ast,
     /// `asyncio.current_task()` function.
     #[strum(serialize = "current_task")]
     CurrentTask,
@@ -1084,6 +1086,9 @@ pub enum StaticStrings {
     Gammavariate,
     /// `asyncio.gather()` function.
     Gather,
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`, the one name of `ast` Monty has.
+    #[strum(serialize = "PyCF_ALLOW_TOP_LEVEL_AWAIT")]
+    PyCfAllowTopLevelAwait,
     /// `asyncio.get_running_loop()` function.
     #[strum(serialize = "get_running_loop")]
     GetRunningLoop,

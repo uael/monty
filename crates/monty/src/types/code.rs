@@ -43,13 +43,29 @@ pub(crate) struct Code {
     source: Box<str>,
     filename: Box<str>,
     mode: CodeMode,
+    /// Whether `compile()` was given `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`, which
+    /// makes `eval()` / `exec()` hand back a coroutine rather than running the
+    /// body where they stand.
+    top_level_await: bool,
 }
 
 impl Code {
     /// Creates a code object over source `compile()` has already parsed.
     #[must_use]
-    pub fn new(source: Box<str>, filename: Box<str>, mode: CodeMode) -> Self {
-        Self { source, filename, mode }
+    pub fn new(source: Box<str>, filename: Box<str>, mode: CodeMode, top_level_await: bool) -> Self {
+        Self {
+            source,
+            filename,
+            mode,
+            top_level_await,
+        }
+    }
+
+    /// Whether the body may `await` at its top level, so running it makes a
+    /// coroutine; see [`PyCF_ALLOW_TOP_LEVEL_AWAIT`](crate::modules::ast::PyCF_ALLOW_TOP_LEVEL_AWAIT).
+    #[must_use]
+    pub fn top_level_await(&self) -> bool {
+        self.top_level_await
     }
 
     /// The source this code object runs.

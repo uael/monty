@@ -2096,8 +2096,10 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                     on_child(*id);
                 }
             }
-            if let Some(globals) = generator.globals {
-                on_child(globals);
+            if let Some(namespace) = generator.namespace.as_deref() {
+                for id in namespace.owned_ids() {
+                    on_child(id);
+                }
             }
         }
         HeapData::GatherFuture(gather) => {

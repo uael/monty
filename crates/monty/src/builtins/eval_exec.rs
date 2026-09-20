@@ -18,6 +18,7 @@ use crate::{
     function::Function,
     heap::{DropGuard, HeapData, HeapId},
     intern::{CompileInterns, FunctionId, StaticStrings},
+    modules::ast::PY_CF_ALLOW_TOP_LEVEL_AWAIT,
     name_map::NameMap,
     parse::{CodeRange, parse_expression_with_interner, parse_module_with_filename_id},
     prepare::{SnippetNames, prepare_snippet},
@@ -126,6 +127,10 @@ impl Builtin {
 struct Snippet {
     text: Arc<str>,
     mode: CodeMode,
+    /// Whether the body may `await` at its top level, which makes running it
+    /// hand back a coroutine rather than running it here; only a code object
+    /// compiled with `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` sets it.
+    top_level_await: bool,
 }
 
 /// Compiles `source` in the namespace `globals` / `locals` describe (borrowed
@@ -194,14 +199,22 @@ fn compile_and_push(
         &mut *vm.global_names
     };
     let nodes = prepare_snippet(nodes, &overlay, globals, names).map_err(|e| e.into_run_error(source))?;
-    let code = Compiler::compile_snippet(&nodes, &mut overlay, globals, options, globals_by_name)
-        .map_err(|e| e.into_run_error(source))?;
+    let code = Compiler::compile_snippet(
+        &nodes,
+        &mut overlay,
+        globals,
+        options,
+        globals_by_name,
+        snippet.top_level_await,
+    )
+    .map_err(|e| e.into_run_error(source))?;
 
     let position = CodeRange {
         filename: filename_id,
         start_byte: 0,
         end_byte: u32::try_from(source.len()).unwrap_or(u32::MAX),
     };
+    let awaits = code.is_coroutine();
     let function = Function::new(
         Identifier::new(overlay.intern_static(StaticStrings::Module), position),
         Signature::default(),
@@ -211,7 +224,7 @@ fn compile_and_push(
         Vec::new(),
         Vec::new(),
         0,
-        false,
+        awaits,
         code,
     );
     let index = overlay.functions_len();
@@ -224,6 +237,14 @@ fn compile_and_push(
 
     overlay.push_function(function);
     let (namespace, vm) = namespace_guard.into_parts();
+    // CPython sets `CO_COROUTINE` on a body the flag let await, and only on
+    // one that does: a snippet that awaits nothing runs where it stands, as it
+    // would without the flag.
+    if awaits {
+        let coroutine = vm.snippet_coroutine(func_id, overlay, namespace);
+        vm.globals.resize_with(vm.global_names.len(), || Value::Undefined);
+        return Ok(CallResult::Value(coroutine));
+    }
     vm.push_snippet_frame(func_id, overlay, namespace)?;
     vm.globals.resize_with(vm.global_names.len(), || Value::Undefined);
     Ok(CallResult::FramePushed)
@@ -240,6 +261,7 @@ fn snippet(builtin: Builtin, source: &Value, vm: &mut VM<'_>) -> RunResult<Snipp
         return Ok(Snippet {
             text: Arc::from(code.source()),
             mode: code.mode(),
+            top_level_await: code.top_level_await(),
         });
     }
     let mode = match builtin {
@@ -249,6 +271,7 @@ fn snippet(builtin: Builtin, source: &Value, vm: &mut VM<'_>) -> RunResult<Snipp
     Ok(Snippet {
         text: snippet_source(name, source, vm)?,
         mode,
+        top_level_await: false,
     })
 }
 
@@ -374,7 +397,7 @@ pub fn builtin_compile(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     // `source`, so a bad filename wins over both.
     let filename = compile_filename(filename, vm)?;
     let mode = compile_mode(mode, vm)?;
-    compile_flags(flags, vm)?;
+    let top_level_await = compile_flags(flags, vm)?;
     compile_optimize(optimize, vm)?;
     // `dont_inherit` only governs which `__future__` features the caller passes
     // down, and Monty has none, so any value is accepted and does nothing.
@@ -382,7 +405,7 @@ pub fn builtin_compile(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 
     let text = snippet_source("compile", source, vm)?;
     parse_for_compile(&text, mode, vm)?;
-    let code = Code::new(Box::from(&*text), filename, mode);
+    let code = Code::new(Box::from(&*text), filename, mode, top_level_await);
     Ok(Value::Ref(vm.heap.allocate(HeapData::Code(Box::new(code)))))
 }
 
@@ -454,11 +477,16 @@ fn compile_mode(mode: &Value, vm: &mut VM<'_>) -> RunResult<CodeMode> {
     }
 }
 
-/// Validates `compile()`'s `flags`. Only `0` is accepted: every flag CPython
-/// takes selects a `__future__` feature or an AST form Monty does not have.
-fn compile_flags(flags: &Value, vm: &mut VM<'_>) -> RunResult<()> {
+/// Reads `compile()`'s `flags`, reporting whether the body may `await` at its
+/// top level.
+///
+/// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` is the one flag Monty takes; every other
+/// flag CPython has selects a `__future__` feature or an AST form Monty does
+/// not have.
+fn compile_flags(flags: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match flags {
-        Value::Int(0) => Ok(()),
+        Value::Int(0) => Ok(false),
+        Value::Int(PY_CF_ALLOW_TOP_LEVEL_AWAIT) => Ok(true),
         Value::Int(_) | Value::Bool(_) => Err(ExcType::value_error("compile(): unrecognised flags")),
         other => Err(ExcType::type_error_bad_arg_named(
             "compile",

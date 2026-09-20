@@ -6,7 +6,9 @@ snapshot of the function's locals (PEP 667) plus the module globals inside a fun
 arguments.
 Functions defined by a snippet under a `globals` dict resolve their globals through that dict at every call:
 `ns = {'x': 1}; exec('def f(): return x', ns); ns['x'] = 2; ns['f']()` returns `2`.
-The snippet can call host functions and raise into the caller; top-level `await`, including in class bodies, is rejected.
+The snippet can call host functions and raise into the caller.
+Top-level `await` is rejected unless the code object was compiled with `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`, and a class
+body may never await.
 
 `compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)` parses `source` and answers a code object
 that `eval()` and `exec()` take in place of a string.
@@ -37,21 +39,35 @@ A syntax error therefore still reaches the caller of `compile()`, which is what 
 ## compile() arguments
 
 - `source` must be a `str` or UTF-8 `bytes`.
-    CPython also takes an `ast` object; Monty has no `ast` module.
+    CPython also takes an `ast` object; Monty's [`ast`](ast.md) module holds one flag and no node types.
 - `filename` must be a `str` or UTF-8 `bytes`.
     CPython also takes an `os.PathLike`.
 - `mode` must be `'exec'` or `'eval'`.
     `'single'` raises `NotImplementedError: compile() does not yet support the 'single' mode`, because it would have to
     echo the value of an expression statement and Monty has no `sys.displayhook`.
     Any other string raises CPython's `ValueError: compile() mode must be 'exec', 'eval' or 'single'`.
-- `flags` must be `0`.
-    Every flag CPython takes selects a `__future__` feature or an AST form Monty does not have, so any other value
-    raises `ValueError: compile(): unrecognised flags`, where CPython accepts the `__future__` bits.
+- `flags` must be `0` or `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`.
+    Every other flag CPython takes selects a `__future__` feature or an AST form Monty does not have, so any other
+    value raises `ValueError: compile(): unrecognised flags`, where CPython accepts the `__future__` bits.
+    Flags cannot be combined: the two values are the only ones accepted, where CPython takes their `|`.
 - `dont_inherit` is accepted and ignored: it only governs which `__future__` features the caller passes down, and
     Monty has none.
 - `optimize` must be `-1`.
     `0`, `1` and `2` raise `NotImplementedError: compile() does not yet support the optimize argument`; any other
     value raises CPython's `ValueError: compile(): invalid optimize value`.
+
+## Top-level await
+
+`compile(source, filename, mode, flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` lets the body `await` at its top level, and
+`eval()` or `exec()` of a body that does hands back a coroutine to drive instead of running it where it stands, as in
+CPython.
+A body that awaits nothing runs where it stands and answers as it would without the flag.
+The coroutine binds names in the `globals` dict the call was given, so what the body assigns is there once it is over.
+
+- **The coroutine is Monty's, so it carries Monty's divergences**: `send()`, `throw()` and `close()` drive it, and one
+    that has run refuses all three but `close()`; see [asyncio.md](asyncio.md).
+- **`asyncio.run()` will not take it**, since it takes only what drives its own wait; drive it by hand, or `await` it
+    from another coroutine.
 
 ## eval() and exec() arguments
 
