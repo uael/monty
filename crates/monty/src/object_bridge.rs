@@ -29,6 +29,7 @@ use crate::{
         bytes::Bytes,
         date as date_type, datetime as datetime_type,
         dict::Dict,
+        generator::GeneratorKind,
         instance::class_name,
         list::List,
         set::{FrozenSet, Set},
@@ -462,7 +463,10 @@ impl GraphExporter {
                 }
                 None => MontyNode::Repr(format!("<module '{}'>", m.get(vm.heap).name_str(vm.interns))),
             },
-            HeapReadOutput::Coroutine(coro) => {
+            // A coroutine crosses without the address its `repr()` carries, so
+            // the same call gives a host the same node twice. A generator has
+            // always crossed as its `repr()` and still does.
+            HeapReadOutput::Generator(coro) if coro.get(vm.heap).kind == GeneratorKind::Coroutine => {
                 let func_id = coro.get(vm.heap).func_id;
                 let func = vm.interns.get_function(func_id);
                 let name = vm.interns.get_str(func.name.name_id);
