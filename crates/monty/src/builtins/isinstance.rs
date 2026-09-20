@@ -1,6 +1,6 @@
 //! Implementation of the isinstance() builtin function.
 
-use super::Builtins;
+use super::{Builtins, BuiltinsFunctions};
 use crate::{
     args::ArgValues,
     bytecode::VM,
@@ -71,6 +71,10 @@ pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) 
             };
             isinstance_check_tuple(obj, &members, vm)
         }
+        // `type` is a builtin function here rather than the class object, but
+        // it is still the class every class is an instance of, which is what
+        // `isinstance(x, type)` asks; see `limitations/builtins.md`.
+        Value::Builtin(Builtins::Function(BuiltinsFunctions::Type)) => Ok(obj.py_type(vm).is_instance_of(Type::Type)),
         // An abstract base class of `collections.abc`, which is a marker here
         // rather than a class; see [`abc_instance`].
         Value::Marker(marker) => abc_instance(obj, marker.0, vm),

@@ -171,3 +171,17 @@ Point.self_ref = Point
 assert Point.self_ref is Point
 Point.self_ref = None
 assert Point.self_ref is None
+
+
+# === isinstance against `type` reads whether the value is a class ===
+class Plain:
+    pass
+
+
+assert isinstance(Plain, type)
+assert isinstance(int, type)
+assert isinstance(Exception, type)
+assert not isinstance(Plain(), type)
+assert not isinstance(1, type)
+assert not isinstance('s', type)
+assert isinstance(int, (str, type))
