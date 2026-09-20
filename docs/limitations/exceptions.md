@@ -16,17 +16,19 @@ these built-ins; `raise MyClass()` on a plain user class raises
 `UnboundLocalError`, `ValueError`, `UnicodeDecodeError`, `UnicodeEncodeError`,
 `ImportError`, `ModuleNotFoundError`, `OSError`, `FileNotFoundError`, `FileExistsError`,
 `IsADirectoryError`, `NotADirectoryError`, `PermissionError`,
-`AssertionError`, `MemoryError`, `StopIteration`, `SyntaxError`,
-`TimeoutError`, `TypeError`.
+`AssertionError`, `MemoryError`, `StopIteration`, `GeneratorExit`,
+`SyntaxError`, `TimeoutError`, `TypeError`.
 
 Module-specific: `json.JSONDecodeError` (subclass of `ValueError`),
 `re.PatternError` / `re.error`, `io.UnsupportedOperation` (catchable as
-both `OSError` and `ValueError`, matching CPython's dual parentage).
+both `OSError` and `ValueError`, matching CPython's dual parentage),
+`asyncio.CancelledError` (a direct `BaseException` subclass, which nothing
+in Monty raises — see [asyncio.md](asyncio.md)).
 
 ## Exception classes NOT implemented
 
 `Warning` and all its subclasses (`DeprecationWarning`, etc.),
-`BufferError`, `EOFError`, `FloatingPointError`, `GeneratorExit`,
+`BufferError`, `EOFError`, `FloatingPointError`,
 `ConnectionError` and subclasses (`ConnectionAbortedError`,
 `ConnectionRefusedError`, `ConnectionResetError`,
 `BrokenPipeError`), `BlockingIOError`, `ChildProcessError`,
@@ -58,8 +60,9 @@ not supported; passing more than one argument raises an internal error.
     doesn't track, so Monty's
     `repr()` uses the generic single-message form instead.
 - The dotted exception classes — `json.JSONDecodeError`, `re.PatternError`,
-    `binascii.Error`, `binascii.Incomplete` — repr under their qualified name:
-    `binascii.Error('bad')` where CPython gives `Error('bad')`.
+    `binascii.Error`, `binascii.Incomplete`, `asyncio.CancelledError` — repr
+    under their qualified name: `binascii.Error('bad')` where CPython gives
+    `Error('bad')`.
     `type(exc).__name__` and `str(type(exc))` match CPython.
 
 **Not implemented:** `__cause__`, `__context__`, `__suppress_context__`,
@@ -69,13 +72,32 @@ tracebacks are not preserved across `raise from`.
 
 ## Custom subclasses
 
-User `class` definitions are supported, but classes cannot inherit
-(`class Foo(Exception):` raises `NotImplementedError: ... class inheritance and metaclasses`), so there is no way to
-create a new exception class inside
-the sandbox. Raising a plain user class instance (`raise MyClass()`) fails
-with `TypeError: exceptions must derive from BaseException`. Define custom
-exception types on the host side if needed, or use the built-in subclass
-that best fits.
+`class Refused(Exception):` works, and so does a subclass of that. An instance
+is raisable and catchable, `args` follows `BaseException`, and the traceback
+names the sandbox class. Raising an instance of a class that does *not* descend
+from a builtin exception still fails with
+`TypeError: exceptions must derive from BaseException`.
+
+Divergences:
+
+- **The type a host sees is the builtin ancestor.** A `MontyException` carries
+    the class name alongside `exc_type`, which stays the nearest builtin the
+    class descends from (`Exception` for `class Refused(Exception)`). A host
+    that matches on the type keeps matching; one that wants the sandbox name
+    reads it from the exception.
+- **A custom `__str__` does not change the traceback.** The message a raise
+    records is rendered from `args`, as `BaseException.__str__` does, because a
+    raise cannot run sandbox code while it is unwinding. `str(exc)` inside the
+    sandbox still dispatches `__str__`.
+- **`__cause__`, `__context__` and `__suppress_context__` do not exist**, on a
+    sandbox exception class as on a builtin one, so `raise X from Y` records
+    nothing.
+- **`__traceback__` is absent**, so an exception cannot be re-raised with a
+    traceback it carries.
+- **`BaseException.__init__` is not callable.** A class that writes its own
+    `__init__` and wants `args` assigns `self.args` itself; there is no
+    `super().__init__(...)` to call, since `super()` does not exist (see
+    [classes.md](classes.md)).
 
 ## Control flow in `finally`
 
@@ -121,8 +143,10 @@ before comparison, so traceback tests cannot catch it.
 
 An exception raised inside a Python callable that native code invokes
 *synchronously* — the `key=`/predicate/function argument of `map`, `filter`,
-`sorted`/`min`/`max`, and a user-defined
-`__iter__`/`__next__`/`__contains__`/`__repr__`/`__str__` — omits the **calling**
+`sorted`/`min`/`max`, a user-defined
+`__iter__`/`__next__`/`__contains__`/`__repr__`/`__str__`, and the body of a
+generator that something walks for you (`for`, `next()`, `list()`, a
+comprehension; see [generators.md](generators.md)) — omits the **calling**
 frame from its traceback; the callee frame is present.
 CPython shows both. The re-entrant call path (`evaluate_function`) does not
 splice the host call site into the traceback. The exception type and message

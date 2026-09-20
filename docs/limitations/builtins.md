@@ -6,33 +6,51 @@ Python.
 
 ## Implemented builtin functions
 
-`abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `eval`, `exec`, `filter`,
-`format`, `getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `iter`, `len`,
-`locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`, `repr`,
-`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
-`eval`, `exec` and `locals` are described in [eval_exec.md](eval_exec.md).
+`abs`, `all`, `any`, `bin`, `callable`, `chr`, `divmod`, `enumerate`, `eval`, `exec`,
+`filter`, `format`, `getattr`, `globals`, `hasattr`, `hash`, `hex`, `id`, `isinstance`,
+`issubclass`, `iter`, `len`, `locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`,
+`pow`, `print`, `repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `vars`,
+`zip`.
+`eval`, `exec`, `globals` and `locals` are described in [eval_exec.md](eval_exec.md).
+
+## The `builtins` module
+
+`import builtins` gives a module of every name a bare identifier resolves to:
+the functions and type constructors listed here, every builtin exception, and
+`None`, `True` and `False`.
+`builtins.len is len`, so looking a name up by text finds the same object
+writing it out does.
+
+It carries those names and no others, where CPython's module also holds
+`__name__`, `__doc__`, `__build_class__`, `__import__`, `Ellipsis`,
+`NotImplemented` and every builtin Monty does not implement.
+Reading a name it does not carry raises `AttributeError`.
 
 ## Implemented type constructors (also builtins)
 
-`bool`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `range`,
-`set`, `slice`, `str`, `tuple`. Exception classes (`ValueError`,
-`TypeError`, etc.) are also names in the builtin namespace.
+`bool`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `object`,
+`property`, `range`, `set`, `slice`, `str`, `tuple`. Exception classes
+(`ValueError`, `TypeError`, etc.) are also names in the builtin namespace.
 
 ## Builtins that are NOT implemented
 
 These raise `NameError`:
 
-- **Code objects and imports**: `compile`, `__import__`.
-- **Namespace introspection**: `globals`, `vars`, `dir`.
+- **Imports**: `__import__`.
+- **Namespace introspection**: `dir`.
 - **Interactive**: `input`, `breakpoint`, `help`.
-- **Decorators / descriptors**: `classmethod`, `staticmethod`, `property`,
-    `super`. (`@property` on functions is not recognized; use a method.)
-- **Construction / coercion**: `bytearray`, `complex`, `memoryview`,
-    `object`, `ascii`.
-- **Other**: `callable`, `delattr`, `issubclass`, `aiter`, `anext`.
+- **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`.
+- **Construction / coercion**: `bytearray`, `complex`, `memoryview`, `ascii`.
+- **Other**: `delattr`, `aiter`, `anext`.
 
-`super()` is the biggest practical omission: with no class inheritance either
-(see [classes.md](classes.md)), there is no inheritance mechanism at all.
+`super()` is the biggest practical omission: a class can name one base (see
+[classes.md](classes.md)), but an override cannot call the method it replaces.
+
+## Builtins a type-checked session rejects
+
+Monty's narrowed `builtins.pyi` (`crates/monty-typeshed/vendor/`) lags the interpreter, so a session with type checking
+enabled rejects `compile` and `issubclass` with `unresolved-reference` although both run.
+Feed the call through `eval()` / `exec()`, whose source is never type-checked, or turn type checking off.
 
 ## Behavioural divergences
 
@@ -43,6 +61,9 @@ These raise `NameError`:
     `AttributeError`, so `[1].append`, `'a'.upper`, `{}.get`, `dict.fromkeys`
     and `list.__class_getitem__` cannot be assigned, passed as a callback or
     reached through `getattr`. Call them directly (`list.__class_getitem__(int)`).
+- **`callable()` reports what Monty can call** — an instance of a sandbox class
+    that defines `__call__` answers `False`, because `__call__` is not dispatched
+    (see [classes.md](classes.md)), and calling it raises `TypeError`.
 - **`hash(x)`** — Monty hashes `str`, `bytes`, `float` and every container with
     its own algorithm, so the values differ from CPython's. Only `bool` and
     small `int` agree: an `int` hashes to itself, which is what CPython does
@@ -149,10 +170,27 @@ These raise `NameError`:
     (`cannot convert 'int' object to bytes`), not CPython's
     `OverflowError: cannot fit 'int' into an index-sized integer`.
 - **`isinstance(obj, T)`** — `T` must be a built-in type (`int`, `str`,
-    `list`, ...), a built-in exception class, a sandbox-defined class (see
-    [classes.md](classes.md)), a `|` union of those (see [typing.md](typing.md)),
-    or a tuple of those. Passing a host-supplied dataclass / namedtuple as the
-    second argument raises `TypeError`.
+    `list`, ...), `type` itself, a built-in exception class, a sandbox-defined
+    class (see [classes.md](classes.md)), an abstract base class of
+    `collections.abc` (see [collections.md](collections.md)), a `|` union of
+    those (see [typing.md](typing.md)), or a tuple of those. Passing a
+    host-supplied dataclass / namedtuple as the second argument raises
+    `TypeError`.
+- **`vars(obj)` gives a copy, not the live `__dict__`** — CPython hands back the
+    object's own mapping, so `vars(obj)['x'] = 1` sets the attribute. Monty
+    builds a fresh dict of the namespace, so a write to it never reaches the
+    object, the way `globals()` and `locals()` already answer here (see
+    [eval_exec.md](eval_exec.md)). `vars()` with no argument is `locals()`, as
+    in CPython. Only a module, a class and an instance carry a namespace; every
+    other object raises
+    `TypeError: vars() argument must have __dict__ attribute`.
+
+- **`type` is a built-in function, not the class `type`.** `repr(type)` reads
+    `<built-in function type>` and `type(type)` reads
+    `<class 'builtin_function_or_method'>`, where CPython reads
+    `<class 'type'>` for both. `isinstance(x, type)` still answers whether `x`
+    is a class, which is what the question is for, so only `type` itself
+    answers `False` where CPython answers `True`.
 - **`iter()`** — see [iter.md](iter.md) for iterator and `iter(callable, sentinel)` divergences.
 - **`pow(base, exp, mod)`** — the three-argument form requires all integers and
     rejects negative exponents with `ValueError` instead of computing a modular

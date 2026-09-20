@@ -13,29 +13,64 @@ any code runs.
     class-body statements other than `def`, a simple `name [: T] = <expr>`
     assignment, `pass`, or a docstring. There is no inheritance and no general
     dunder protocol. See [classes.md](classes.md).
-- **Decorators** (`@deco`) — supported on classes and on top-level or nested
-    `def`/`async def`, taking any callable in scope, evaluated in the enclosing
-    scope and applied bottom-up. Rejected at parse time on **methods**, so
-    `@classmethod`, `@staticmethod`, `@property` and any decorator on a `def`
-    inside a class body are unavailable. See [classes.md](classes.md).
 - **`async with` statements** — not yet supported.
 - **`yield` / `yield from` expressions** — no generator functions. Generator
     *expressions* (`(x for x in ...)`) parse but currently materialize to a
     `list` rather than a lazy iterator, a known temporary divergence; see
     `iter__generator_expr_type.py`.
-- **`match` statements** — structural pattern matching is not supported.
-- **`del` statements** — neither `del x` nor `del d[k]` parse.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
-- **`type` aliases** (PEP 695 `type Foo = int`).
 - **`async for` loops** and **async comprehensions**.
 - **Wildcard imports** (`from m import *`) — raises
     `` NotImplementedError: "Wildcard imports (`from ... import *`) are not supported" ``.
+
+## `del`
+
+`del name`, `del obj.attr`, `del container[key]`, `del lst[i:j]`, several
+targets in one statement (`del a, d[k]`), and a parenthesized list
+(`del (a, b)`) all work, deleting left to right. Divergences:
+
+- **`del` reaches only real instance attributes.** `del obj.attr` works on an
+    instance of a user class and raises `AttributeError` for every other type,
+    including the builtin types whose attributes are computed rather than
+    stored.
+- **Module dunders cannot be deleted.** `del __name__` raises `NameError`,
+    because the module dunders are resolved on read rather than stored. CPython
+    deletes the real module-dict entry.
+
+## `match` statements
+
+PEP 634 structural pattern matching is implemented: literal, capture, wildcard,
+value, sequence, mapping, class and `|` patterns, `as` captures, guards, and the
+`__match_args__` protocol for positional class sub-patterns. The compile-time
+rules are enforced with CPython's own wording — an irrefutable case before the
+last one, a name bound twice in one pattern, alternatives that bind different
+names, a duplicate mapping key, and two starred names in one sequence pattern.
+
+Divergences:
+
+- **A `*rest` binds a list built from the whole subject.** CPython slices the
+    subject; Monty copies it to a list first, because not every sequence it
+    accepts here can be sliced (`collections.deque` cannot). The bound value is
+    the same list either way; only a subject with a side-effecting `__getitem__`
+    could tell, and Monty has no such builtin.
+- **The subject stays reachable after the match.** It is held in a hidden local
+    (named `<match>`, which no expression can name) for the duration, and that
+    local is not cleared afterwards, so the subject is released one scope-exit
+    later than in CPython.
+- `bytearray`, `memoryview` and `complex` are absent from Monty, so the
+    self-matching class patterns PEP 634 defines for them are too.
+- A sequence pattern accepts the sequences Monty can iterate, minus `str` and
+    `bytes`, which PEP 634 excludes.
 
 ## Expressions rejected at parse time
 
 - **Complex number literals** (`1j`, `2+3j`) —
     `NotImplementedError: The monty syntax parser does not yet support complex constants`.
-- **Template strings (t-strings)** — PEP 750.
+
+## Template strings (PEP 750)
+
+`t'...'` builds a `string.templatelib.Template`. See
+[string_templatelib.md](string_templatelib.md).
 
 ## Starred unpacking
 
@@ -101,11 +136,13 @@ became mandatory in Python 3.7 or earlier and so are inert there too, and
 
 ## Module-level dunder variables
 
-Monty has no module object and no `globals()` dict, but it exposes a fixed set
-of module-level dunders so common idioms (e.g. `if __name__ == '__main__':`)
-work. They are resolved on read; there is no real namespace entry behind them,
-so the values built per read (`__file__`, `__annotations__`) are fresh objects
-each time and `__file__ is __file__` is `False` where CPython gives `True`.
+Monty has no module object, and module globals are slots rather than a namespace
+dict, but it exposes a fixed set of module-level dunders so common idioms (e.g.
+`if __name__ == '__main__':`) work. They are resolved on read; there is no real
+namespace entry behind them, so they are absent from `globals()` (see
+[eval_exec.md](eval_exec.md)), and the values built per read (`__file__`,
+`__annotations__`) are fresh objects each time, making `__file__ is __file__`
+`False` where CPython gives `True`.
 
 | Name              | Monty value  | CPython (script run)         |
 | ----------------- | ------------ | ---------------------------- |

@@ -531,6 +531,9 @@ pub enum StaticStrings {
     /// `base64.a85encode()` function.
     #[strum(serialize = "a85encode")]
     A85Encode,
+    /// `collections.abc`, as the attribute `collections` binds the submodule to.
+    #[strum(serialize = "abc")]
+    Abc,
     /// `sys.abiflags` attribute.
     Abiflags,
     /// Kwarg name `abs_tol` — `math.isclose(abs_tol=...)`.
@@ -662,6 +665,8 @@ pub enum StaticStrings {
     Binomialvariate,
     /// Kwarg name `buffering` — `open(buffering=...)`.
     Buffering,
+    /// The `builtins` module name.
+    Builtins,
     /// `sys.builtin_module_names` attribute.
     BuiltinModuleNames,
     /// `sys.byteorder` attribute.
@@ -674,6 +679,9 @@ pub enum StaticStrings {
     /// `typing.Callable` marker.
     #[strum(serialize = "Callable")]
     Callable,
+    /// The `asyncio.CancelledError` exception type.
+    #[strum(serialize = "CancelledError")]
+    CancelledError,
     /// `capitalize()` method, shared by `str` and `bytes`.
     Capitalize,
     /// `str.casefold()` method.
@@ -717,6 +725,10 @@ pub enum StaticStrings {
     Collect,
     /// Module name for `import collections`.
     Collections,
+    /// Module name for `from collections.abc import ...`. The whole dotted
+    /// path is interned as one string, which is what the import lookup matches.
+    #[strum(serialize = "collections.abc")]
+    CollectionsAbc,
     /// `math.comb()` function.
     Comb,
     /// `itertools.combinations()` function.
@@ -732,12 +744,28 @@ pub enum StaticStrings {
     Compile,
     /// `itertools.compress()` function.
     Compress,
+    /// The `contextvars.ContextVar` type.
+    #[strum(serialize = "ContextVar")]
+    ContextVar,
+    /// The `contextvars` module.
+    Contextvars,
+    /// `Interpolation.conversion` attribute.
+    Conversion,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
+    /// Module name for `import ast`.
+    Ast,
+    /// `asyncio.current_task()` function.
+    #[strum(serialize = "current_task")]
+    CurrentTask,
     /// `sys.copyright` attribute.
     Copyright,
     /// `math.copysign()` function.
     Copysign,
+    /// `collections.abc.Coroutine` marker. Distinct from the `coroutine` type
+    /// name, which is what `type()` reports for an awaited call.
+    #[strum(serialize = "Coroutine")]
+    CoroutineType,
     /// `math.cos()` function.
     Cos,
     /// `math.cosh()` function.
@@ -834,6 +862,10 @@ pub enum StaticStrings {
     Discard,
     /// `math.dist()` function.
     Dist,
+    /// `doc` parameter of `property()`.
+    Doc,
+    /// Kwarg name `dont_inherit` — `compile(dont_inherit=...)`.
+    DontInherit,
     /// `sys.dont_write_bytecode` attribute.
     DontWriteBytecode,
     /// `re.DOTALL` flag
@@ -860,6 +892,9 @@ pub enum StaticStrings {
     /// `__main__`, the `__name__` of the module being run.
     #[strum(serialize = "__main__")]
     DunderMain,
+    /// `__match_args__`, the field names a positional class pattern binds.
+    #[strum(serialize = "__match_args__")]
+    DunderMatchArgs,
     /// `defaultdict.__missing__` method.
     #[strum(serialize = "__missing__")]
     DunderMissing,
@@ -878,6 +913,9 @@ pub enum StaticStrings {
     /// `__qualname__` — the qualified class name, exposed on namedtuple classes.
     #[strum(serialize = "__qualname__")]
     DunderQualname,
+    /// `TypeAliasType.__value__`, the lazily evaluated alias target.
+    #[strum(serialize = "__value__")]
+    DunderValue,
     /// `Counter.elements()` method.
     Elements,
     /// `repr()`/`str()` text of `Ellipsis`, interned so rendering allocates nothing.
@@ -944,6 +982,8 @@ pub enum StaticStrings {
     Expm1,
     /// `random.expovariate()` function.
     Expovariate,
+    /// `Interpolation.expression` attribute.
+    Expression,
     /// `extend()` method, shared by `list` and `deque`.
     Extend,
     /// `deque.extendleft()` method.
@@ -957,11 +997,19 @@ pub enum StaticStrings {
     /// `repr()`/`str()` text of `False`, interned so rendering allocates nothing.
     #[strum(serialize = "False")]
     FalseRepr,
+    /// `fdel` parameter of `property()`.
+    Fdel,
+    /// `fget` parameter of `property()`.
+    Fget,
     /// `namedtuple(field_names=...)` keyword argument.
     #[strum(serialize = "field_names")]
     FieldNames,
+    /// `dataclasses.fields()` function.
+    Fields,
     /// Kwarg name `file` — `open(file=...)`.
     File,
+    /// Kwarg name `filename` — `compile(filename=...)`.
+    Filename,
     /// `zip_longest(fillvalue=...)` keyword.
     Fillvalue,
     /// `itertools.filterfalse()` function.
@@ -1000,6 +1048,8 @@ pub enum StaticStrings {
     FollowSymlinks,
     /// Kwarg name `format` — `date.strftime(format=...)`, `datetime.strftime(format=...)`.
     Format,
+    /// `Interpolation.format_spec` attribute.
+    FormatSpec,
     /// `math.frexp()` function.
     Frexp,
     /// `chain.from_iterable` — the one attribute an `itertools` type carries.
@@ -1019,6 +1069,8 @@ pub enum StaticStrings {
     /// `typing.FrozenSet` marker.
     #[strum(serialize = "FrozenSet")]
     FrozenSet,
+    /// `fset` parameter of `property()`.
+    Fset,
     /// `Path.__fspath__()` method, answered without host I/O.
     #[strum(serialize = "__fspath__")]
     Fspath,
@@ -1036,6 +1088,12 @@ pub enum StaticStrings {
     Gammavariate,
     /// `asyncio.gather()` function.
     Gather,
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`, the one name of `ast` Monty has.
+    #[strum(serialize = "PyCF_ALLOW_TOP_LEVEL_AWAIT")]
+    PyCfAllowTopLevelAwait,
+    /// `asyncio.get_running_loop()` function.
+    #[strum(serialize = "get_running_loop")]
+    GetRunningLoop,
     /// `random.gauss()` function.
     Gauss,
     /// Module name for `import gc`.
@@ -1124,6 +1182,11 @@ pub enum StaticStrings {
     IntMaxStrDigits,
     /// `sys.flags.interactive` field.
     Interactive,
+    /// The `string.templatelib.Interpolation` type.
+    #[strum(serialize = "Interpolation")]
+    InterpolationClass,
+    /// `Template.interpolations` attribute.
+    Interpolations,
     /// `set.intersection()` method.
     Intersection,
     /// `Path.is_absolute()` method, answered without host I/O.
@@ -1357,6 +1420,8 @@ pub enum StaticStrings {
     /// `namedtuple(..., module=...)` keyword argument.
     #[strum(serialize = "module")]
     ModuleKwarg,
+    /// `sys.modules`, the session's table of imported modules.
+    Modules,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
     /// Value of `sys.platform`.
@@ -1578,6 +1643,8 @@ pub enum StaticStrings {
     Replace,
     /// `@dataclass(repr=...)`.
     Repr,
+    /// `ContextVar.reset()` method.
+    Reset,
     /// `resolution` class constant of the `datetime` classes.
     Resolution,
     /// `Path.resolve()` method — yields a host call.
@@ -1641,6 +1708,9 @@ pub enum StaticStrings {
     Sequence,
     /// `sys.version_info.serial` field.
     Serial,
+    /// `ContextVar.set()` method.
+    #[strum(serialize = "set")]
+    SetMethod,
     /// `typing.Set` marker.
     #[strum(serialize = "Set")]
     SetType,
@@ -1744,6 +1814,12 @@ pub enum StaticStrings {
     /// `match.string`
     #[strum(serialize = "string")]
     StringAttr,
+    /// Module name for `from string.templatelib import ...`. The whole dotted
+    /// path is interned as one string, which is what the import lookup matches.
+    #[strum(serialize = "string.templatelib")]
+    StringTemplatelib,
+    /// `Template.strings` attribute.
+    Strings,
     /// `strip()` method, shared by `str` and `bytes`.
     Strip,
     /// `datetime.strptime()` classmethod.
@@ -1793,6 +1869,9 @@ pub enum StaticStrings {
     TeeType,
     /// `file.tell()` method.
     Tell,
+    /// The `string.templatelib.Template` type.
+    #[strum(serialize = "Template")]
+    TemplateClass,
     /// `datetime.time` class name.
     Time,
     /// The `datetime.timedelta` type.
@@ -1811,6 +1890,9 @@ pub enum StaticStrings {
     Title,
     /// `date.today()` / `datetime.today()` classmethod.
     Today,
+    /// The `contextvars.Token` type.
+    #[strum(serialize = "Token")]
+    Token,
     /// `Counter.total()` method.
     Total,
     /// `timedelta.total_seconds()` method.
@@ -1903,6 +1985,9 @@ pub enum StaticStrings {
     /// `validate` parameter of `base64.b64decode()`.
     #[strum(serialize = "validate")]
     Validate,
+    /// `Interpolation.value` attribute, distinct from [`Self::Values`].
+    #[strum(serialize = "value")]
+    ValueAttr,
     /// `dict.values()` method.
     Values,
     /// `sys.flags.verbose` field.

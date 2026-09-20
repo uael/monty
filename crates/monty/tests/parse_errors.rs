@@ -18,13 +18,6 @@ fn complex_numbers_return_not_implemented_error() {
 }
 
 #[test]
-fn yield_expressions_return_not_implemented_error() {
-    let err = get_parse_err("def foo():\n    yield 1");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support yield expressions");
-}
-
-#[test]
 fn simple_classes_compile_successfully() {
     // Simple classes are supported; only the advanced forms below are rejected.
     let result = MontyRun::new(
@@ -37,13 +30,26 @@ fn simple_classes_compile_successfully() {
 }
 
 #[test]
-fn class_inheritance_returns_not_implemented_error() {
-    let err = get_parse_err("class Foo(Bar): pass");
+fn metaclass_keyword_returns_not_implemented_error() {
+    let err = get_parse_err("class Foo(metaclass=type): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support class inheritance and metaclasses"
+        @"The monty syntax parser does not yet support metaclasses"
     );
+}
+
+#[test]
+fn class_inheritance_compiles_successfully() {
+    // A base list is an ordinary expression list of the enclosing scope; what
+    // it names is checked when the class statement runs.
+    let result = MontyRun::new(
+        "class Base: pass\n\nclass Derived(Base): pass".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "a class with a base should compile");
 }
 
 #[test]
@@ -71,13 +77,29 @@ fn method_default_walrus_returns_not_implemented_error() {
 }
 
 #[test]
-fn method_decorators_return_not_implemented_error() {
-    let err = get_parse_err("class Foo:\n    @staticmethod\n    def m(): pass");
+fn method_decorator_walrus_returns_not_implemented_error() {
+    // A method decorator is an ordinary expression evaluated in the class-body
+    // scope, so a walrus there would bind a class member and is rejected like
+    // any other class-scope walrus.
+    let err = get_parse_err("class Foo:\n    @(d := staticmethod)\n    def m(): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support method decorators (classmethod/staticmethod/property)"
+        @"The monty syntax parser does not yet support assignment expressions (`:=`) in class bodies"
     );
+}
+
+#[test]
+fn method_decorators_compile_successfully() {
+    // Decorators on a method apply any callable in scope, exactly like they do
+    // on a module-level `def`.
+    let result = MontyRun::new(
+        "def deco(fn):\n    return fn\n\nclass Foo:\n    @deco\n    def m(self): return 1".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "method decorators should compile");
 }
 
 #[test]
@@ -603,11 +625,26 @@ fn matrix_multiplication_augmented_assignment_returns_syntax_error() {
 }
 
 #[test]
-fn del_statement_returns_not_implemented_error() {
-    // The del statement is not supported at parse time
-    let err = get_parse_err("x = 1\ndel x");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support the 'del' statement");
+fn del_of_a_starred_target_returns_syntax_error() {
+    // `del` accepts names, attributes, subscripts and parenthesized lists of
+    // those. A starred target is rejected by ruff's parser before Monty sees
+    // it, so the message is ruff's rather than Monty's; CPython says
+    // "cannot delete starred".
+    let err = get_parse_err("a = [1]\ndel *a,");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"Invalid delete target");
+}
+
+#[test]
+fn del_statement_compiles_successfully() {
+    // Every target shape `del` accepts, in one statement.
+    let result = MontyRun::new(
+        "class C: pass\nc = C()\nc.a = 1\nd = {'k': 1}\nx = 1\ndel x, d['k'], c.a".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "del should compile for every target shape");
 }
 
 #[test]
@@ -1043,4 +1080,50 @@ fn function_with_too_many_closure_variables_returns_syntax_error() {
     let err = result.expect_err("expected compile error");
     assert_eq!(err.exc_type(), ExcType::SyntaxError);
     assert_eq!(err.message(), Some("more than 255 closure variables (256)"));
+}
+
+/// The four compile-time rules a `match` pattern must obey, each reported with
+/// CPython's own wording. They live here rather than in `test_cases/` because a
+/// failing *parse* has no traceback to diff against CPython.
+#[test]
+fn match_pattern_rules_return_syntax_errors() {
+    let err = get_parse_err("match 1:\n    case x: pass\n    case 2: pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(
+        err.message().unwrap(),
+        @"name capture 'x' makes remaining patterns unreachable"
+    );
+
+    let err = get_parse_err("match 1:\n    case _: pass\n    case 2: pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"wildcard makes remaining patterns unreachable");
+
+    let err = get_parse_err("match 1:\n    case [x, x]: pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"multiple assignments to name 'x' in pattern");
+
+    let err = get_parse_err("match 1:\n    case [x] | (y): pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"alternative patterns bind different names");
+
+    let err = get_parse_err("match 1:\n    case {1: a, 1: b}: pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"mapping pattern checks duplicate key (1)");
+
+    let err = get_parse_err("match [1]:\n    case [*a, *b]: pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"multiple starred names in sequence pattern");
+}
+
+/// An irrefutable case with a guard is not unreachable: the guard can fail, so
+/// the cases after it are still live.
+#[test]
+fn match_guarded_capture_is_not_unreachable() {
+    let result = MontyRun::new(
+        "match 1:\n    case x if x > 5: pass\n    case 2: pass".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "a guarded capture must not close the match");
 }

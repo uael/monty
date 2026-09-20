@@ -288,7 +288,6 @@ pub enum Opcode {
     BinarySubscr = 75,
     /// a[b] = c: pop value, pop index, pop obj.
     StoreSubscr = 76,
-    // NOTE: DeleteSubscr removed - `del` statement not supported by parser
     /// Pop obj, push obj.attr. Operand: u16 name_id.
     LoadAttr = 77,
     /// Pop module, push module.attr for `from ... import`. Operand: u16 name_id.
@@ -298,7 +297,6 @@ pub enum Opcode {
     LoadAttrImport = 78,
     /// Pop value, pop obj, set obj.attr. Operand: u16 name_id.
     StoreAttr = 79,
-    // NOTE: DeleteAttr removed - `del` statement not supported by parser
 
     // === Function Calls ===
     /// Call TOS with n positional args. Operand: u8 arg_count.
@@ -406,16 +404,37 @@ pub enum Opcode {
     ReturnValue = 101,
 
     // === Async/Await ===
-    /// Await the TOS value.
+    /// Replace the TOS awaitable with what drives the wait.
     ///
-    /// Handles `ExternalFuture`, `Coroutine`, and `GatherFuture` awaitables.
-    /// For `ExternalFuture`: if resolved, pushes result; if pending, blocks task.
-    /// For `Coroutine`: validates state is `New`, then starts execution.
-    /// For `GatherFuture`: spawns all coroutines as tasks and blocks until completion.
+    /// A coroutine, an `ExternalFuture` and a `GatherFuture` drive their own
+    /// wait and stay where they are. Anything else must define `__await__`,
+    /// and what that hands back takes its place. The `Send` loop the compiler
+    /// emits after this steps whichever it is; see `Expr::Await`.
     ///
     /// Raises `TypeError` if TOS is not awaitable.
-    /// Raises `RuntimeError` if coroutine/future has already been awaited.
+    /// Raises `RuntimeError` if the coroutine has already been awaited.
     Await = 102,
+
+    // === Generators ===
+    /// Suspend the running generator, handing TOS to whoever resumed it.
+    ///
+    /// A return that keeps the frame: the frame's stack region and its slice of
+    /// the exception stack move into the generator object, the frame is popped,
+    /// and the yielded value is pushed onto the resumer's operand stack exactly
+    /// where a call's return value would land. Resuming pushes the frame back
+    /// and leaves the sent value on top, which is what this instruction's result
+    /// is, so `x = yield v` reads it.
+    Yield = 107,
+
+    /// One step of a `yield from` delegation. Operand: the offset past the
+    /// loop, taken when the receiver is done.
+    ///
+    /// TOS is the value to send and TOS1 the receiver. When the receiver
+    /// yields, TOS becomes what it yielded and the receiver stays beneath, so
+    /// the [`Yield`](Self::Yield) that follows hands it straight out. When the
+    /// receiver is done, both are popped, what it returned is pushed in their
+    /// place, and the jump leaves the loop.
+    Send = 132,
 
     // === Unpacking ===
     /// Unpack TOS into n values. Operand: u8 count.
@@ -559,6 +578,36 @@ pub enum Opcode {
     /// Unbind a name through the frame's namespace; `NameError` if absent.
     /// Operands as `LoadName`.
     DeleteName = 124,
+
+    // === PEP 634 pattern matching ===
+    /// The parts of a `match` a pattern cannot express in ordinary bytecode,
+    /// selected by a [`MatchShape`] operand: the two "is this shape" tests, a
+    /// length, and the two mapping-key operations. One opcode rather than five
+    /// because no pattern test is hot enough to pay for its own dispatch arm.
+    MatchShape = 125,
+    /// Class pattern. Operand: u16 positional sub-pattern count. Pops the
+    /// keyword-name tuple, the class, and a copy of the subject; pushes the
+    /// tuple of matched attributes, or `None` when the subject is not an
+    /// instance or an attribute is missing.
+    MatchClass = 126,
+
+    /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
+    /// `__value__` read. Operand: u16 name_id (the alias's `__name__`).
+    MakeTypeAlias = 127,
+
+    // === `del` on containers ===
+    /// `del a[b]`: pop index, pop obj, remove the item.
+    DeleteSubscr = 128,
+    /// `del a.b`: pop obj, remove the attribute. Operand: u16 name_id.
+    DeleteAttr = 129,
+
+    // === PEP 750 template construction ===
+    /// Pop format_spec, conversion, expression and value (in that order from
+    /// TOS) and push one `string.templatelib.Interpolation`.
+    BuildInterpolation = 130,
+    /// Pop the interpolations tuple then the strings tuple, push a
+    /// `string.templatelib.Template`.
+    BuildTemplate = 131,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -575,6 +624,28 @@ pub(crate) const NAME_GLOBAL_ONLY: u8 = 0x02;
 // flags/operand encoding on one opcode (e.g. `Assert`/`FormatValue`) over a
 // family of near-identical opcodes, unless the instruction is hot enough that
 // decoding the discriminating operand would cost measurable dispatch time.
+
+/// Which operation a [`Opcode::MatchShape`] performs.
+///
+/// The discriminants are the opcode's operand byte, so they are append-only in
+/// the same way the opcode enum is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::FromRepr)]
+#[repr(u8)]
+pub enum MatchShape {
+    /// Peek the subject, push whether a sequence pattern may match it: a
+    /// sequence that is not a `str` or `bytes`, as PEP 634 requires.
+    IsSequence = 0,
+    /// Peek the subject, push whether a mapping pattern may match it.
+    IsMapping = 1,
+    /// Peek the subject, push its length.
+    Len = 2,
+    /// Pop the key tuple, peek the subject, push the tuple of values it holds
+    /// for those keys — or `None` if it is missing any.
+    Keys = 3,
+    /// Pop the key tuple, peek the subject, push a new dict of everything the
+    /// key tuple did not name. Backs `{**rest}`.
+    Rest = 4,
+}
 
 /// Byte layout of an opcode's in-stream operand.
 #[repr(u8)]
@@ -599,6 +670,7 @@ impl Opcode {
     fn operand_shape(self) -> OperandShape {
         match self {
             Self::Pop
+            | Self::Yield
             | Self::Dup
             | Self::Dup2
             | Self::Rot2
@@ -665,6 +737,9 @@ impl Opcode {
             | Self::BeforeWith
             | Self::WithExit
             | Self::WithExceptStart
+            | Self::DeleteSubscr
+            | Self::BuildInterpolation
+            | Self::BuildTemplate
             | Self::BuildCell => OperandShape::None,
             Self::LoadLocal
             | Self::StoreLocal
@@ -680,7 +755,8 @@ impl Opcode {
             | Self::SetExtend
             | Self::LiftToTop
             | Self::Assert
-            | Self::AssertFailed => OperandShape::U8,
+            | Self::AssertFailed
+            | Self::MatchShape => OperandShape::U8,
             Self::LoadSmallInt => OperandShape::I8,
             Self::LoadModule
             | Self::LoadConst
@@ -702,13 +778,17 @@ impl Opcode {
             | Self::StoreAttr
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
-            | Self::MethodDictMerge => OperandShape::U16,
+            | Self::MethodDictMerge
+            | Self::DeleteAttr
+            | Self::MakeTypeAlias
+            | Self::MatchClass => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
             | Self::JumpIfFalse
             | Self::JumpIfTrueOrPop
             | Self::JumpIfFalseOrPop
-            | Self::ForIter => OperandShape::Offset,
+            | Self::ForIter
+            | Self::Send => OperandShape::Offset,
             Self::CallBuiltinFunction | Self::CallBuiltinType | Self::UnpackEx => OperandShape::U8U8,
             Self::CallAttr | Self::CallAttrExtended | Self::MakeFunction => OperandShape::U16U8,
             Self::LoadGlobalCallable => OperandShape::U16U16,
@@ -850,6 +930,14 @@ impl Opcode {
                     -2
                 }
             }
+            // The two shape tests and the length peek the subject and push an
+            // answer; the two key operations replace the key tuple with theirs.
+            (MatchShape, Operand::U8(op)) => match self::MatchShape::from_repr(op) {
+                Some(self::MatchShape::IsSequence | self::MatchShape::IsMapping | self::MatchShape::Len) => 1,
+                // The compiler is the only emitter, so an unknown operand is a
+                // bug in it rather than anything a program can produce.
+                _ => 0,
+            },
 
             // === Variable-effect: U16 operand ===
             (BuildList | BuildTuple | BuildSet | BuildFString, Operand::U16(n)) => 1 - i32::from(n),
@@ -915,7 +1003,12 @@ impl Opcode {
             (ListToTuple, Operand::None) => 0,
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
-            (GetIter | Await, Operand::None) => 0,
+            (DeleteSubscr, Operand::None) => -2,
+            // Four field values in, one `Interpolation` out.
+            (BuildInterpolation, Operand::None) => -3,
+            // Two tuples in, one `Template` out.
+            (BuildTemplate, Operand::None) => -1,
+            (GetIter | Await | Yield, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
             (ReturnValue, Operand::None) => -1,
@@ -955,6 +1048,12 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
+            (DeleteAttr, Operand::U16(_)) => -1,
+            // The thunk is replaced in place by the alias object.
+            (MakeTypeAlias, Operand::U16(_)) => 0,
+            // Pops the keyword names and the class, plus the subject copy the
+            // pattern duplicated for it; pushes the attribute tuple or `None`.
+            (MatchClass, Operand::U16(_)) => -2,
             // `DictMerge` takes a u16 operand carrying the func_name_id for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under
@@ -982,6 +1081,11 @@ impl Opcode {
             (JumpIfTrue | JumpIfFalse | JumpIfTrueOrPop | JumpIfFalseOrPop, Operand::Offset(_)) => -1,
             // `ForIter` adds the the value yielded by the iterator to the stack.
             (ForIter, Operand::Offset(_)) => 1,
+            // The fall-through effect: the sent value is replaced by what the
+            // receiver yielded, with the receiver still beneath it. Taking the
+            // jump instead leaves one value where both were, which the jump
+            // target's own depth records, exactly as `ForIter`'s does.
+            (Send, Operand::Offset(_)) => 0,
 
             // Catch-all: opcode emitted with the wrong operand variant, or a
             // new opcode added without an arm above. Every opcode has exactly
@@ -1010,6 +1114,8 @@ impl Opcode {
             Self::JumpIfTrueOrPop | Self::JumpIfFalseOrPop => 0,
             // Pop iterator on jump-taken (no value pushed).
             Self::ForIter => -1,
+            // Receiver and sent value both go, replaced by the result.
+            Self::Send => -1,
             _ => panic!("Opcode::jump_taken_delta: {self:?} is not a jump opcode"),
         }
     }

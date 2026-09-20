@@ -31,15 +31,16 @@ use crate::{
     asyncio::{CallId, TaskId},
     builtins::Builtins,
     bytecode::{
+        MatchShape,
         code::{Code, LocationEntry},
         op::{Opcode, decode_assert_flags},
     },
-    defer_drop_mut,
+    defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
-    modules::{StandardLib, json::JsonStringCache, random::apply_seed_random, re::RePatternCache},
+    modules::{StandardLib, json::JsonStringCache, random::apply_seed_random, re::RePatternCache, table::ModuleTable},
     name_map::NameMap,
     object_bridge::MontyObjectExt,
     os_dispatch::{
@@ -48,24 +49,24 @@ use crate::{
     parse::CodeRange,
     run::{Program, SessionTables, VmEnv},
     types::{
-        Dict, LongInt, PyTrait, SessionRandom,
+        Dict, LongInt, PyTrait, SessionRandom, allocate_interpolation, allocate_template, allocate_type_alias,
         file::{apply_buffer_store, apply_open_name, apply_write_position},
+        generator::{Delegation, GeneratorKind, GeneratorState},
+        instance::instance_builtin_exc,
+        match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
         random::SEED_BYTES,
         str::allocate_string,
     },
     value::{EitherStr, Value},
 };
 
-/// Result of executing Await opcode.
+/// What the VM must do after an await could not settle where it stood.
 ///
-/// Indicates what the VM should do after awaiting a value:
-/// - `ValueReady`: the awaited value resolved immediately, push it
-/// - `FramePushed`: a new frame was pushed for coroutine execution
-/// - `Yield`: all tasks blocked, yield to caller with pending futures
+/// A wait that settles leaves its value on the stack and reports nothing, so
+/// this says only which of the two ways it did not: another task took over, or
+/// none could and the host must resolve what is pending.
 enum AwaitResult {
-    /// The awaited value resolved immediately (e.g., resolved ExternalFuture).
-    ValueReady(Value),
-    /// A new frame was pushed to execute a coroutine.
+    /// Another task's frame is now the current one.
     FramePushed,
     /// All tasks are blocked - yield to caller with pending futures.
     Yield(Vec<CallId>),
@@ -154,6 +155,14 @@ macro_rules! handle_call_result {
         match $result {
             Ok(CallResult::Value(result)) => $self.push(result),
             Ok(CallResult::FramePushed) => {}
+            Ok(CallResult::Raised { error, value }) => {
+                // Raised the way `raise` does, so the handler binds the object
+                // the call raised rather than one rebuilt from the error.
+                if let Some(result) = $self.handle_exception_with_value(*error, value) {
+                    return Err(result);
+                }
+                yield_if_parked!($self);
+            }
             Ok(CallResult::External(name, args)) => {
                 let call_id = $self.allocate_call_id();
                 let name_load_ip = $self.ext_function_load_ip.take();
@@ -201,12 +210,12 @@ macro_rules! handle_call_result {
             Ok(CallResult::AwaitValue(value)) => {
                 // Push the value and implicitly await it (used by asyncio.run())
                 $self.push(value);
-                match $self.exec_get_awaitable() {
-                    Ok(AwaitResult::ValueReady(value)) => $self.push(value),
-                    Ok(AwaitResult::FramePushed) => {}
-                    Ok(AwaitResult::Yield(pending_calls)) => {
+                match $self.await_pushed() {
+                    Ok(None) => {}
+                    Ok(Some(AwaitResult::Yield(pending_calls))) => {
                         return Ok(FrameExit::ResolveFutures(pending_calls));
                     }
+                    Ok(Some(AwaitResult::FramePushed)) => {}
                     Err(e) => catch!($self, e),
                 }
             }
@@ -398,6 +407,33 @@ pub struct CallFrame<'code> {
     /// `cleanup_frame_state`, or taken by `serialize` for a snapshot.
     namespace: Option<Box<FrameNamespace>>,
 
+    /// Where to send the resumer when this generator's body returns, for a
+    /// frame a `yield from` is delegating to.
+    ///
+    /// `None` for a generator resumed by `next()` or `send()`, whose resumer
+    /// hears `StopIteration` instead. `Some(ip)` carries the delegation's exit
+    /// offset, and the returned value goes to the resumer in place of the
+    /// receiver rather than being lost with the frame.
+    delegated_return: Option<usize>,
+
+    /// The `yield from` this frame is inside, for the frame that waits on the
+    /// delegation rather than the one that runs it.
+    ///
+    /// `Send` sets it and the `Yield` that follows takes it, which is how a
+    /// suspended generator comes to hold its [`Delegation`]. A handler that
+    /// catches what the receiver raised clears it: from there the frame is out
+    /// of the delegation, and its next `yield` is a plain one.
+    delegating: Option<Delegation>,
+
+    /// The generator whose body this frame runs, borrowed for as long as the
+    /// frame is on the stack.
+    ///
+    /// `Yield` reads it to know where to lift the frame back into, and
+    /// `ReturnValue` reads it to mark the generator done. `None` for every
+    /// ordinary frame. Borrowed rather than owned: the resumer holds the
+    /// reference that keeps the generator alive across the resume.
+    generator: Option<HeapId>,
+
     /// Whether this frame is a class `__init__` running for `Foo(...)`.
     ///
     /// When `true`, the `ReturnValue` handler discards the frame's return value
@@ -436,6 +472,9 @@ impl<'code> CallFrame<'code> {
             is_parked: false,
             namespace: None,
             is_initializer: false,
+            generator: None,
+            delegated_return: None,
+            delegating: None,
         }
     }
 
@@ -491,6 +530,9 @@ impl<'code> CallFrame<'code> {
             should_return: false,
             is_parked: false,
             namespace,
+            generator: None,
+            delegated_return: None,
+            delegating: None,
             is_initializer: false,
         }
     }
@@ -628,6 +670,19 @@ pub struct SerializedFrame {
     #[serde(default)]
     is_initializer: bool,
 
+    /// The generator this frame runs, if any (see `CallFrame.generator`).
+    #[serde(default)]
+    generator: Option<HeapId>,
+
+    /// Where the resumer resumes when this generator returns, for a frame a
+    /// `yield from` is delegating to (see `CallFrame.delegated_return`).
+    #[serde(default)]
+    delegated_return: Option<usize>,
+
+    /// The `yield from` this frame waits on (see `CallFrame.delegating`).
+    #[serde(default)]
+    delegating: Option<Delegation>,
+
     /// Frame namespace, with ownership of its dict references (see
     /// `CallFrame.namespace`).
     namespace: Option<Box<FrameNamespace>>,
@@ -650,6 +705,9 @@ impl CallFrame<'_> {
             exception_stack_base: self.exception_stack_base(),
             call_offset: self.call_offset,
             is_initializer: self.is_initializer,
+            generator: self.generator,
+            delegated_return: self.delegated_return,
+            delegating: self.delegating,
             namespace: mem::take(&mut self.namespace),
         }
     }
@@ -793,6 +851,11 @@ pub struct VM<'h> {
     /// [`globals`](Self::globals) when runtime-compiled code binds a new name.
     pub(crate) global_names: &'h mut NameMap,
 
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Borrowed mutably because an import binds a name in it.
+    pub(crate) modules: &'h mut ModuleTable,
+
     /// Print output writer, borrowed so callers retain access to collected output.
     pub(crate) print_writer: PrintWriter<'h>,
 
@@ -909,7 +972,11 @@ impl<'h> VM<'h> {
         heap: &'h mut HeapReader<'h>,
         print_writer: PrintWriter<'h>,
     ) -> Self {
-        let SessionTables { global_names, interns } = tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = tables;
         Self {
             stack: Vec::with_capacity(64),
             globals,
@@ -918,6 +985,7 @@ impl<'h> VM<'h> {
             heap,
             interns,
             global_names,
+            modules,
             print_writer,
             exception_stack: Vec::new(),
             instruction_ip: 0,
@@ -949,7 +1017,11 @@ impl<'h> VM<'h> {
         heap: &'h mut HeapReader<'h>,
         print_writer: PrintWriter<'h>,
     ) -> Self {
-        let SessionTables { global_names, interns } = tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = tables;
         // Reconstruct call frames from serialized form
         let frames: Vec<CallFrame<'_>> = snapshot
             .frames
@@ -972,6 +1044,9 @@ impl<'h> VM<'h> {
                     is_parked: false,
                     namespace: sf.namespace,
                     is_initializer: sf.is_initializer,
+                    generator: sf.generator,
+                    delegated_return: sf.delegated_return,
+                    delegating: sf.delegating,
                 }
             })
             .collect();
@@ -992,6 +1067,7 @@ impl<'h> VM<'h> {
             heap,
             interns,
             global_names,
+            modules,
             print_writer,
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
@@ -1603,6 +1679,51 @@ impl<'h> VM<'h> {
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
                 }
+                Opcode::DeleteSubscr => {
+                    // Stack order: obj, index (TOS)
+                    let index = self.pop();
+                    let mut obj = self.pop();
+                    let result = obj.py_delitem(index, self);
+                    obj.drop_with(self);
+                    if let Err(e) = result {
+                        catch!(self, e);
+                    }
+                }
+                Opcode::DeleteAttr => {
+                    let name_idx = self.current_frame.fetch_u16();
+                    let name_id = StringId::from_index(name_idx);
+                    try_catch!(self, self.delete_attr(name_id));
+                }
+                Opcode::BuildInterpolation => {
+                    // Stack order: value, expression, conversion, format_spec (TOS)
+                    let format_spec = self.pop();
+                    let conversion = self.pop();
+                    let expression = self.pop();
+                    let value = self.pop();
+                    let interpolation = allocate_interpolation(value, expression, conversion, format_spec, self);
+                    self.push(interpolation);
+                }
+                Opcode::BuildTemplate => {
+                    // Stack order: strings tuple, interpolations tuple (TOS)
+                    let interpolations = self.pop();
+                    let strings = self.pop();
+                    let template = allocate_template(strings, interpolations, self);
+                    self.push(template);
+                }
+                Opcode::MakeTypeAlias => {
+                    let name_idx = self.current_frame.fetch_u16();
+                    let thunk = self.pop();
+                    let alias = allocate_type_alias(StringId::from_index(name_idx), thunk, self);
+                    self.push(alias);
+                }
+                Opcode::MatchShape => {
+                    let shape = self.current_frame.fetch_u8();
+                    try_catch!(self, self.exec_match_shape(shape));
+                }
+                Opcode::MatchClass => {
+                    let positional = self.current_frame.fetch_u16();
+                    try_catch!(self, self.exec_match_class(positional as usize));
+                }
                 // Control Flow - use self.current_frame.ip directly for jumps
                 Opcode::Jump => {
                     let offset = self.current_frame.fetch_i16();
@@ -1853,15 +1974,11 @@ impl<'h> VM<'h> {
                 Opcode::Raise => {
                     let exc = self.pop();
                     let error = self.make_exception(&exc, true); // is_raise=true, hide caret
-                    // Re-raise an instance as-is so `raise e` preserves `e`'s
-                    // identity, like CPython. A bare type or non-exception has
-                    // nothing to reuse and rebuilds from the error.
-                    let raised = match &exc {
-                        Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Exception(_)) => Some(exc),
-                        _ => {
-                            exc.drop_with(self);
-                            None
-                        }
+                    let raised = if self.keeps_identity(&exc) {
+                        Some(exc)
+                    } else {
+                        exc.drop_with(self);
+                        None
                     };
                     if let Some(result) = self.handle_exception_with_value(error, raised) {
                         return Err(result);
@@ -1922,7 +2039,82 @@ impl<'h> VM<'h> {
                     }
                 }
                 // Return
+                Opcode::Yield => {
+                    let value = self.pop();
+                    let Some(gen_id) = self.current_frame.generator else {
+                        value.drop_with(self);
+                        return Err(RunError::internal("Yield outside a generator frame"));
+                    };
+                    // Taken, not read: the `Send` before a delegation's `Yield`
+                    // sets it afresh on every step of the loop.
+                    let delegating = self.current_frame.delegating.take();
+                    if self.suspend_generator(gen_id, value, delegating) {
+                        // Driven by a nested `run()`, which takes the value the
+                        // suspend left on the resumer's stack.
+                        return Ok(FrameExit::Return(self.pop()));
+                    }
+                }
+
+                Opcode::Send => {
+                    let offset = self.current_frame.fetch_i16();
+                    // The loop's `Yield` is the next instruction, and where the
+                    // delegation continues once the receiver is done is that
+                    // much further on. Both are resolved now, because the
+                    // frame's ip has passed the operand.
+                    let yield_ip = self.current_frame.ip;
+                    let done_ip = yield_ip
+                        .checked_add_signed(offset.into())
+                        .expect("Send offset resolved to a negative or overflowing IP");
+                    self.current_frame.delegating = Some(Delegation { yield_ip, done_ip });
+                    match self.send_to_receiver(done_ip) {
+                        Ok(None) => {}
+                        // A future the host must resolve: every task is blocked,
+                        // so control goes back to it.
+                        Ok(Some(AwaitResult::Yield(pending_calls))) => {
+                            return Ok(FrameExit::ResolveFutures(pending_calls));
+                        }
+                        Ok(Some(AwaitResult::FramePushed)) => {}
+                        Err(e) => catch!(self, e),
+                    }
+                }
+
                 Opcode::ReturnValue => {
+                    // A generator body that returns is exhausted, and its
+                    // resumer hears `StopIteration` rather than the value.
+                    // A generator a `yield from` is delegating to hands its
+                    // value to the delegation rather than ending it: the
+                    // resumer resumes past the loop with the result in place of
+                    // the receiver.
+                    if let Some(gen_id) = self.current_frame.generator
+                        && let Some(done_ip) = self.current_frame.delegated_return
+                    {
+                        let value = self.pop();
+                        let stop = self.pop_frame();
+                        self.finish_generator(gen_id);
+                        // `Send` already took the value it passed in, so only
+                        // the receiver is left for the result to replace.
+                        self.finish_delegation(done_ip, value);
+                        if stop {
+                            return Ok(FrameExit::Return(self.pop()));
+                        }
+                        continue;
+                    }
+                    if let Some(gen_id) = self.current_frame.generator {
+                        let value = self.pop();
+                        let stop = self.pop_frame();
+                        self.finish_generator(gen_id);
+                        value.drop_with(self);
+                        let exhausted = ExcType::stop_iteration();
+                        if stop {
+                            // Driven by a nested `run()`, whose boundary this
+                            // exception must not unwind past.
+                            return Err(exhausted);
+                        }
+                        catch!(self, exhausted);
+                        // The handler is now current, so the rest of this arm,
+                        // which belongs to an ordinary return, must not run.
+                        continue;
+                    }
                     let value = self.pop();
                     if self.suspended_frames.is_empty() {
                         // Last frame - check if this is main task or spawned task
@@ -1936,9 +2128,6 @@ impl<'h> VM<'h> {
                         // Spawned task completed - handle task completion
                         let result = self.handle_task_completion(value);
                         match result {
-                            Ok(AwaitResult::ValueReady(v)) => {
-                                self.push(v);
-                            }
                             Ok(AwaitResult::FramePushed) => {}
                             Ok(AwaitResult::Yield(pending)) => {
                                 // All tasks blocked - return to host
@@ -1992,21 +2181,10 @@ impl<'h> VM<'h> {
                     }
                 }
                 // Async/Await
+                // Leaves what drives the wait on the stack; the `Send` loop the
+                // compiler emits after this steps it.
                 Opcode::Await => {
-                    let result = self.exec_get_awaitable();
-                    match result {
-                        Ok(AwaitResult::ValueReady(value)) => {
-                            self.push(value);
-                        }
-                        Ok(AwaitResult::FramePushed) => {}
-                        Ok(AwaitResult::Yield(pending_calls)) => {
-                            // All tasks are blocked - return control to host
-                            return Ok(FrameExit::ResolveFutures(pending_calls));
-                        }
-                        Err(e) => {
-                            catch!(self, e);
-                        }
-                    }
+                    try_catch!(self, self.exec_get_awaitable());
                 }
                 // Unpacking - route through exception handling
                 Opcode::UnpackSequence => {
@@ -2040,16 +2218,25 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Loads a built-in module, raising `ModuleNotFoundError` for unknown names.
+    /// Loads a module, raising `ModuleNotFoundError` for unknown names.
+    ///
+    /// `sys.modules` answers first, as in CPython, so a module is built once
+    /// per session and a name a host put there is found. A standard module
+    /// that is not there yet is built and remembered.
     fn load_module(&mut self, module_id: u16) -> RunResult<()> {
         let name_id = StringId::from_index(module_id);
-        if let Some(module) = self.interns.static_string(name_id).and_then(StandardLib::from_static) {
-            let heap_id = module.create(self);
-            self.push(Value::Ref(heap_id));
-            Ok(())
-        } else {
-            Err(ExcType::module_not_found_error(self.interns.get_str(name_id)))
+        if let Some(held) = self.imported(name_id) {
+            self.push(held);
+            return Ok(());
         }
+        let Some(module) = self.interns.static_string(name_id).and_then(StandardLib::from_static) else {
+            return Err(ExcType::module_not_found_error(self.interns.get_str(name_id)));
+        };
+        let heap_id = module.create(self);
+        let held = Value::Ref(heap_id);
+        self.remember(name_id, held.clone_with_heap(self.heap))?;
+        self.push(held);
+        Ok(())
     }
 
     /// Resumes execution after an external call completes.
@@ -2222,6 +2409,64 @@ impl<'h> VM<'h> {
         self.stack.last().expect("stack underflow")
     }
 
+    /// Runs one [`Opcode::MatchShape`] operation.
+    ///
+    /// Every variant leaves the subject where it found it: a pattern keeps it
+    /// on the stack for the tests that follow, and drops it once.
+    ///
+    /// Outlined from the run loop for the reason `exec_get_yield_from_iter` is:
+    /// the loop's stack frame is paid on every native re-entry, and
+    /// `MAX_RUN_REENTRY_DEPTH` is calibrated against its size.
+    #[inline(never)]
+    fn exec_match_shape(&mut self, shape: u8) -> Result<(), RunError> {
+        let Some(shape) = MatchShape::from_repr(shape) else {
+            return Err(RunError::internal("MatchShape: invalid operand"));
+        };
+        match shape {
+            MatchShape::IsSequence | MatchShape::IsMapping | MatchShape::Len => {
+                let this = self;
+                let subject = this.peek().clone_with_heap(this.heap);
+                defer_drop!(subject, this);
+                let answer = match shape {
+                    MatchShape::IsSequence => Value::Bool(is_match_sequence(subject, this)),
+                    MatchShape::IsMapping => Value::Bool(is_match_mapping(subject, this)),
+                    // Only reached behind a shape test, so the subject has a length.
+                    _ => match_len(subject, this)?,
+                };
+                this.push(answer);
+            }
+            MatchShape::Keys | MatchShape::Rest => {
+                let this = self;
+                let keys = this.pop();
+                let subject = this.peek().clone_with_heap(this.heap);
+                defer_drop!(subject, this);
+                let answer = if shape == MatchShape::Keys {
+                    match_keys(subject, keys, this)?
+                } else {
+                    match_rest(subject, keys, this)?
+                };
+                this.push(answer);
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs [`Opcode::MatchClass`]: pops the keyword names, the class and the
+    /// subject copy, and pushes the attribute tuple or `None`.
+    ///
+    /// Outlined for the same reason as [`Self::exec_match_shape`].
+    #[inline(never)]
+    fn exec_match_class(&mut self, positional: usize) -> Result<(), RunError> {
+        let this = self;
+        let keywords = this.pop();
+        let cls = this.pop();
+        let subject = this.pop();
+        defer_drop!(subject, this);
+        let answer = match_class(subject, cls, keywords, positional, this)?;
+        this.push(answer);
+        Ok(())
+    }
+
     /// Pops n values from the stack in reverse order (first popped is last in vec).
     pub(super) fn pop_n(&mut self, n: usize) -> Vec<Value> {
         let start = self.stack.len() - n;
@@ -2281,6 +2526,457 @@ impl<'h> VM<'h> {
             self.decr_recursion();
         }
         should_return
+    }
+
+    // ====================================================================
+    // Generators
+    // ====================================================================
+
+    /// Lifts the running generator's frame off the stack and back into its
+    /// object, leaving `value` for whoever resumed it.
+    ///
+    /// The mirror of [`resume_generator`](Self::resume_generator), and the
+    /// reason a generator needs no storage of its own while it runs: between
+    /// those two calls its frame is an ordinary frame, so tracebacks, the
+    /// exception table and the recursion budget all see it as one.
+    ///
+    /// Returns whether the popped frame asked the run loop to stop, which is
+    /// how a generator driven by a nested `run()` hands control back.
+    fn suspend_generator(&mut self, gen_id: HeapId, value: Value, delegating: Option<Delegation>) -> bool {
+        let base = self.current_frame.stack_base();
+        let exception_base = self.current_frame.exception_stack_base();
+        let ip = self.current_frame.ip;
+        // Taken before popping, so the frame teardown finds nothing of the
+        // generator's left to release.
+        let saved: Vec<Value> = self.stack.drain(base..).collect();
+        let saved_exceptions: Vec<Value> = self.exception_stack.drain(exception_base..).collect();
+        let stop = self.pop_frame();
+        let HeapReadOutput::Generator(mut generator) = self.heap.read(gen_id) else {
+            unreachable!("a generator frame names its generator")
+        };
+        let generator = generator.get_mut(self.heap);
+        generator.ip = ip;
+        generator.stack = saved;
+        generator.exception_stack = saved_exceptions;
+        generator.state = GeneratorState::Suspended;
+        generator.delegating = delegating;
+        self.push(value);
+        stop
+    }
+
+    /// Puts a generator's frame back on the stack, leaving it current.
+    ///
+    /// The mirror of [`suspend_generator`](Self::suspend_generator): the saved
+    /// region goes back onto the VM stack at whatever base it now has, and the
+    /// frame is rebuilt around it at the instruction it stopped on. The caller
+    /// decides what the resumed frame meets first — a sent value, or an
+    /// exception raised at the `yield`.
+    ///
+    /// The generator must be resumable; callers check that first so each can
+    /// word its own refusal.
+    pub(super) fn splice_generator_frame(&mut self, gen_id: HeapId) -> RunResult<()> {
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("splice_generator_frame called off a generator")
+        };
+        let func_id = generator.func_id;
+        let call_offset = self.current_offset();
+        let function = self.interns.get_function(func_id);
+        let code = &function.code;
+        let locals_count = u16::try_from(function.namespace_size).expect("namespace size fits in u16");
+
+        let HeapReadOutput::Generator(mut handle) = self.heap.read(gen_id) else {
+            unreachable!("checked above")
+        };
+        let generator = handle.get_mut(self.heap);
+        let ip = generator.ip;
+        let saved = mem::take(&mut generator.stack);
+        let saved_exceptions = mem::take(&mut generator.exception_stack);
+        generator.state = GeneratorState::Running;
+        drop(handle);
+
+        let stack_base = self.stack.len();
+        self.stack.extend(saved);
+        let exception_stack_base = self.exception_stack.len();
+        self.exception_stack.extend(saved_exceptions);
+
+        // The frame borrows the object's namespace for as long as it runs, so
+        // both hold a reference on every dict in it.
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("checked above")
+        };
+        let namespace = generator
+            .namespace
+            .as_deref()
+            .map(|n| Box::new(n.clone_owned(&*self.heap)));
+        let mut frame = CallFrame::new_function(
+            code,
+            stack_base,
+            locals_count,
+            exception_stack_base,
+            func_id,
+            call_offset,
+            namespace,
+        );
+        frame.ip = ip;
+        frame.generator = Some(gen_id);
+        if let Err(e) = self.push_frame(frame) {
+            // The frame never ran, so its region goes back to the generator
+            // rather than being dropped along with values it still owns.
+            let region: Vec<Value> = self.stack.drain(stack_base..).collect();
+            let exceptions: Vec<Value> = self.exception_stack.drain(exception_stack_base..).collect();
+            let HeapReadOutput::Generator(mut handle) = self.heap.read(gen_id) else {
+                unreachable!("checked above")
+            };
+            let generator = handle.get_mut(self.heap);
+            generator.stack = region;
+            generator.exception_stack = exceptions;
+            generator.state = GeneratorState::Suspended;
+            drop(handle);
+            return Err(e);
+        }
+        // Handler lookup reads `instruction_ip`, so an exception thrown in at
+        // the `yield` finds the resumed frame's own `try` blocks.
+        self.instruction_ip = ip;
+        Ok(())
+    }
+
+    /// Puts a generator's frame back on the stack and leaves `sent` on top of
+    /// it, so the `yield` it stopped at evaluates to that value.
+    ///
+    /// Returns [`CallResult::FramePushed`]: the generator runs on the VM's own
+    /// loop, and its next `yield` lands a value on the resumer's operand stack
+    /// exactly where a call's return value would.
+    ///
+    /// # Errors
+    /// `ValueError` when the generator is already running, `TypeError` for a
+    /// value sent to one that has not started, and for one that has finished
+    /// `StopIteration` from a generator or `RuntimeError` from a coroutine,
+    /// which CPython refuses to let anything resume twice.
+    pub(crate) fn resume_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<CallResult> {
+        let (kind, state) = self.generator_kind_and_state(gen_id);
+        match state {
+            GeneratorState::Running => {
+                sent.drop_with(self);
+                return Err(ExcType::value_error_generator_running());
+            }
+            GeneratorState::Done => {
+                sent.drop_with(self);
+                return Err(kind.spent());
+            }
+            GeneratorState::Created if !matches!(sent, Value::None) => {
+                sent.drop_with(self);
+                return Err(ExcType::type_error_send_to_just_started(kind.word()));
+            }
+            GeneratorState::Created | GeneratorState::Suspended => {}
+        }
+        if let Err(e) = self.splice_generator_frame(gen_id) {
+            sent.drop_with(self);
+            return Err(e);
+        }
+        // A generator resumed for the first time starts at the top of its body,
+        // where no `yield` is waiting to take a value.
+        if state == GeneratorState::Created {
+            sent.drop_with(self);
+        } else {
+            self.push(sent);
+        }
+        Ok(CallResult::FramePushed)
+    }
+
+    /// Where a generator is in its life.
+    fn generator_state(&self, gen_id: HeapId) -> GeneratorState {
+        self.generator_kind_and_state(gen_id).1
+    }
+
+    /// Which of the two objects this is, and where it is in its life. The two
+    /// are read together because every refusal of a resume is worded from both.
+    fn generator_kind_and_state(&self, gen_id: HeapId) -> (GeneratorKind, GeneratorState) {
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("generator_kind_and_state called off a generator")
+        };
+        (generator.kind, generator.state)
+    }
+
+    /// Raises `exception` inside a suspended generator, at the `yield` it
+    /// stopped at, or inside the innermost generator it is delegating to.
+    ///
+    /// The frame goes back on the stack and the raise is handed to the loop
+    /// rather than made here, so the loop unwinds from the generator's own
+    /// frame: its `try` blocks get their turn, its traceback names its own
+    /// lines, and a body that catches the exception carries on to its next
+    /// `yield`.
+    ///
+    /// The exception is built after the frames are on the stack, so it records
+    /// the `yield` as its raise site and the traceback names the generator's
+    /// own line rather than the caller's.
+    ///
+    /// # Errors
+    /// The generator's own refusals when it cannot be resumed. The thrown
+    /// exception is no error here: it is the [`CallResult::Raised`] the loop
+    /// makes, which is what binds the object the caller threw.
+    pub(crate) fn throw_into_generator(&mut self, gen_id: HeapId, exception: &Value) -> RunResult<CallResult> {
+        let (kind, state) = self.generator_kind_and_state(gen_id);
+        match state {
+            GeneratorState::Running => Err(ExcType::value_error_generator_running()),
+            // A coroutine that has run is spent, and CPython lets nothing reach
+            // it again, not even a throw.
+            GeneratorState::Done if kind == GeneratorKind::Coroutine => Err(kind.spent()),
+            // Nothing is suspended to raise at, so it raises where it was asked
+            // and leaves the generator exhausted, as CPython does.
+            GeneratorState::Created | GeneratorState::Done => {
+                self.finish_generator(gen_id);
+                Ok(self.raise_of(exception))
+            }
+            GeneratorState::Suspended => {
+                self.splice_delegation_chain(gen_id)?;
+                Ok(self.raise_of(exception))
+            }
+        }
+    }
+
+    /// A raise for the loop to make, which binds `exception` itself.
+    ///
+    /// The object goes with it, so the handler binds what the caller threw and
+    /// not a rebuilt base: an instance of a sandbox exception class is only of
+    /// that class while its own object is bound.
+    fn raise_of(&mut self, exception: &Value) -> CallResult {
+        let value = self
+            .keeps_identity(exception)
+            .then(|| exception.clone_with_heap(self.heap));
+        CallResult::Raised {
+            error: Box::new(self.make_exception(exception, true)),
+            value,
+        }
+    }
+
+    /// Whether a raise must bind this object rather than one rebuilt from the
+    /// error it becomes.
+    ///
+    /// True for an exception instance, so `raise e` keeps `e`'s identity as
+    /// CPython does, and for an instance of a sandbox exception class, which is
+    /// of that class only while its own object is bound. A bare type and a
+    /// value that is no exception have nothing worth keeping.
+    fn keeps_identity(&self, exception: &Value) -> bool {
+        let Value::Ref(id) = exception else {
+            return false;
+        };
+        matches!(self.heap.get(*id), HeapData::Exception(_)) || instance_builtin_exc(exception, self).is_some()
+    }
+
+    /// Puts back the frame the exception belongs in, and every frame that
+    /// waits on it through a `yield from`, innermost last.
+    ///
+    /// This is what makes an exception thrown into a delegating generator
+    /// arrive in the body that is actually suspended, as CPython hands it to
+    /// the receiver rather than to the generator that waits. Each waiting
+    /// frame goes back at its `yield` and not past it, so what the receiver
+    /// yields next travels out through the loop, and what it returns lands
+    /// where the loop leaves off.
+    fn splice_delegation_chain(&mut self, gen_id: HeapId) -> RunResult<()> {
+        let chain = self.delegation_chain(gen_id)?;
+        // The delegation of the level above, which is what the level being
+        // spliced returns into.
+        let mut waiting: Option<Delegation> = None;
+        for (id, delegation) in chain {
+            self.splice_generator_frame(id)?;
+            let frame = self.current_frame_mut();
+            frame.delegated_return = waiting.map(|above| above.done_ip);
+            if let Some(delegation) = delegation {
+                frame.ip = delegation.yield_ip;
+                frame.delegating = Some(delegation);
+            }
+            waiting = delegation;
+        }
+        Ok(())
+    }
+
+    /// The generators an exception or an exit travels through: the one it was
+    /// given to, then whatever each is delegating to, innermost last.
+    ///
+    /// Each entry carries the delegation that reaches the next one, so every
+    /// frame of the chain can be put back where its loop left it. The walk
+    /// ends at the first generator that waits on nothing, or on a receiver
+    /// that is no generator and so has no frame for anything to travel into.
+    ///
+    /// # Errors
+    /// The recursion error, for a chain longer than the frames left to put it
+    /// back with. A chain cannot close on itself: a generator in one is
+    /// running, and resuming a running generator is refused.
+    fn delegation_chain(&self, gen_id: HeapId) -> RunResult<Vec<(HeapId, Option<Delegation>)>> {
+        let mut chain: Vec<(HeapId, Option<Delegation>)> = Vec::new();
+        let mut current = gen_id;
+        loop {
+            self.heap
+                .tracker
+                .check_recursion_depth(self.recursion_depth + chain.len())?;
+            let next = self.delegated_receiver(current);
+            chain.push((current, next.map(|(_, delegation)| delegation)));
+            let Some((receiver_id, _)) = next else {
+                return Ok(chain);
+            };
+            current = receiver_id;
+        }
+    }
+
+    /// The generator a suspended generator is delegating to, and the
+    /// delegation that reaches it.
+    ///
+    /// The delegation loop leaves the receiver under the value it hands out,
+    /// so the receiver is the top of the saved stack. `None` for a generator
+    /// that waits on nothing, and for one whose receiver is an ordinary
+    /// iterator: that has no frame of its own to reach.
+    fn delegated_receiver(&self, gen_id: HeapId) -> Option<(HeapId, Delegation)> {
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("delegated_receiver called off a generator")
+        };
+        if !matches!(generator.state, GeneratorState::Suspended) {
+            return None;
+        }
+        let delegation = generator.delegating?;
+        let Some(Value::Ref(receiver_id)) = generator.stack.last() else {
+            return None;
+        };
+        // Only a suspended receiver has a frame to put back, and only it has a
+        // delegation of its own for the walk to go on with.
+        let HeapData::Generator(receiver) = self.heap.get(*receiver_id) else {
+            return None;
+        };
+        matches!(receiver.state, GeneratorState::Suspended).then_some((*receiver_id, delegation))
+    }
+
+    /// Ends a suspended generator by throwing `GeneratorExit` into it, running
+    /// its `finally` blocks where they stand.
+    ///
+    /// A generator it is delegating to is ended first, at every depth, which
+    /// is the order PEP 380 gives: the innermost body is the one the exit
+    /// reaches first, so the innermost `finally` runs first.
+    ///
+    /// Driven by a nested `run()` because the answer is how the body ended,
+    /// which only running it can say. A body that swallows the exit and yields
+    /// again is refused, as CPython refuses it: a generator does not get to
+    /// decline being closed.
+    ///
+    /// # Errors
+    /// `RuntimeError` when the body yields again, and anything else the body
+    /// raises on its way out. `GeneratorExit` and `StopIteration` are the two
+    /// ways of ending well and are swallowed.
+    pub(crate) fn close_generator(&mut self, gen_id: HeapId) -> RunResult<()> {
+        match self.generator_state(gen_id) {
+            GeneratorState::Running => return Err(ExcType::value_error_generator_running()),
+            // Never started or already over: there are no `finally` blocks
+            // waiting, so closing is done the moment it is asked for.
+            GeneratorState::Created | GeneratorState::Done => {
+                self.finish_generator(gen_id);
+                return Ok(());
+            }
+            GeneratorState::Suspended => {}
+        }
+        // A receiver is closed before the generator that waits on it, so the
+        // innermost `finally` runs first, which is the order CPython closes a
+        // `yield from` in.
+        for (id, _) in self.delegation_chain(gen_id)?.into_iter().rev() {
+            match self.generator_state(id) {
+                GeneratorState::Suspended => self.drive_generator_close(id)?,
+                // Its own exit ended it already, which is one of the ways a
+                // body ends well.
+                _ => self.finish_generator(id),
+            }
+        }
+        Ok(())
+    }
+
+    /// One step of a `yield from`: hands the sent value to the receiver and
+    /// leaves what comes back where the delegation expects it.
+    ///
+    /// The receiver sits under the value being passed and stays there while the
+    /// delegation runs, so the `Yield` after this instruction hands out what the
+    /// inner one yielded, and the value sent back in lands ready for the next
+    /// step. `done_ip` is where the resumer goes once the receiver is finished.
+    ///
+    /// A generator receiver is resumed as a frame, so the inner body runs on
+    /// the VM's own loop and can suspend to the host like any other. Any other
+    /// iterator is stepped in place: it has no `send`, so only `None` may be
+    /// passed to it, which is all a bare `yield from` over an iterable does.
+    fn send_to_receiver(&mut self, done_ip: usize) -> RunResult<Option<AwaitResult>> {
+        let sent = self.pop();
+        let Value::Ref(receiver_id) = *self.peek() else {
+            sent.drop_with(self);
+            let name = self.peek().py_type_name(self).into_owned();
+            return Err(ExcType::type_error_not_iterator(&name));
+        };
+        // A future drives its own wait rather than taking a value, so it is
+        // polled where a generator would be sent to.
+        if matches!(
+            self.heap.get(receiver_id),
+            HeapData::GatherFuture(_) | HeapData::ExternalFuture(_)
+        ) {
+            sent.drop_with(self);
+            return self.poll_future_receiver(receiver_id, done_ip);
+        }
+        if matches!(self.heap.get(receiver_id), HeapData::Generator(_)) {
+            return match self.resume_generator(receiver_id, sent) {
+                Ok(CallResult::FramePushed) => {
+                    self.current_frame.delegated_return = Some(done_ip);
+                    Ok(None)
+                }
+                // A generator already finished has nothing left to delegate to,
+                // so the delegation ends with the `None` it would have returned.
+                Err(e) if e.is_stop_iteration() => {
+                    self.finish_delegation(done_ip, Value::None);
+                    Ok(None)
+                }
+                Ok(other) => Err(self.unsupported_call_result("yield from", other)),
+                Err(e) => Err(e),
+            };
+        }
+        // Only a generator can be sent a value; CPython reports the missing
+        // method, which is what an iterator without one has.
+        if !matches!(sent, Value::None) {
+            sent.drop_with(self);
+            let name = self.peek().py_type_name(self).into_owned();
+            return Err(ExcType::attribute_error(name, "send"));
+        }
+        sent.drop_with(self);
+        // The read handle ends here: finishing the delegation frees the
+        // receiver, which no reader of it may be counted against.
+        let stepped = self.heap.read(receiver_id).py_next(self)?;
+        if let Some(value) = stepped {
+            self.push(value);
+        } else {
+            // An ordinary iterator has no return value, so the delegation ends
+            // with `None`, as it does in CPython.
+            self.finish_delegation(done_ip, Value::None);
+        }
+        Ok(None)
+    }
+
+    /// Ends a delegation in place: the receiver goes, `result` takes its
+    /// place, and the frame resumes past the loop.
+    fn finish_delegation(&mut self, done_ip: usize, result: Value) {
+        self.pop().drop_with(self);
+        self.push(result);
+        self.current_frame.ip = done_ip;
+        self.current_frame.delegating = None;
+        self.instruction_ip = done_ip;
+    }
+
+    /// Marks a generator finished and releases whatever it still held.
+    ///
+    /// Called when its body returns and when its frame unwinds, so a generator
+    /// that raised is exhausted exactly like one that returned.
+    pub(super) fn finish_generator(&mut self, gen_id: HeapId) {
+        let HeapReadOutput::Generator(mut handle) = self.heap.read(gen_id) else {
+            unreachable!("a generator frame names its generator")
+        };
+        let generator = handle.get_mut(self.heap);
+        generator.state = GeneratorState::Done;
+        generator.ip = 0;
+        generator.delegating = None;
+        let saved = mem::take(&mut generator.stack);
+        let saved_exceptions = mem::take(&mut generator.exception_stack);
+        drop(handle);
+        saved.drop_with(self);
+        saved_exceptions.drop_with(self);
     }
 
     /// Releases what a finished frame owns: its stack region and namespace.

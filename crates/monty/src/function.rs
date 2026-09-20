@@ -67,9 +67,9 @@ pub(crate) struct Function {
     pub defaults_count: usize,
     /// Whether this is an async function (`async def`).
     ///
-    /// When true, calling this function creates a `Coroutine` object instead of
-    /// immediately pushing a frame. The coroutine captures the bound arguments
-    /// and starts execution only when awaited.
+    /// When true, calling this function hands back a coroutine instead of
+    /// immediately pushing a frame. The coroutine holds the bound arguments and
+    /// its body runs only when something awaits or resumes it.
     pub is_async: bool,
     /// Cached binder-free call plan, derived from the fields above and cached
     /// via [`Self::exact_positional_call`].
@@ -138,6 +138,11 @@ impl Function {
 
     /// Derives the binder-free call plan from authoritative function metadata.
     fn derive_exact_positional_call(&self) -> Option<ExactPositionalCall> {
+        // A body that yields hands back a generator rather than running, which
+        // the binder-free path has no shape for.
+        if self.code.is_generator() {
+            return None;
+        }
         if self.cell_var_slots.is_empty() && self.free_var_slots.is_empty() {
             self.signature.exact_positional_count().map(|count| {
                 if self.is_async {

@@ -1339,6 +1339,25 @@ pub enum MontyType {
     ItertoolsTee,
     #[strum(serialize = "itertools._tee_dataobject")]
     ItertoolsTeeDataObject,
+    /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
+    /// Qualified like `re.Match` so the host-boundary name matches the runtime type.
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
+    /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
+    #[strum(serialize = "typing.TypeAliasType")]
+    TypeAliasType,
+    /// `contextvars.ContextVar`, named as CPython's C module names it.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// `contextvars.Token`, what `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
+    /// The running event loop `asyncio.get_running_loop()` hands back.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
 }
 
 impl fmt::Display for MontyType {

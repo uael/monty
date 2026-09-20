@@ -11,23 +11,27 @@ use std::{mem, task::Poll};
 use monty_types::{InvalidInputError, MontyException, ResourceError, ResourceTracker};
 use smallvec::{SmallVec, smallvec};
 
-use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, function_namespace, stack_index};
+use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, stack_index};
 use crate::{
+    args::ArgValues,
     asyncio::{
-        AwaitedGather, Awaiter, CallId, Coroutine, CoroutineState, ExternalFuture, ExternalFutureState, GatherFuture,
-        GatherState, PendingChildren, TaskId,
+        AwaitedGather, Awaiter, CallId, ExternalFuture, ExternalFutureState, GatherFuture, GatherState,
+        PendingChildren, TaskId,
     },
-    bytecode::vm::scheduler::SerializedTaskFrame,
+    bytecode::{CallResult, vm::scheduler::SerializedTaskFrame},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{
         ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapObjectRead, HeapRead, HeapReadOutput,
         HeapReader,
     },
-    intern::FunctionId,
     object_bridge::MontyObjectExt,
     run_progress::{ExtFunctionResult, ExtFunctionResultExt},
-    types::List,
+    types::{
+        List,
+        generator::{GeneratorKind, GeneratorState},
+        instance::{call_member_bound, class_defines, class_member, value_class},
+    },
     value::Value,
 };
 
@@ -38,73 +42,127 @@ impl<'h> VM<'h> {
         next == Some(&(Opcode::Await as u8)) && self.scheduler.can_await_eagerly()
     }
 
-    /// Executes the Await opcode.
+    /// Executes the Await opcode: leaves on the stack what drives the wait.
     ///
-    /// Pops the awaitable from the stack and handles it based on its type:
-    /// - `Coroutine`: validates state is New, then pushes a frame to execute it
-    /// - `ExternalFuture`: blocks until resolved or yields if not ready
-    /// - `GatherFuture`: spawns tasks for coroutines and tracks external futures
-    ///
-    /// Returns `AwaitResult` indicating what action the VM should take.
-    pub(super) fn exec_get_awaitable(&mut self) -> Result<AwaitResult, RunError> {
-        let this = self;
-        let awaitable = this.pop();
-        defer_drop!(awaitable, this);
-
-        let awaiter = Awaiter::Task(
-            this.scheduler
-                .current_task_id()
-                .expect("exec_get_awaitable called without a current task"),
-        );
-
-        match awaitable {
-            Value::Ref(heap_id) => {
-                let heap_id = *heap_id;
-                let poll = match this.heap.read(heap_id) {
-                    HeapReadOutput::Coroutine(coro) => return this.await_coroutine(coro),
-                    HeapReadOutput::GatherFuture(gather) => this.await_gather_future(gather, awaiter)?,
-                    HeapReadOutput::ExternalFuture(mut fut) => this.await_external_future(&mut fut, awaiter)?,
-                    _ => return Err(ExcType::object_not_awaitable(&awaitable.py_type_name(this))),
-                };
-                match poll {
-                    Poll::Ready(value) => Ok(AwaitResult::ValueReady(value)),
-                    Poll::Pending => {
-                        this.scheduler.block_current_on(heap_id, this.heap);
-                        this.switch_or_yield()
-                    }
+    /// A coroutine, an `ExternalFuture` and a `GatherFuture` drive their own
+    /// wait and stay where they are, for the `Send` loop after this to step.
+    /// Anything else must define `__await__`, and what that hands back takes
+    /// its place, which is the receiver `Send` then delegates into.
+    pub(super) fn exec_get_awaitable(&mut self) -> Result<(), RunError> {
+        let Value::Ref(id) = *self.peek() else {
+            let name = self.peek().py_type_name(self).into_owned();
+            return Err(ExcType::object_not_awaitable(&name));
+        };
+        match self.heap.get(id) {
+            // A plain generator is no awaitable, which its own kind says.
+            HeapData::Generator(saved) if saved.kind == GeneratorKind::Coroutine => {
+                if saved.state == GeneratorState::Created {
+                    Ok(())
+                } else {
+                    Err(ExcType::cannot_reuse_already_awaited_coroutine())
                 }
             }
-            _ => Err(ExcType::object_not_awaitable(&awaitable.py_type_name(this))),
+            HeapData::GatherFuture(_) | HeapData::ExternalFuture(_) => Ok(()),
+            _ => self.await_dunder(id),
         }
     }
 
-    /// Awaits a coroutine by pushing a frame to execute it.
+    /// Puts what an object's own `__await__` hands back in its place.
     ///
-    /// Validates the coroutine is in `New` state, extracts its captured namespace
-    /// and cells, marks it as `Running`, and pushes a frame to execute the coroutine body.
-    fn await_coroutine(&mut self, mut coro: HeapObjectRead<'h, Coroutine>) -> Result<AwaitResult, RunError> {
-        // Check if coroutine can be awaited (must be New)
-        if coro.get(self.heap).state != CoroutineState::New {
-            return Err(ExcType::cannot_reuse_already_awaited_coroutine());
+    /// CPython awaits anything whose type defines `__await__` and hands back an
+    /// iterator, and the `Send` loop drives that iterator exactly as a
+    /// `yield from` drives one.
+    ///
+    /// The awaitable leaves the stack before the call, so a `__await__` that is
+    /// a generator function hands its generator straight back into the slot the
+    /// awaitable held, and one that is an ordinary function runs as a frame
+    /// whose return value lands in that same slot. Either way the `Send` that
+    /// follows finds its receiver there.
+    fn await_dunder(&mut self, id: HeapId) -> Result<(), RunError> {
+        let this = self;
+        let member = value_class(id, this)
+            .filter(|class_id| class_defines(*class_id, "__await__", this))
+            .and_then(|class_id| class_member(class_id, "__await__", this));
+        let Some(member) = member else {
+            let name = this.peek().py_type_name(this).into_owned();
+            return Err(ExcType::object_not_awaitable(&name));
+        };
+        defer_drop!(member, this);
+        // `call_member_bound` takes its own reference on the awaitable for the
+        // `self` it binds, so the stack gives its one up first.
+        let awaitable = this.pop();
+        defer_drop!(awaitable, this);
+        match call_member_bound(member, id, ArgValues::Empty, this)? {
+            CallResult::Value(receiver) => {
+                this.push(receiver);
+                Ok(())
+            }
+            // The frame's own `ReturnValue` pushes the receiver into the slot
+            // the awaitable just left.
+            CallResult::FramePushed => Ok(()),
+            other => Err(this.unsupported_call_result("__await__", other)),
         }
+    }
 
-        // Extract coroutine data before mutating
-        let func_id = coro.get(self.heap).func_id;
-        let globals = coro.get(self.heap).globals;
-        let namespace_values: Vec<Value> = coro
-            .get(self.heap)
-            .namespace
-            .iter()
-            .map(|v| v.clone_with_heap(self))
-            .collect();
+    /// Polls a future the `await` loop is waiting on.
+    ///
+    /// A future settles the `await` rather than yielding through it, so a ready
+    /// one ends the delegation with its value. A pending one belongs to the
+    /// scheduler from here: the frame gives the future up and stands at the end
+    /// of the loop, so the value the host later resolves lands exactly where
+    /// the `await` left off.
+    pub(super) fn poll_future_receiver(
+        &mut self,
+        receiver_id: HeapId,
+        done_ip: usize,
+    ) -> RunResult<Option<AwaitResult>> {
+        let awaiter = Awaiter::Task(
+            self.scheduler
+                .current_task_id()
+                .expect("a future is awaited without a current task"),
+        );
+        let poll = match self.heap.read(receiver_id) {
+            HeapReadOutput::GatherFuture(gather) => self.await_gather_future(gather, awaiter)?,
+            HeapReadOutput::ExternalFuture(mut future) => self.await_external_future(&mut future, awaiter)?,
+            _ => unreachable!("poll_future_receiver is reached off a future alone"),
+        };
+        match poll {
+            Poll::Ready(value) => {
+                self.finish_delegation(done_ip, value);
+                Ok(None)
+            }
+            Poll::Pending => {
+                self.scheduler.block_current_on(receiver_id, self.heap);
+                self.pop().drop_with(self);
+                // Only where the frame resumes moves. `instruction_ip` stays on
+                // the `Send`, so a refusal while the task is parked names the
+                // `await` the wait belongs to rather than the line after it.
+                self.current_frame.ip = done_ip;
+                self.current_frame.delegating = None;
+                self.switch_or_yield().map(Some)
+            }
+        }
+    }
 
-        // Mark coroutine as Running
-        coro.get_mut(self.heap).state = CoroutineState::Running;
-
-        // Create namespace and push frame (guard drops awaitable at scope exit)
-        self.start_coroutine_frame(func_id, namespace_values, globals)?;
-
-        Ok(AwaitResult::FramePushed)
+    /// Awaits the value on top of the stack where no `Send` loop was compiled,
+    /// which is how `asyncio.run()` hands a coroutine back from Rust.
+    ///
+    /// Nothing here can take a value a receiver yields, so only what drives its
+    /// own wait may be awaited; an object with `__await__` is refused rather
+    /// than half driven. See `limitations/asyncio.md`.
+    pub(super) fn await_pushed(&mut self) -> RunResult<Option<AwaitResult>> {
+        self.exec_get_awaitable()?;
+        let drives_itself = matches!(*self.peek(), Value::Ref(id) if matches!(
+            self.heap.get(id),
+            HeapData::Generator(_) | HeapData::GatherFuture(_) | HeapData::ExternalFuture(_)
+        ));
+        if !drives_itself {
+            let name = self.peek().py_type_name(self).into_owned();
+            return Err(ExcType::object_not_awaitable(&name));
+        }
+        let done_ip = self.current_frame.ip;
+        self.push(Value::None);
+        self.send_to_receiver(done_ip)
     }
 
     /// Awaits a gather future from the user's `await gather` site.
@@ -236,13 +294,16 @@ impl<'h> VM<'h> {
             }
 
             let poll = match self.heap.read(item_id) {
-                HeapReadOutput::Coroutine(coro) => {
-                    // Reject reuse up-front: either the coroutine is no longer
-                    // `New`, or another gather already spawned it (`spawn`
-                    // returns `Ok(None)`).
-                    if coro.get(self.heap).state != CoroutineState::New
-                        || self.scheduler.spawn(self.heap, item_id, Some(gather_id)).is_none()
-                    {
+                HeapReadOutput::Generator(coro) => {
+                    // Reject reuse up-front: either the coroutine has already
+                    // run, or another gather spawned it (`spawn` returns
+                    // `Ok(None)`). A plain generator is no awaitable at all.
+                    let saved = coro.get(self.heap);
+                    if saved.kind != GeneratorKind::Coroutine || saved.state != GeneratorState::Created {
+                        return Err(ExcType::cannot_reuse_already_awaited_coroutine());
+                    }
+                    drop(coro);
+                    if self.scheduler.spawn(self.heap, item_id, Some(gather_id)).is_none() {
                         return Err(ExcType::cannot_reuse_already_awaited_coroutine());
                     }
                     Poll::Pending
@@ -272,7 +333,7 @@ impl<'h> VM<'h> {
                         return Ok(Some(self.open_gather_commit(item_id, sub_awaiter, Some(idx))));
                     }
                 }
-                _ => panic!("gather item is not a Coroutine, ExternalFuture, or GatherFuture"),
+                _ => panic!("gather item is not a coroutine, an ExternalFuture, or a GatherFuture"),
             };
 
             match poll {
@@ -370,40 +431,6 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Starts execution of a coroutine by pushing its locals onto the stack.
-    ///
-    /// Extends the VM stack with the coroutine's pre-bound namespace values
-    /// and pushes a new frame to execute the coroutine's function body.
-    fn start_coroutine_frame(
-        &mut self,
-        func_id: FunctionId,
-        namespace_values: Vec<Value>,
-        globals: Option<HeapId>,
-    ) -> Result<(), RunError> {
-        let call_offset = self.current_offset();
-        let code = &self.interns.get_function(func_id).code;
-        let locals_count = u16::try_from(namespace_values.len()).expect("coroutine namespace size exceeds u16");
-
-        // Extend the stack with the coroutine's pre-bound locals.
-        let stack_base = self.stack.len();
-        self.stack.extend(namespace_values);
-
-        // Push frame to execute the coroutine
-        let exc_stack_base = self.exception_stack.len();
-        let namespace = function_namespace(globals, &*self.heap);
-        self.push_frame(CallFrame::new_function(
-            code,
-            stack_base,
-            locals_count,
-            exc_stack_base,
-            func_id,
-            call_offset,
-            namespace,
-        ))?;
-
-        Ok(())
-    }
-
     /// Selects another task after blocking, or yields to the host with the current context intact.
     fn switch_or_yield(&mut self) -> Result<AwaitResult, RunError> {
         if let Some(next_task_id) = self.scheduler.next_ready_task() {
@@ -429,11 +456,7 @@ impl<'h> VM<'h> {
             .expect("handle_task_completion: spawned task without a coroutine");
 
         // Re-awaiting the coroutine must see that its execution has ended.
-        let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
-            panic!("task coroutine_id doesn't point to a Coroutine")
-        };
-        coro.get_mut(self.heap).state = CoroutineState::Completed;
-        drop(coro);
+        self.finish_generator(coroutine_id);
 
         self.scheduler.cancel_task(task_id, self.heap);
 
@@ -513,6 +536,9 @@ impl<'h> VM<'h> {
                 exception_stack_base: f.exception_stack_base(),
                 call_offset: f.call_offset,
                 is_initializer: f.is_initializer,
+                generator: f.generator,
+                delegated_return: f.delegated_return,
+                delegating: f.delegating,
                 namespace: f.namespace,
             })
             .collect();
@@ -526,6 +552,9 @@ impl<'h> VM<'h> {
             exception_stack_base: current.exception_stack_base(),
             call_offset: current.call_offset,
             is_initializer: current.is_initializer,
+            generator: current.generator,
+            delegated_return: current.delegated_return,
+            delegating: current.delegating,
             namespace: mem::take(&mut current.namespace),
         });
 
@@ -598,6 +627,9 @@ impl<'h> VM<'h> {
                         is_parked: false,
                         namespace: sf.namespace,
                         is_initializer: sf.is_initializer,
+                        generator: sf.generator,
+                        delegated_return: sf.delegated_return,
+                        delegating: sf.delegating,
                     }
                 })
                 .collect();
@@ -607,10 +639,10 @@ impl<'h> VM<'h> {
             // The previous task's frames are already saved. A reused coroutine
             // must fail this new task and select its successor before the
             // exception can propagate.
-            let HeapReadOutput::Coroutine(coro) = self.heap.read(coro_id) else {
-                panic!("task coroutine_id doesn't point to a Coroutine")
+            let HeapReadOutput::Generator(coro) = self.heap.read(coro_id) else {
+                panic!("task coroutine_id doesn't point to a coroutine")
             };
-            let is_new = coro.get(self.heap).state == CoroutineState::New;
+            let is_new = coro.get(self.heap).state == GeneratorState::Created;
             // Release the handle before either branch: both go on to drop
             // references to this coroutine, and freeing it under a live
             // reader panics.
@@ -632,27 +664,24 @@ impl<'h> VM<'h> {
     ///
     /// Similar to exec_get_awaitable's coroutine handling, but for task initialization.
     fn init_task_from_coroutine(&mut self, coroutine_id: HeapId) -> Result<(), RunError> {
-        let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
-            panic!("task coroutine_id doesn't point to a Coroutine")
+        let HeapReadOutput::Generator(mut coro) = self.heap.read(coroutine_id) else {
+            panic!("task coroutine_id doesn't point to a coroutine")
         };
 
         // Check state
-        if coro.get(self.heap).state != CoroutineState::New {
+        if coro.get(self.heap).state != GeneratorState::Created {
             return Err(ExcType::cannot_reuse_already_awaited_coroutine());
         }
 
-        // Extract coroutine data
+        // The frame takes the bound arguments rather than copying them: a task
+        // never lifts its frame back into the object, so the object keeps
+        // nothing while the task runs and `handle_task_completion` ends it.
         let func_id = coro.get(self.heap).func_id;
-        let globals = coro.get(self.heap).globals;
-        let namespace_values: Vec<Value> = coro
-            .get(self.heap)
-            .namespace
-            .iter()
-            .map(|v| v.clone_with_heap(self))
-            .collect();
-
-        // Mark coroutine as Running
-        coro.get_mut(self.heap).state = CoroutineState::Running;
+        let saved = coro.get_mut(self.heap);
+        saved.state = GeneratorState::Running;
+        let namespace_values: Vec<Value> = mem::take(&mut saved.stack);
+        let namespace = saved.namespace.take();
+        drop(coro);
 
         // Push locals onto stack and push frame directly (can't use start_coroutine_frame
         // because that needs a current frame for call_offset, but spawned tasks
@@ -664,7 +693,6 @@ impl<'h> VM<'h> {
         self.stack.extend(namespace_values);
 
         let exc_stack_base = self.exception_stack.len();
-        let namespace = function_namespace(globals, &*self.heap);
         self.current_frame = CallFrame::new_function(
             code,
             stack_base,

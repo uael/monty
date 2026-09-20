@@ -46,6 +46,15 @@ pub struct CodeBuilder {
     /// Populated during compilation to enable proper NameError messages
     /// when accessing undefined local variables.
     local_names: Vec<Option<StringId>>,
+
+    /// Set when [`Opcode::Yield`] is emitted, making the built [`Code`] a
+    /// generator body. Raised here rather than by the compiler so it always
+    /// describes the instructions actually emitted.
+    is_generator: bool,
+    /// Whether the body awaits, so a snippet compiled with
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` becomes a coroutine rather than running
+    /// where it stands.
+    is_coroutine: bool,
 }
 
 impl CodeBuilder {
@@ -447,7 +456,23 @@ impl CodeBuilder {
             self.location_table,
             self.exception_table,
             local_names,
+            self.is_generator,
+            self.is_coroutine,
         )
+    }
+
+    /// Marks the body a generator, which a `yield` or a `yield from` does.
+    ///
+    /// Tracked from the expressions rather than from the `Yield` instruction,
+    /// because an `await` compiles to one too and awaiting does not make a
+    /// generator; see the `Send` loop in `Expr::Await`.
+    pub fn mark_generator(&mut self) {
+        self.is_generator = true;
+    }
+
+    /// Marks the body one that awaits; see [`CodeBuilder::is_coroutine`].
+    pub fn mark_coroutine(&mut self) {
+        self.is_coroutine = true;
     }
 
     /// Records the current location in the location table if set.

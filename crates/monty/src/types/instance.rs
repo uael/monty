@@ -1,8 +1,9 @@
 use std::{borrow::Cow, fmt::Write};
 
 use monty_types::MontyUuid;
+use smallvec::SmallVec;
 
-use super::{Dict, LazyHeapSet, PyTrait, Type, attribute_name_value};
+use super::{Dict, LazyHeapSet, PyTrait, Type, allocate_string, allocate_tuple, attribute_name_value};
 use crate::{
     args::{ArgValues, KwargsValues},
     boundary_uuid::create_uuid,
@@ -20,6 +21,7 @@ use crate::{
         copy::{Memo, PyDeepCopy, deep_copy, deep_copy_attrs},
         dataclasses::{self, DataclassHash},
     },
+    types::class::class_default,
     value::{EitherStr, Value},
 };
 
@@ -121,6 +123,22 @@ impl<'h> HeapRead<'h, Instance> {
             [name, value].drop_with(vm);
             return Err(exc);
         }
+        // A `@property` is a data descriptor: it owns the name on the class, so
+        // a write cannot quietly shadow it with an instance attribute. Monty
+        // stores no setter, so every property is read-only.
+        if let Some(attr) = name.as_either_str(vm.heap) {
+            let attr = attr.as_str(vm.interns).to_owned();
+            if let Some(member) = class_member(class_id, &attr, vm) {
+                let is_property =
+                    matches!(member, Value::Ref(id) if matches!(vm.heap.get(id), HeapData::ClassProperty(_)));
+                member.drop_with(vm);
+                if is_property {
+                    let class = class_name(class_id, vm.heap, vm.interns).into_owned();
+                    [name, value].drop_with(vm);
+                    return Err(ExcType::attribute_error_no_setter(&attr, &class));
+                }
+            }
+        }
         self.set_attr_unchecked(name, value, vm)
     }
 
@@ -135,6 +153,12 @@ impl<'h> HeapRead<'h, Instance> {
     /// `limitations/classes.md`).
     pub fn set_attr_unchecked(&mut self, name: Value, value: Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         self.attrs_mut().set(name, value, vm)
+    }
+
+    /// Removes an instance attribute, returning its key and value for the caller
+    /// to drop, or `None` when the instance `__dict__` does not bind `name`.
+    pub fn del_attr(&mut self, name: &Value, vm: &mut VM<'h>) -> RunResult<Option<(Value, Value)>> {
+        self.attrs_mut().pop(name, vm)
     }
 }
 
@@ -206,6 +230,25 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Instance> {
         Ok(())
     }
 
+    /// `del obj.attr` removes the instance attribute only. A class-level binding
+    /// of the same name is not touched (and becomes visible again), matching
+    /// CPython; deleting a name only the class binds raises `AttributeError`.
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
+        let key = attribute_name_value(name, vm);
+        defer_drop!(key, vm);
+        if let Some((old_key, old_value)) = self.del_attr(key, vm)? {
+            old_key.drop_with(vm);
+            old_value.drop_with(vm);
+            Ok(())
+        } else {
+            let class_id = self.get(vm.heap).class();
+            Err(ExcType::attribute_error(
+                class_name(class_id, vm.heap, vm.interns),
+                name.as_str(vm.interns),
+            ))
+        }
+    }
+
     /// Returns `NotImplemented`; comparisons dispatch at the `Value` level because
     /// user and synthesized dataclass equality require the instance's `HeapId`.
     fn py_eq_impl(&self, _other: &Value, _vm: &mut VM<'h>) -> RunResult<Option<bool>> {
@@ -257,6 +300,9 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Instance> {
                     heap_ids.remove(&self_id);
                     result
                 }
+                // An exception reads `Refused('why')`, as CPython's
+                // `BaseException.__repr__` writes it.
+                None if class_builtin_exc(class_id, vm).is_some() => Ok(f.write_str(&exception_repr(self_id, vm)?)?),
                 None => self.py_default_repr_fmt(f, vm),
             }
         }
@@ -506,6 +552,19 @@ impl HeapItem for BoundMethod {
 pub(crate) fn instance_getattr(self_id: HeapId, attr: &EitherStr, vm: &mut VM<'_>) -> RunResult<CallResult> {
     let attr_str = attr.as_str(vm.interns);
     if let Some(value) = instance_attr(self_id, attr_str, vm) {
+        // A `@property` is computed on every read, so the member is the getter
+        // rather than the answer. The call goes through the ordinary call path,
+        // which lets the getter push a frame and even suspend to the host.
+        if let Value::Ref(id) = value
+            && let HeapData::ClassProperty(property) = vm.heap.get(id)
+        {
+            let fget = property.fget().clone_with_heap(vm.heap);
+            value.drop_with(vm);
+            vm.heap.inc_ref(self_id);
+            let result = vm.call_function(&fget, ArgValues::One(Value::Ref(self_id)));
+            fget.drop_with(vm);
+            return result;
+        }
         Ok(CallResult::Value(value))
     } else {
         let class_id = instance_class(self_id, vm);
@@ -534,6 +593,17 @@ pub(crate) fn instance_attr(self_id: HeapId, attr: &str, vm: &VM<'_>) -> Option<
         return Some(value);
     }
     let class_id = instance_class(self_id, vm);
+    class_attr(class_id, self_id, attr, vm)
+}
+
+/// The class half of [`instance_attr`]: a member of the chain of `class_id`,
+/// bound to the receiver `self_id` when it is a method, then the `__class__`
+/// special case; `None` when nothing binds `attr`.
+///
+/// Split out because the receiver is not always an [`Instance`]: an instance of
+/// a class that inherits `str` is a string carrying its class, and reads its
+/// methods through here too.
+pub(crate) fn class_attr(class_id: HeapId, self_id: HeapId, attr: &str, vm: &VM<'_>) -> Option<Value> {
     match class_member(class_id, attr, vm) {
         // A class variable is returned as-is; a function binds `self`.
         Some(member) if is_method_value(&member, vm) => {
@@ -570,7 +640,79 @@ pub(crate) fn instance_repr(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value
 pub(crate) fn instance_str(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value> {
     match instance_call_str_dunder(self_id, "__str__", vm)? {
         Some(s) => Ok(s),
+        // An exception renders as `BaseException.__str__` does: its lone
+        // argument, nothing at all, or the whole `args` tuple.
+        None if class_builtin_exc(instance_class(self_id, vm), vm).is_some() => {
+            let text = exception_message(self_id, vm)?;
+            Ok(allocate_string(text, vm.heap))
+        }
         None => instance_repr(self_id, vm),
+    }
+}
+
+/// What `BaseException.__str__` makes of an exception's `args`: its lone
+/// argument, nothing at all, or the whole tuple's repr.
+///
+/// Used both for `str(exc)` inside the sandbox and for the message a raise
+/// records, which is why it never dispatches a user `__str__`: a raise cannot
+/// afford to run sandbox code while it is unwinding.
+pub(crate) fn exception_message(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<String> {
+    let args = exception_args(self_id, vm);
+    defer_drop!(args, vm);
+    match args.as_slice() {
+        [] => Ok(String::new()),
+        [only] => {
+            let text = only.py_str(vm)?;
+            defer_drop!(text, vm);
+            Ok(text.to_str(vm)?.to_owned())
+        }
+        many => {
+            let items = many.iter().map(|v| v.clone_with_heap(vm.heap)).collect();
+            let tuple = allocate_tuple(items, vm.heap);
+            defer_drop!(tuple, vm);
+            let text = tuple.py_repr(vm)?;
+            defer_drop!(text, vm);
+            Ok(text.to_str(vm)?.to_owned())
+        }
+    }
+}
+
+/// `repr(exc)` for an instance of a sandbox exception class: the class name
+/// applied to its `args`, as `BaseException.__repr__` writes it.
+pub(crate) fn exception_repr(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<String> {
+    let name = class_name(instance_class(self_id, vm), vm.heap, vm.interns).into_owned();
+    let args = exception_args(self_id, vm);
+    defer_drop!(args, vm);
+    // An argument list, not a tuple: `Refused('why')` has no trailing comma.
+    let mut rendered = String::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        let text = arg.py_repr(vm)?;
+        defer_drop!(text, vm);
+        rendered.push_str(text.to_str(vm)?);
+    }
+    Ok(format!("{name}({rendered})"))
+}
+
+/// The positional arguments an exception instance was constructed with.
+///
+/// Read from the instance's own `args` attribute, which its constructor binds,
+/// so a class that overwrote `args` reports what it wrote. Answers an empty
+/// list for anything that is not a tuple, which is what CPython's own
+/// `BaseException.__str__` effectively does with a replaced `args`.
+pub(crate) fn exception_args(self_id: HeapId, vm: &mut VM<'_>) -> Vec<Value> {
+    let Some(args) = instance_attr(self_id, "args", vm) else {
+        return Vec::new();
+    };
+    defer_drop!(args, vm);
+    match args {
+        Value::Ref(id) => match vm.heap.get(*id) {
+            HeapData::Tuple(tuple) => tuple.as_slice().iter().map(|v| v.clone_with_heap(vm.heap)).collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 
@@ -718,14 +860,29 @@ pub(crate) fn class_defines_not_none(class_id: HeapId, dunder: &str, vm: &VM<'_>
 /// `None` member apart from an absent one — CPython's `has_explicit_hash` does
 /// — want this rather than either check.
 pub(crate) fn class_dunder<'v>(class_id: HeapId, dunder: &str, vm: &'v VM<'_>) -> Option<&'v Value> {
-    match vm.heap.get(class_id) {
-        HeapData::Class(class) => class.namespace().get_by_str(dunder, vm.heap, vm.interns),
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| match vm.heap.get(id) {
+            HeapData::Class(class) => class.namespace().get_by_str(dunder, vm.heap, vm.interns),
+            _ => None,
+        })
+}
+
+/// The sandbox class of a heap value, or `None` for one that has no class.
+///
+/// An instance of a class that inherits `str` is a `Str` that holds its class
+/// rather than an `Instance` (see [`crate::types::str::Str`]), so a dunder
+/// dispatch that must find either one asks here instead of [`instance_class`].
+pub(crate) fn value_class(id: HeapId, vm: &VM<'_>) -> Option<HeapId> {
+    match vm.heap.get(id) {
+        HeapData::Instance(instance) => Some(instance.class),
+        HeapData::Str(s) => s.class(),
         _ => None,
     }
 }
 
 /// Returns the `HeapId` of `self_id`'s class object.
-fn instance_class(self_id: HeapId, vm: &VM<'_>) -> HeapId {
+pub(crate) fn instance_class(self_id: HeapId, vm: &VM<'_>) -> HeapId {
     match vm.heap.get(self_id) {
         HeapData::Instance(inst) => inst.class,
         _ => unreachable!("instance_class called on non-instance heap value"),
@@ -793,15 +950,84 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 }
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
-fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+///
+/// A class attribute Monty synthesizes rather than keeping in a namespace is
+/// read last, as CPython reads one the class itself binds first; see
+/// [`class_default`].
+pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| match vm.heap.get(id) {
+            HeapData::Class(class) => class
+                .namespace()
+                .get_by_str(name, vm.heap, vm.interns)
+                .map(|v| v.clone_with_heap(vm.heap)),
+            _ => None,
+        })
+        .or_else(|| class_default(name, vm))
+}
+
+/// A class and its bases, derived class first.
+///
+/// The single point every member, dunder, `isinstance` and `issubclass` lookup
+/// walks, so none of them can disagree about what a class inherits. The chain
+/// is acyclic by construction: a base must already exist when the class naming
+/// it is created, so it can never reach forward to the class itself. The depth
+/// cap is a belt-and-braces bound against a chain rebuilt from crafted snapshot
+/// data.
+pub(crate) fn class_chain(class_id: HeapId, vm: &VM<'_>) -> SmallVec<[HeapId; 4]> {
+    let mut chain = SmallVec::new();
+    let mut next = Some(class_id);
+    while let Some(id) = next {
+        if chain.len() >= MAX_CLASS_CHAIN {
+            break;
+        }
+        chain.push(id);
+        next = match vm.heap.get(id) {
+            HeapData::Class(class) => class.bases().first().copied(),
+            _ => None,
+        };
+    }
+    chain
+}
+
+/// The builtin exception `class_id` descends from, or `None` when its
+/// instances are not exceptions.
+///
+/// Resolved once at class creation, so this is a field read rather than a walk.
+pub(crate) fn class_builtin_exc(class_id: HeapId, vm: &VM<'_>) -> Option<ExcType> {
     match vm.heap.get(class_id) {
-        HeapData::Class(class) => class
-            .namespace()
-            .get_by_str(name, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap)),
+        HeapData::Class(class) => class.builtin_exc(),
         _ => None,
     }
 }
+
+/// Whether instances of `class_id` are strings, because the class inherits
+/// `str`.
+///
+/// Resolved once at class creation, so this is a field read rather than a walk.
+pub(crate) fn class_inherits_str(class_id: HeapId, vm: &VM<'_>) -> bool {
+    match vm.heap.get(class_id) {
+        HeapData::Class(class) => class.inherits_str(),
+        _ => false,
+    }
+}
+
+/// The builtin exception an *instance* descends from, or `None` for a value
+/// that is not a sandbox exception.
+pub(crate) fn instance_builtin_exc(value: &Value, vm: &VM<'_>) -> Option<ExcType> {
+    let Value::Ref(id) = value else { return None };
+    let HeapData::Instance(inst) = vm.heap.get(*id) else {
+        return None;
+    };
+    class_builtin_exc(inst.class(), vm)
+}
+
+/// How far a class chain is walked before it is treated as broken.
+///
+/// Unreachable from Python: a chain is built one base at a time from classes
+/// that already exist, so it is as deep as the source says and no deeper.
+const MAX_CLASS_CHAIN: usize = 100;
 
 /// Returns a class object's name for error messages / repr.
 ///
@@ -830,7 +1056,12 @@ pub(crate) fn class_name<'i>(class_id: HeapId, heap: &Heap, interns: &'i Interns
 /// other callable value is called as-is. Shared by `py_call_attr` and the
 /// context-manager hooks (`py_enter`/`py_exit`) so dunder invocation and
 /// ordinary method calls dispatch identically.
-fn call_member_bound(member: &Value, self_id: HeapId, args: ArgValues, vm: &mut VM<'_>) -> RunResult<CallResult> {
+pub(crate) fn call_member_bound(
+    member: &Value,
+    self_id: HeapId,
+    args: ArgValues,
+    vm: &mut VM<'_>,
+) -> RunResult<CallResult> {
     if is_method_value(member, vm) {
         vm.heap.inc_ref(self_id);
         vm.call_function(member, args.prepend(Value::Ref(self_id)))

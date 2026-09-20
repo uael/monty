@@ -7,14 +7,15 @@ use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Signature},
     builtins::Builtins,
     expressions::{
-        AssignTarget, Callable, CaptureSource, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName,
-        NameScope, Node, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
+        AssignTarget, Callable, CaptureSource, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier,
+        ImportName, MatchCase, NameScope, Node, Pattern, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
     },
     fstring::{FStringPart, FormatSpec},
     intern::{CompileInterns, StringId},
     name_map::{NameMap, namespace_overflow},
     namespace::NamespaceId,
     parse::{CodeRange, ExceptHandler, ParseError, ParseNode, ParsedSignature, RawFunctionDef, Try},
+    tstring::{ParsedTemplate, TemplateInterpolation},
 };
 
 /// Mutable handle to the module's global [`NameMap`], threaded through
@@ -833,6 +834,32 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     let or_else = self.prepare_nodes(or_else)?;
                     new_nodes.push(Node::If { test, body, or_else });
                 }
+                Node::Match {
+                    subject,
+                    slot,
+                    cases,
+                    position,
+                } => {
+                    let subject = self.prepare_expression(subject)?;
+                    // The hidden subject local resolves like any store target.
+                    self.names_assigned_in_order.insert(slot.name_id);
+                    let slot = self.get_id(slot)?;
+                    let mut prepared = Vec::with_capacity(cases.len());
+                    for case in cases {
+                        let pattern = self.prepare_pattern(case.pattern)?;
+                        // The guard reads what the pattern bound, so it is
+                        // prepared after it.
+                        let guard = case.guard.map(|g| self.prepare_expression(g)).transpose()?;
+                        let body = self.prepare_nodes(case.body)?;
+                        prepared.push(MatchCase { pattern, guard, body });
+                    }
+                    new_nodes.push(Node::Match {
+                        subject,
+                        slot,
+                        cases: prepared,
+                        position,
+                    });
+                }
                 Node::FunctionDef {
                     def:
                         RawFunctionDef {
@@ -863,10 +890,39 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     name,
                     body,
                     members,
+                    bases,
                     decorators,
                     position,
                 } => {
-                    new_nodes.push(self.prepare_class_def(name, body, members, decorators, position)?);
+                    new_nodes.push(self.prepare_class_def(name, body, members, bases, decorators, position)?);
+                }
+                Node::Delete(targets) => {
+                    let targets = targets
+                        .into_iter()
+                        .map(|t| self.prepare_delete_target(t))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    new_nodes.push(Node::Delete(targets));
+                }
+                Node::TypeAlias {
+                    name,
+                    value:
+                        RawFunctionDef {
+                            name: value_name,
+                            signature,
+                            body,
+                            is_async,
+                        },
+                } => {
+                    // The value thunk is prepared first (it is a nested scope, so
+                    // it captures the *pre*-binding state) and the alias name
+                    // binds afterwards, like any other assignment.
+                    let value = self.prepare_function_def(value_name, &signature, body, is_async)?;
+                    self.names_assigned_in_order.insert(name.name_id);
+                    let name = self.get_id_for_store_target(name)?;
+                    if self.is_class_scope {
+                        self.bound_class_members.insert(name.name_id);
+                    }
+                    new_nodes.push(Node::TypeAlias { name, value });
                 }
                 Node::Global { names, position } => {
                     // At module level, `global` is a no-op since all variables are already global.
@@ -1149,6 +1205,30 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     .collect::<Result<Vec<_>, ParseError>>()?;
                 Expr::FString(prepared_parts)
             }
+            Expr::TString(template) => {
+                let ParsedTemplate {
+                    strings,
+                    interpolations,
+                } = *template;
+                let interpolations = interpolations
+                    .into_iter()
+                    .map(|interpolation| {
+                        Ok(TemplateInterpolation {
+                            expr: Box::new(self.prepare_expression(*interpolation.expr)?),
+                            format_spec: interpolation
+                                .format_spec
+                                .into_iter()
+                                .map(|part| self.prepare_fstring_part(part))
+                                .collect::<Result<Vec<_>, ParseError>>()?,
+                            ..interpolation
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                Expr::TString(Box::new(ParsedTemplate {
+                    strings,
+                    interpolations,
+                }))
+            }
             Expr::IfElse { test, body, orelse } => Expr::IfElse {
                 test: Box::new(self.prepare_expression(*test)?),
                 body: Box::new(self.prepare_expression(*body)?),
@@ -1190,6 +1270,22 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 // Convert the raw lambda into a prepared lambda expression
                 return self.prepare_lambda(name_id, &signature, &body, position);
             }
+            Expr::GenExprRaw {
+                name_id,
+                signature,
+                body,
+            } => {
+                // PEP 572 gives a walrus inside a generator expression to the
+                // scope that holds the expression, so its slot is taken here,
+                // before the body is prepared in a scope of its own.
+                let mut outward_walrus = AHashSet::new();
+                collect_genexpr_walrus(&body, &mut outward_walrus, self.interner);
+                for &name in &outward_walrus {
+                    self.ensure_scope_slot(name, position)?;
+                    self.names_assigned_in_order.insert(name);
+                }
+                return self.prepare_anon_function(name_id, &signature, body, &outward_walrus, position);
+            }
             Expr::Lambda { .. } => {
                 // Lambda should only be created during prepare, never during parsing
                 unreachable!("Expr::Lambda should not exist before prepare phase")
@@ -1213,6 +1309,11 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 }
             }
             Expr::Await(value) => Expr::Await(Box::new(self.prepare_expression(*value)?)),
+            Expr::Yield(value) => Expr::Yield(match value {
+                Some(value) => Some(Box::new(self.prepare_expression(*value)?)),
+                None => None,
+            }),
+            Expr::YieldFrom(value) => Expr::YieldFrom(Box::new(self.prepare_expression(*value)?)),
         };
 
         Ok(ExprLoc { position, expr })
@@ -1497,6 +1598,31 @@ impl<'i, 'g> Prepare<'i, 'g> {
         }
     }
 
+    /// Resolves one `del` target: a name unbinds here, an object's attribute or
+    /// item is a read of that object followed by a removal.
+    fn prepare_delete_target(&mut self, target: DeleteTarget) -> Result<DeleteTarget, ParseError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                self.names_assigned_in_order.insert(ident.name_id);
+                Ok(DeleteTarget::Name(self.get_id_for_store_target(ident)?))
+            }
+            DeleteTarget::Attr { object, attr, position } => Ok(DeleteTarget::Attr {
+                object: self.prepare_expression(object)?,
+                attr,
+                position,
+            }),
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => Ok(DeleteTarget::Subscript {
+                object: self.prepare_expression(object)?,
+                index: self.prepare_expression(index)?,
+                position,
+            }),
+        }
+    }
+
     /// Predeclares an unpack target's names as comprehension-variable slots.
     ///
     /// Called during the first pass of `prepare_comprehension`, before any
@@ -1738,11 +1864,74 @@ impl<'i, 'g> Prepare<'i, 'g> {
     ///   assembly) from the inner preparer's locals.
     ///
     /// The class name itself binds in the **enclosing** scope, exactly like a `def`.
+    /// Resolves the names in a pattern: a capture binds like a store target, a
+    /// value/class expression reads like any other, and the two never mix.
+    fn prepare_pattern(&mut self, pattern: Pattern) -> Result<Pattern, ParseError> {
+        Ok(match pattern {
+            Pattern::Wildcard => Pattern::Wildcard,
+            Pattern::Capture(name) => Pattern::Capture(self.bind_pattern_name(name)?),
+            Pattern::Value(expr) => Pattern::Value(self.prepare_expression(expr)?),
+            Pattern::Singleton(literal) => Pattern::Singleton(literal),
+            Pattern::Sequence(items) => Pattern::Sequence(
+                items
+                    .into_iter()
+                    .map(|item| self.prepare_pattern(item))
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+            ),
+            Pattern::Star(name) => Pattern::Star(name.map(|n| self.bind_pattern_name(n)).transpose()?),
+            Pattern::Mapping { keys, patterns, rest } => Pattern::Mapping {
+                keys: keys
+                    .into_iter()
+                    .map(|key| self.prepare_expression(key))
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+                patterns: patterns
+                    .into_iter()
+                    .map(|item| self.prepare_pattern(item))
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+                rest: rest.map(|n| self.bind_pattern_name(n)).transpose()?,
+            },
+            Pattern::Class {
+                cls,
+                positional,
+                keywords,
+            } => Pattern::Class {
+                cls: self.prepare_expression(cls)?,
+                positional: positional
+                    .into_iter()
+                    .map(|item| self.prepare_pattern(item))
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+                // An attribute name is a plain string at runtime, so it is not
+                // resolved to a slot the way a capture is.
+                keywords: keywords
+                    .into_iter()
+                    .map(|(attr, item)| Ok((attr, self.prepare_pattern(item)?)))
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+            },
+            Pattern::Or(alternatives) => Pattern::Or(
+                alternatives
+                    .into_iter()
+                    .map(|item| self.prepare_pattern(item))
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+            ),
+            Pattern::As { pattern, name } => Pattern::As {
+                pattern: Box::new(self.prepare_pattern(*pattern)?),
+                name: self.bind_pattern_name(name)?,
+            },
+        })
+    }
+
+    /// Resolves one name a pattern binds, registering it as assigned here.
+    fn bind_pattern_name(&mut self, name: Identifier) -> Result<Identifier, ParseError> {
+        self.names_assigned_in_order.insert(name.name_id);
+        self.get_id_for_store_target(name)
+    }
+
     fn prepare_class_def(
         &mut self,
         name: Identifier,
         body: RawFunctionDef,
         members: Vec<Identifier>,
+        bases: Vec<ExprLoc>,
         decorators: Vec<ExprLoc>,
         position: CodeRange,
     ) -> Result<PreparedNode, ParseError> {
@@ -1750,7 +1939,12 @@ impl<'i, 'g> Prepare<'i, 'g> {
         self.names_assigned_in_order.insert(name.name_id);
         let name = self.get_id(name)?;
 
-        // Decorators evaluate in the enclosing scope, not the class body.
+        // Bases and decorators both evaluate in the enclosing scope, not the
+        // class body. Bases first, because they are written first.
+        let bases = bases
+            .into_iter()
+            .map(|b| self.prepare_expression(b))
+            .collect::<Result<Vec<_>, ParseError>>()?;
         let decorators = decorators
             .into_iter()
             .map(|d| self.prepare_expression(d))
@@ -1880,6 +2074,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             name,
             body: body_def,
             members,
+            bases,
             decorators,
             position,
         })
@@ -1888,11 +2083,8 @@ impl<'i, 'g> Prepare<'i, 'g> {
     /// Prepares a lambda expression, converting it into a prepared function definition.
     ///
     /// Lambdas are essentially anonymous functions with an implicit return of their body
-    /// expression. This method follows the same preparation logic as `prepare_function_def`
-    /// but:
-    /// - Uses `<lambda>` as the function name (not registered in scope)
-    /// - Wraps the body expression as `Node::Return(body)`
-    /// - Returns `ExprLoc` with `Expr::Lambda` instead of `PreparedNode`
+    /// expression, so the body becomes one `Node::Return(body)` and the rest is
+    /// [`Self::prepare_anon_function`].
     fn prepare_lambda(
         &mut self,
         lambda_name_id: StringId,
@@ -1900,26 +2092,57 @@ impl<'i, 'g> Prepare<'i, 'g> {
         body: &ExprLoc,
         position: CodeRange,
     ) -> Result<ExprLoc, ParseError> {
-        // Create a synthetic <lambda> name identifier (not registered in scope)
+        let body_nodes = vec![Node::Return(Some(body.clone()))];
+        self.prepare_anon_function(lambda_name_id, parsed_sig, body_nodes, &AHashSet::new(), position)
+    }
+
+    /// Prepares a function that has no binding name: a lambda or a generator
+    /// expression.
+    ///
+    /// This follows the same preparation logic as `prepare_function_def` but
+    /// takes the name (`<lambda>` or `<genexpr>`) as given, registers it in no
+    /// scope, and gives back an `ExprLoc` that holds `Expr::Lambda`, which is
+    /// the prepared form of both.
+    ///
+    /// `outward_walrus` names the targets of walrus operators that bind in the
+    /// scope of the caller and not in this one, which PEP 572 makes the rule
+    /// for a generator expression. The caller allocates their slots first.
+    fn prepare_anon_function(
+        &mut self,
+        anon_name_id: StringId,
+        parsed_sig: &ParsedSignature,
+        body_nodes: Vec<ParseNode>,
+        outward_walrus: &AHashSet<StringId>,
+        position: CodeRange,
+    ) -> Result<ExprLoc, ParseError> {
+        // Create a synthetic name identifier (not registered in scope)
         let lambda_name = Identifier::new_with_scope(
-            lambda_name_id,
+            anon_name_id,
             position,
-            // Slot 0 is the trivial placeholder; the lambda name never lands
-            // in a namespace because lambdas don't have a binding name.
+            // Slot 0 is the trivial placeholder; the name never lands in a
+            // namespace because these functions have no binding name.
             NamespaceId::new(0).expect("slot 0 fits in u16"),
             NameScope::Local,
         );
 
-        // Wrap the body expression as a return statement for scope analysis
-        let body_as_node: ParseNode = Node::Return(Some(body.clone()));
-        let body_nodes = vec![body_as_node];
-
         // Extract param names from the parsed signature for scope analysis
         let param_names: Vec<StringId> = parsed_sig.param_names().collect();
 
-        // Pass 1: Collect scope information from the lambda body
-        // (Lambdas can't have global/nonlocal declarations, but can have nested functions)
-        let scope_info = collect_function_scope_info(&body_nodes, &param_names, self.interner);
+        // Pass 1: Collect scope information from the body
+        // (Neither form can hold global/nonlocal declarations, but both can hold nested functions)
+        let mut scope_info = collect_function_scope_info(&body_nodes, &param_names, self.interner);
+
+        // A walrus that binds outward is no local of ours: it is a global when
+        // the caller is the module and a cell of the caller otherwise, which is
+        // what the two declarations below say.
+        for name in outward_walrus {
+            scope_info.assigned_names.remove(name);
+            if self.is_module_scope() {
+                scope_info.global_names.insert(*name);
+            } else {
+                scope_info.nonlocal_names.insert(*name);
+            }
+        }
 
         // Build enclosing_locals: names that are local to this scope or
         // captured from any enclosing scope (see `child_enclosing_locals`).
@@ -1949,13 +2172,13 @@ impl<'i, 'g> Prepare<'i, 'g> {
             self.interner,
         )?;
 
-        // Prepare the lambda body
+        // Prepare the body
         let prepared_body = inner_prepare.prepare_nodes(body_nodes)?;
 
-        // Move the lambda's per-function state out so its `GlobalsRef` is
+        // Move the function's per-function state out so its `GlobalsRef` is
         // released before we touch `self`'s function state.
         let PrepareState::Function(inner_state) = mem::replace(&mut inner_prepare.state, PrepareState::Module) else {
-            unreachable!("lambda preparer was constructed with new_function");
+            unreachable!("anonymous preparer was constructed with new_function");
         };
         let FunctionState {
             locals: inner_locals,
@@ -2022,7 +2245,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             }
         }
 
-        // Create the prepared function definition (lambdas are never async)
+        // Create the prepared function definition (neither form is ever async)
         let func_def = PreparedFunctionDef {
             name: lambda_name,
             signature,
@@ -2496,6 +2719,25 @@ fn collect_scope_info_from_node(
                 collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
             }
         }
+        Node::Match {
+            subject, slot, cases, ..
+        } => {
+            collect_assigned_names_from_expr(subject, assigned_names, interner);
+            // The hidden subject local is a binding of this scope, as is every
+            // name the patterns capture.
+            assigned_names.insert(slot.name_id);
+            for case in cases {
+                let mut bound = Vec::new();
+                collect_pattern_bindings(&case.pattern, &mut bound);
+                assigned_names.extend(bound.into_iter().map(|name| name.name_id));
+                if let Some(guard) = &case.guard {
+                    collect_assigned_names_from_expr(guard, assigned_names, interner);
+                }
+                for n in &case.body {
+                    collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
+                }
+            }
+        }
         Node::FunctionDef {
             def: RawFunctionDef { name, .. },
             decorators,
@@ -2508,13 +2750,42 @@ fn collect_scope_info_from_node(
                 collect_assigned_names_from_expr(decorator, assigned_names, interner);
             }
         }
-        Node::ClassDef { name, decorators, .. } => {
+        Node::TypeAlias { name, .. } => {
+            // Binds the alias name here; the value is a separate scope.
+            assigned_names.insert(name.name_id);
+        }
+        Node::Delete(targets) => {
+            // `del x` makes `x` local to this scope, exactly as an assignment
+            // does, which is why `del x` before any store is an
+            // `UnboundLocalError` rather than a `NameError`.
+            for target in targets {
+                match target {
+                    DeleteTarget::Name(ident) => {
+                        assigned_names.insert(ident.name_id);
+                    }
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_assigned_names_from_expr(object, assigned_names, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_assigned_names_from_expr(object, assigned_names, interner);
+                        collect_assigned_names_from_expr(index, assigned_names, interner);
+                    }
+                }
+            }
+        }
+        Node::ClassDef {
+            name,
+            bases,
+            decorators,
+            ..
+        } => {
             // A class definition binds the class name in this scope, just like a `def`.
             // The class body is a separate scope (handled by the cell-var pass).
             assigned_names.insert(name.name_id);
-            // Decorators evaluate in *this* scope, so a walrus in one binds here.
-            for decorator in decorators {
-                collect_assigned_names_from_expr(decorator, assigned_names, interner);
+            // Bases and decorators evaluate in *this* scope, so a walrus in one
+            // binds here.
+            for expr in bases.iter().chain(decorators) {
+                collect_assigned_names_from_expr(expr, assigned_names, interner);
             }
         }
         Node::Try(Try {
@@ -2637,6 +2908,14 @@ fn collect_assigned_names_from_expr(
         | Expr::Await(operand) => {
             collect_assigned_names_from_expr(operand, assigned_names, interner);
         }
+        Expr::Yield(value) => {
+            if let Some(value) = value {
+                collect_assigned_names_from_expr(value, assigned_names, interner);
+            }
+        }
+        Expr::YieldFrom(value) => {
+            collect_assigned_names_from_expr(value, assigned_names, interner);
+        }
         Expr::Subscript { object, index } => {
             collect_assigned_names_from_expr(object, assigned_names, interner);
             collect_assigned_names_from_expr(index, assigned_names, interner);
@@ -2689,6 +2968,16 @@ fn collect_assigned_names_from_expr(
                 }
             }
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_assigned_names_from_expr(&interpolation.expr, assigned_names, interner);
+                for part in &interpolation.format_spec {
+                    if let FStringPart::Interpolation { expr, .. } = part {
+                        collect_assigned_names_from_expr(expr, assigned_names, interner);
+                    }
+                }
+            }
+        }
         Expr::Slice { lower, upper, step } => {
             if let Some(e) = lower {
                 collect_assigned_names_from_expr(e, assigned_names, interner);
@@ -2702,8 +2991,35 @@ fn collect_assigned_names_from_expr(
         }
         // Lambda bodies have their own scope - walrus inside them doesn't affect us
         Expr::LambdaRaw { .. } | Expr::Lambda { .. } => {}
+        // A generator expression has a scope of its own, but PEP 572 gives a
+        // walrus inside it to this scope, exactly as it does in the other
+        // comprehensions.
+        Expr::GenExprRaw { body, .. } => collect_genexpr_walrus(body, assigned_names, interner),
         // Leaf expressions don't contain walrus operators
         Expr::Literal(_) | Expr::Builtin(_) | Expr::Name(_) => {}
+    }
+}
+
+/// Collects the walrus targets of a generator expression body, which bind in
+/// the scope that holds the expression and not in the generator's own.
+///
+/// The body is the shape `Parser::parse_generator_expression` writes: `for`
+/// and `if` statements around one `yield`. The loop targets are the generator's
+/// own and are left out; every expression beside them is scanned.
+fn collect_genexpr_walrus(body: &[ParseNode], assigned_names: &mut AHashSet<StringId>, interner: &CompileInterns<'_>) {
+    for node in body {
+        match node {
+            Node::For { iter, body, .. } => {
+                collect_assigned_names_from_expr(iter, assigned_names, interner);
+                collect_genexpr_walrus(body, assigned_names, interner);
+            }
+            Node::If { test, body, .. } => {
+                collect_assigned_names_from_expr(test, assigned_names, interner);
+                collect_genexpr_walrus(body, assigned_names, interner);
+            }
+            Node::Expr(expr) => collect_assigned_names_from_expr(expr, assigned_names, interner),
+            _ => unreachable!("a generator expression body holds only `for`, `if` and the `yield`"),
+        }
     }
 }
 
@@ -2798,16 +3114,42 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
             }
         }
-        Node::ClassDef { body, decorators, .. } => {
+        Node::TypeAlias { value, .. } => {
+            // The thunk is a nested scope of this one, so a local it reads
+            // becomes a cell var exactly as a nested `def`'s would.
+            collect_cell_vars_from_function(&value.signature, &value.body, our_locals, cell_vars, interner);
+        }
+        Node::Delete(targets) => {
+            // A lambda inside an index expression can capture our locals.
+            for target in targets {
+                match target {
+                    DeleteTarget::Name(_) => {}
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+                        collect_cell_vars_from_expr(index, our_locals, cell_vars, interner);
+                    }
+                }
+            }
+        }
+        Node::ClassDef {
+            body,
+            bases,
+            decorators,
+            ..
+        } => {
             // The class body is a nested scope of *this* scope, like a `def`: any
             // of our locals referenced from the class-var values or (transitively)
             // the method bodies becomes a cell var. `collect_cell_vars_from_function`
             // recurses into the nested method bodies for us.
             collect_cell_vars_from_function(&body.signature, &body.body, our_locals, cell_vars, interner);
-            // A nested scope inside a decorator expression (a lambda in decorator
-            // position, or one passed to a factory) can capture our locals too.
-            for decorator in decorators {
-                collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
+            // A nested scope inside a base or decorator expression (a lambda in
+            // decorator position, or one passed to a factory) can capture our
+            // locals too.
+            for expr in bases.iter().chain(decorators) {
+                collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
             }
         }
         // Recurse into control flow structures
@@ -2843,6 +3185,18 @@ fn collect_cell_vars_from_node(
             }
             for n in or_else {
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
+            }
+        }
+        Node::Match { subject, cases, .. } => {
+            collect_cell_vars_from_expr(subject, our_locals, cell_vars, interner);
+            for case in cases {
+                collect_pattern_cell_vars(&case.pattern, our_locals, cell_vars, interner);
+                if let Some(guard) = &case.guard {
+                    collect_cell_vars_from_expr(guard, our_locals, cell_vars, interner);
+                }
+                for n in &case.body {
+                    collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
+                }
             }
         }
         Node::Try(Try {
@@ -3097,6 +3451,18 @@ fn collect_cell_vars_from_expr(
             }
             collect_cell_vars_from_expr(body, &extended_locals, cell_vars, interner);
         }
+        Expr::GenExprRaw { signature, body, .. } => {
+            collect_cell_vars_from_function(signature, body, our_locals, cell_vars, interner);
+            // A walrus inside the generator expression writes to this scope, so
+            // the name it writes needs a cell exactly as a `nonlocal` would.
+            let mut walrus = AHashSet::new();
+            collect_genexpr_walrus(body, &mut walrus, interner);
+            for name in &walrus {
+                if our_locals.contains(name) {
+                    cell_vars.insert(*name);
+                }
+            }
+        }
         // Recurse into sub-expressions
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             for item in items {
@@ -3181,11 +3547,29 @@ fn collect_cell_vars_from_expr(
                 }
             }
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_cell_vars_from_expr(&interpolation.expr, our_locals, cell_vars, interner);
+                for part in &interpolation.format_spec {
+                    if let FStringPart::Interpolation { expr, .. } = part {
+                        collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
+                    }
+                }
+            }
+        }
         Expr::Named { value, .. } => {
             // Only scan the value expression for cell vars
             collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
         }
         Expr::Await(value) => {
+            collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
+        }
+        Expr::Yield(value) => {
+            if let Some(value) = value {
+                collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
+            }
+        }
+        Expr::YieldFrom(value) => {
             collect_cell_vars_from_expr(value, our_locals, cell_vars, interner);
         }
         // Leaf expressions
@@ -3356,6 +3740,18 @@ fn collect_referenced_names_from_node(
                 collect_referenced_names_from_node(n, referenced, interner);
             }
         }
+        Node::Match { subject, cases, .. } => {
+            collect_referenced_names_from_expr(subject, referenced, interner);
+            for case in cases {
+                collect_pattern_referenced_names(&case.pattern, referenced, interner);
+                if let Some(guard) = &case.guard {
+                    collect_referenced_names_from_expr(guard, referenced, interner);
+                }
+                for n in &case.body {
+                    collect_referenced_names_from_node(n, referenced, interner);
+                }
+            }
+        }
         Node::FunctionDef {
             def: RawFunctionDef { signature, body, .. },
             decorators,
@@ -3370,12 +3766,33 @@ fn collect_referenced_names_from_node(
                 collect_referenced_names_from_expr(decorator, referenced, interner);
             }
         }
-        Node::ClassDef { decorators, .. } => {
+        Node::TypeAlias { value, .. } => {
+            // The alias binds its name here; the value thunk is a nested scope,
+            // and whatever it reads from ours it reads through that scope.
+            collect_nested_function_references(&value.signature, &value.body, referenced, interner);
+        }
+        Node::Delete(targets) => {
+            // Only the object and index expressions are read; the name form
+            // binds rather than references.
+            for target in targets {
+                match target {
+                    DeleteTarget::Name(_) => {}
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_referenced_names_from_expr(object, referenced, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_referenced_names_from_expr(object, referenced, interner);
+                        collect_referenced_names_from_expr(index, referenced, interner);
+                    }
+                }
+            }
+        }
+        Node::ClassDef { bases, decorators, .. } => {
             // The class body is a separate scope and the name is a binding, so
-            // neither is a reference here — but decorators evaluate in *our*
-            // scope, so their names are ours to collect.
-            for decorator in decorators {
-                collect_referenced_names_from_expr(decorator, referenced, interner);
+            // neither is a reference here — but bases and decorators evaluate in
+            // *our* scope, so their names are ours to collect.
+            for expr in bases.iter().chain(decorators) {
+                collect_referenced_names_from_expr(expr, referenced, interner);
             }
         }
         Node::Try(Try {
@@ -3509,6 +3926,12 @@ fn collect_referenced_names_from_expr(
         Expr::FString(parts) => {
             collect_referenced_names_from_fstring_parts(parts, referenced, interner);
         }
+        Expr::TString(template) => {
+            for interpolation in &template.interpolations {
+                collect_referenced_names_from_expr(&interpolation.expr, referenced, interner);
+                collect_referenced_names_from_fstring_parts(&interpolation.format_spec, referenced, interner);
+            }
+        }
         Expr::Subscript { object, index } => {
             collect_referenced_names_from_expr(object, referenced, interner);
             collect_referenced_names_from_expr(index, referenced, interner);
@@ -3579,6 +4002,25 @@ fn collect_referenced_names_from_expr(
                 }
             }
         }
+        Expr::GenExprRaw { signature, body, .. } => {
+            // Everything the body binds -- the parameter, the loop targets and
+            // any walrus -- is the generator's own, so only the rest is free
+            // here. The signature carries no defaults, so there is nothing of
+            // it to read in this scope.
+            let mut bound: AHashSet<StringId> = signature.param_names().collect();
+            let mut nested_global = AHashSet::new();
+            let mut nested_nonlocal = AHashSet::new();
+            let mut body_refs: AHashSet<StringId> = AHashSet::new();
+            for node in body {
+                collect_scope_info_from_node(node, &mut nested_global, &mut nested_nonlocal, &mut bound, interner);
+                collect_referenced_names_from_node(node, &mut body_refs, interner);
+            }
+            for name in body_refs {
+                if !bound.contains(&name) {
+                    referenced.insert(name);
+                }
+            }
+        }
         Expr::Lambda { .. } => {
             // Lambda should only exist after preparation; this function operates on raw expressions
             unreachable!("Expr::Lambda should not exist during scope analysis")
@@ -3599,6 +4041,14 @@ fn collect_referenced_names_from_expr(
             }
         }
         Expr::Await(value) => {
+            collect_referenced_names_from_expr(value, referenced, interner);
+        }
+        Expr::Yield(value) => {
+            if let Some(value) = value {
+                collect_referenced_names_from_expr(value, referenced, interner);
+            }
+        }
+        Expr::YieldFrom(value) => {
             collect_referenced_names_from_expr(value, referenced, interner);
         }
     }
@@ -3907,4 +4357,111 @@ fn collect_referenced_names_from_assign_target(
             }
         }
     }
+}
+
+/// Collects every name a pattern binds. Mirrors the parser's own collector; the
+/// two are separate because that one runs before any name is resolved and this
+/// one after, and neither should reach across the phase boundary.
+fn collect_pattern_bindings(pattern: &Pattern, names: &mut Vec<Identifier>) {
+    match pattern {
+        Pattern::Wildcard | Pattern::Value(_) | Pattern::Singleton(_) => {}
+        Pattern::Capture(name) => names.push(*name),
+        Pattern::Star(name) => names.extend(name.iter().copied()),
+        Pattern::Sequence(items) => {
+            for item in items {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        Pattern::Mapping { patterns, rest, .. } => {
+            for item in patterns {
+                collect_pattern_bindings(item, names);
+            }
+            names.extend(rest.iter().copied());
+        }
+        Pattern::Class {
+            positional, keywords, ..
+        } => {
+            for item in positional {
+                collect_pattern_bindings(item, names);
+            }
+            for (_, item) in keywords {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        // Every alternative binds the same names (the parser checked), so one
+        // of them answers for all.
+        Pattern::Or(alternatives) => {
+            if let Some(first) = alternatives.first() {
+                collect_pattern_bindings(first, names);
+            }
+        }
+        Pattern::As { pattern, name } => {
+            collect_pattern_bindings(pattern, names);
+            names.push(*name);
+        }
+    }
+}
+
+/// Runs `visit` on every expression a pattern evaluates: the values it compares
+/// against, the classes it tests, and the mapping keys it looks up.
+fn visit_pattern_exprs(pattern: &Pattern, visit: &mut impl FnMut(&ExprLoc)) {
+    match pattern {
+        Pattern::Wildcard | Pattern::Capture(_) | Pattern::Singleton(_) | Pattern::Star(_) => {}
+        Pattern::Value(expr) => visit(expr),
+        Pattern::Sequence(items) => {
+            for item in items {
+                visit_pattern_exprs(item, visit);
+            }
+        }
+        Pattern::Mapping { keys, patterns, .. } => {
+            for key in keys {
+                visit(key);
+            }
+            for item in patterns {
+                visit_pattern_exprs(item, visit);
+            }
+        }
+        Pattern::Class {
+            cls,
+            positional,
+            keywords,
+        } => {
+            visit(cls);
+            for item in positional {
+                visit_pattern_exprs(item, visit);
+            }
+            for (_, item) in keywords {
+                visit_pattern_exprs(item, visit);
+            }
+        }
+        Pattern::Or(alternatives) => {
+            for item in alternatives {
+                visit_pattern_exprs(item, visit);
+            }
+        }
+        Pattern::As { pattern, .. } => visit_pattern_exprs(pattern, visit),
+    }
+}
+
+/// Collects the names a pattern *reads* (never the ones it binds).
+fn collect_pattern_referenced_names(
+    pattern: &Pattern,
+    referenced: &mut AHashSet<StringId>,
+    interner: &CompileInterns<'_>,
+) {
+    visit_pattern_exprs(pattern, &mut |expr| {
+        collect_referenced_names_from_expr(expr, referenced, interner);
+    });
+}
+
+/// Flags our locals that a nested scope inside a pattern expression captures.
+fn collect_pattern_cell_vars(
+    pattern: &Pattern,
+    our_locals: &AHashSet<StringId>,
+    cell_vars: &mut AHashSet<StringId>,
+    interner: &CompileInterns<'_>,
+) {
+    visit_pattern_exprs(pattern, &mut |expr| {
+        collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
+    });
 }

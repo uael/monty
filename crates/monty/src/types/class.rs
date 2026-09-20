@@ -14,6 +14,7 @@ use crate::{
         BorrowedHeapReadMut, DropGuard, DropWithContext, HeapId, HeapItem, HeapObjectRead, HeapRead,
         heap_read_ref_as_field_mut,
     },
+    intern::StaticStrings,
     types::{Union, str::allocate_string},
     value::{EitherStr, Value},
 };
@@ -43,6 +44,23 @@ impl Default for DataclassOptions {
     }
 }
 
+/// The builtin type a class inherits, for the two a class may name as its base.
+///
+/// A builtin is not a heap object, so a class cannot hold a reference to one:
+/// it records which one it descends from instead. Resolved once at creation
+/// from the bases, and passed on to every class further down the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum BuiltinBase {
+    /// A builtin exception. `Some` is what makes an instance of the class
+    /// raisable, and the type every existing handler, message and host binding
+    /// keys off; the class's own name is carried alongside it so a traceback
+    /// still reads `Refused: why`.
+    Exception(ExcType),
+    /// `str`. An instance of the class is a string that carries the class, so
+    /// every string operation reads it as the string it is.
+    Str,
+}
+
 /// A user-defined class object created by a `class Foo: ...` statement.
 ///
 /// Holds the class name and a `namespace` [`Dict`] mapping member names to values:
@@ -51,9 +69,11 @@ impl Default for DataclassOptions {
 /// work via reference identity, so there is no separate type-id counter.
 ///
 /// Calling a class (`Foo(...)`) constructs an [`Instance`](super::Instance); see
-/// `instantiate_class` in the VM's call module. Inheritance is not yet supported,
-/// but a future `bases: Vec<HeapId>` field would slot in here without disturbing
-/// the rest of the design.
+/// `instantiate_class` in the VM's call module.
+///
+/// Inheritance is single: `bases` holds at most one class, and every lookup
+/// walks that chain derived-first. There is no C3 linearization here because
+/// there is nothing to linearize.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Class {
     /// Class name (e.g. `Foo`), used for `repr` and `__name__`. Interned for
@@ -63,6 +83,15 @@ pub(crate) struct Class {
     name: EitherStr,
     /// Members: method name / class-variable name -> value.
     namespace: Dict,
+    /// The base class, as an OWNED reference, or empty for a root class. A
+    /// `Vec` rather than an `Option` because the field is what `__bases__`
+    /// would report and what a future second base would extend; both
+    /// `py_dec_ref_ids` and the GC child walk must report every id in it.
+    bases: Vec<HeapId>,
+    /// The builtin type this class descends from, resolved once at creation
+    /// because the chain cannot change afterwards, or `None` for a class that
+    /// descends from `object` alone.
+    base: Option<BuiltinBase>,
     /// The `@dataclass(...)` options this class was decorated with, left at
     /// CPython's defaults for a class that was not. Stands in for the dunders
     /// CPython generates and Monty cannot yet install: baked in at decoration
@@ -80,13 +109,44 @@ impl Class {
     /// Dataclass options start at their defaults; `@dataclass` sets them with
     /// [`HeapRead::set_dataclass_options`] once it has built the class.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, base: Option<BuiltinBase>) -> Self {
         Self {
             name,
             namespace,
+            bases,
+            base,
             options: DataclassOptions::default(),
             uuid: None,
         }
+    }
+
+    /// The builtin type this class descends from, or `None` for a class that
+    /// descends from `object` alone.
+    #[must_use]
+    pub fn base(&self) -> Option<BuiltinBase> {
+        self.base
+    }
+
+    /// The builtin exception this class descends from, or `None` for a class
+    /// whose instances are not exceptions.
+    #[must_use]
+    pub fn builtin_exc(&self) -> Option<ExcType> {
+        match self.base {
+            Some(BuiltinBase::Exception(exc)) => Some(exc),
+            Some(BuiltinBase::Str) | None => None,
+        }
+    }
+
+    /// Whether instances of this class are strings.
+    #[must_use]
+    pub fn inherits_str(&self) -> bool {
+        matches!(self.base, Some(BuiltinBase::Str))
+    }
+
+    /// The base classes, as borrowed ids. Owned by this class.
+    #[must_use]
+    pub fn bases(&self) -> &[HeapId] {
+        &self.bases
     }
 
     /// Boundary identity of the class, generated and stored on first use so
@@ -218,10 +278,13 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
         // Otherwise look up a member (method or class variable) in the namespace.
         match self.get(vm.heap).namespace.get_by_str(attr_str, vm.heap, vm.interns) {
             Some(value) => Ok(Some(CallResult::Value(value.clone_with_heap(vm.heap)))),
-            None => Err(ExcType::attribute_error_type(
-                self.get(vm.heap).name.as_str(vm.interns),
-                attr_str,
-            )),
+            None => match class_default(attr_str, vm) {
+                Some(value) => Ok(Some(CallResult::Value(value))),
+                None => Err(ExcType::attribute_error_type(
+                    self.get(vm.heap).name.as_str(vm.interns),
+                    attr_str,
+                )),
+            },
         }
     }
 
@@ -243,7 +306,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
             .get(vm.heap)
             .namespace
             .get_by_str(attr_str, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap));
+            .map(|v| v.clone_with_heap(vm.heap))
+            .or_else(|| class_default(attr_str, vm));
         if let Some(member) = member {
             defer_drop!(member, vm);
             vm.call_function(member, args)
@@ -257,8 +321,22 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
     }
 }
 
+/// A class attribute Monty synthesizes rather than keeping in the namespace,
+/// which is `__module__` alone.
+///
+/// Monty runs one module, so every class is written in `__main__`, which is
+/// what `__name__` reads there too. In CPython this is an ordinary entry of the
+/// class dict, so it is read after the namespace: a class that binds the name
+/// itself shadows it, and an instance of the class inherits it.
+pub(crate) fn class_default(attr: &str, vm: &VM<'_>) -> Option<Value> {
+    (attr == "__module__").then(|| Value::InternString(vm.interns.intern_static(StaticStrings::DunderMain)))
+}
+
 impl HeapItem for Class {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         self.namespace.py_dec_ref_ids(stack);
+        // Mirrors the GC child walk in `heap::for_each_child_id`: a class owns
+        // a reference on each of its bases.
+        stack.extend(self.bases.iter().copied());
     }
 }

@@ -11,7 +11,6 @@ use monty_types::{MontyUuid, OsFunctionCall};
 use super::{CallFrame, VM, attr::PendingLookupEffect, function_namespace, recursion::RunReentryGuard};
 use crate::{
     args::{ArgValues, KwargsValues},
-    asyncio::Coroutine,
     builtins::{Builtins, BuiltinsFunctions, BuiltinsFunctionsExt},
     bytecode::FrameExit,
     defer_drop,
@@ -23,9 +22,26 @@ use crate::{
     modules::dataclasses,
     os_dispatch::{PendingEffect, release_pending_effect},
     resource_checks::check_estimated_size,
-    types::{Dict, Instance, PyTrait, Type, bytes::call_bytes_method, instance::class_name, str::call_str_method},
+    types::{
+        Dict, Instance, PyTrait, Type, allocate_tuple,
+        bytes::call_bytes_method,
+        generator::{Generator, GeneratorKind},
+        instance::{class_builtin_exc, class_inherits_str, class_member, class_name},
+        str::{Str, allocate_class_string, call_str_method},
+        tuple::TupleVec,
+    },
     value::{EitherStr, VALUE_SIZE, Value},
 };
+
+/// How a generator's close ended: exiting or returning is closing well, and
+/// anything else is the body's own error to report.
+fn close_outcome(error: RunError) -> RunResult<()> {
+    if error.is_generator_exit() || error.is_stop_iteration() {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
 
 /// Result of executing a call or attribute method.
 ///
@@ -100,6 +116,20 @@ pub(crate) enum CallResult {
         call: OsFunctionCall,
         effect: PendingEffect,
     },
+    /// The call raises, and the handler must bind the object it raises rather
+    /// than one rebuilt from the error.
+    ///
+    /// `generator.throw(exc)` is the call that needs this: the exception is the
+    /// caller's own object, and an instance of a sandbox exception class is
+    /// only of that class while the handler binds it. An error carries a
+    /// message and not a Python value, so it cannot carry the object; the raise
+    /// goes to the loop instead, which raises it the way `raise` does.
+    Raised {
+        error: Box<RunError>,
+        /// The object to bind, for a value worth keeping; see
+        /// [`VM::keeps_identity`].
+        value: Option<Value>,
+    },
 }
 
 impl<C: ContainsHeap> DropWithContext<C> for CallResult {
@@ -112,6 +142,11 @@ impl<C: ContainsHeap> DropWithContext<C> for CallResult {
             Self::OsCall(call) => call.drop_with(heap),
             Self::AttrLookup { effect, .. } => effect.drop_with(heap),
             Self::FramePushed => {}
+            Self::Raised { value, .. } => {
+                if let Some(value) = value {
+                    value.drop_with(heap);
+                }
+            }
             Self::OsCallWithEffect { call, effect } => {
                 call.drop_with(heap);
                 // Discarded before it ever became a `FrameExit`.
@@ -460,9 +495,105 @@ impl<'h> VM<'h> {
         }
     }
 
+    /// Runs a generator to its next `yield` from Rust, for everything that
+    /// walks an iterator itself: `list()`, `sorted()`, a comprehension, `for`
+    /// and the `next()` builtin.
+    ///
+    /// The frame is spliced in exactly as [`resume_generator`](VM::resume_generator)
+    /// does; only the driving differs, this being a nested `run()` in the shape
+    /// [`evaluate_function`](Self::evaluate_function) uses. That is also its
+    /// limit: a generator driven this way cannot suspend to the host, the same
+    /// restriction every synchronous re-entry here carries. Only `send()` and
+    /// `__next__()`, which resume the frame on the VM's own loop, can.
+    ///
+    /// `None` means the generator finished, which is the exhaustion an iterator
+    /// protocol reports by returning nothing rather than by raising.
+    pub(crate) fn drive_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<Option<Value>> {
+        if let Err(e) = self.enter_run_reentry() {
+            sent.drop_with(self);
+            return Err(e.into());
+        }
+        let mut guard = RunReentryGuard::new(self);
+        let this = &mut *guard;
+
+        match this.resume_generator(gen_id, sent) {
+            Ok(CallResult::FramePushed) => {}
+            Ok(other) => return Err(this.unsupported_call_result("generator", other)),
+            // Exhaustion reaches an iterator walk as "no more values".
+            Err(e) if e.is_stop_iteration() => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        this.current_frame_mut().should_return = true;
+        loop {
+            match this.run() {
+                Ok(FrameExit::Return(value)) => return Ok(Some(value)),
+                Ok(exit) => {
+                    let error = this.unsupported_frame_exit("generator", exit);
+                    if let Some(error) = this.handle_exception(error) {
+                        return Err(error);
+                    }
+                }
+                Err(e) if e.is_stop_iteration() => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Runs a suspended generator's `GeneratorExit` to its conclusion, for
+    /// [`close_generator`](VM::close_generator).
+    ///
+    /// A nested `run()` in the shape [`evaluate_function`](Self::evaluate_function)
+    /// uses, because closing has to observe how the body ended rather than
+    /// hand a value back: exiting, returning, yielding again, or raising
+    /// something of its own are four different answers.
+    pub(super) fn drive_generator_close(&mut self, gen_id: HeapId) -> RunResult<()> {
+        if let Err(e) = self.enter_run_reentry() {
+            return Err(e.into());
+        }
+        let mut guard = RunReentryGuard::new(self);
+        let this = &mut *guard;
+
+        let error = match this.splice_generator_frame(gen_id) {
+            Ok(()) => ExcType::generator_exit(),
+            Err(e) => return Err(e),
+        };
+        this.current_frame_mut().should_return = true;
+        if let Some(error) = this.handle_exception(error) {
+            return close_outcome(error);
+        }
+        loop {
+            match this.run() {
+                // A `yield` inside the unwind: the body declined to close.
+                Ok(FrameExit::Return(value)) => {
+                    value.drop_with(this);
+                    return Err(ExcType::runtime_error_generator_ignored_exit());
+                }
+                Ok(exit) => {
+                    let error = this.unsupported_frame_exit("generator close", exit);
+                    if let Some(error) = this.handle_exception(error) {
+                        return close_outcome(error);
+                    }
+                }
+                Err(error) => return close_outcome(error),
+            }
+        }
+    }
+
     /// Converts a direct call suspension into a specific synchronous-context error.
     #[cold]
-    fn unsupported_call_result(&mut self, ctx: &'static str, result: CallResult) -> RunError {
+    pub(super) fn unsupported_call_result(&mut self, ctx: &'static str, result: CallResult) -> RunError {
+        // A raise is no suspension: it stands as it is here. Only the object it
+        // would have bound goes, as it does anywhere a nested run rebuilds an
+        // exception from the error alone.
+        let result = match result {
+            CallResult::Raised { error, value } => {
+                if let Some(value) = value {
+                    value.drop_with(self);
+                }
+                return *error;
+            }
+            other => other,
+        };
         let error = match &result {
             CallResult::External(function_name, _) => ExcType::not_implemented(format!(
                 "{ctx}: external function '{}' is not yet supported in this context",
@@ -501,7 +632,9 @@ impl<'h> VM<'h> {
             CallResult::AwaitValue(_) => {
                 ExcType::not_implemented(format!("{ctx}: awaiting a value is not yet supported in this context"))
             }
-            CallResult::Value(_) | CallResult::FramePushed => unreachable!("completed calls are handled above"),
+            CallResult::Value(_) | CallResult::FramePushed | CallResult::Raised { .. } => {
+                unreachable!("completed calls and raises are handled above")
+            }
         };
         result.drop_with(self);
         error.into()
@@ -867,8 +1000,8 @@ impl<'h> VM<'h> {
         let callable = self.pop();
         debug_assert_exact_callable(&callable, func_id);
 
-        let coroutine = Coroutine::new(func_id, namespace, None);
-        let coroutine_id = self.heap.allocate(HeapData::Coroutine(coroutine));
+        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, namespace, None);
+        let coroutine_id = self.heap.allocate(HeapData::Generator(Box::new(coroutine)));
         CallResult::Value(Value::Ref(coroutine_id))
     }
 
@@ -890,8 +1023,12 @@ impl<'h> VM<'h> {
     ) -> Result<CallResult, RunError> {
         let func = self.interns.get_function(func_id);
 
+        // Both an `async def` and a body that yields bind their arguments now
+        // and run later, so both hand back an object instead of a frame.
         if func.is_async {
             self.create_coroutine(func_id, func, cells, defaults, globals, args)
+        } else if func.code.is_generator() {
+            self.create_generator(func_id, func, cells, defaults, globals, args)
         } else {
             self.call_sync_function(func_id, func, cells, defaults, globals, args)
         }
@@ -922,13 +1059,41 @@ impl<'h> VM<'h> {
 
         // 4. Create Coroutine on heap; it carries its own reference to the globals dict.
         let (namespace, this) = namespace_guard.into_parts();
-        if let Some(globals) = globals {
-            this.heap.inc_ref(globals);
-        }
-        let coroutine = Coroutine::new(func_id, namespace, globals);
-        let coroutine_id = this.heap.allocate(HeapData::Coroutine(coroutine));
+        let namespace_of = function_namespace(globals, &*this.heap);
+        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, namespace, namespace_of);
+        let coroutine_id = this.heap.allocate(HeapData::Generator(Box::new(coroutine)));
 
         Ok(CallResult::Value(Value::Ref(coroutine_id)))
+    }
+
+    /// Creates the generator a call to a yielding function hands back.
+    ///
+    /// The same binding as [`create_coroutine`](Self::create_coroutine) — the
+    /// arguments are bound at the call, and the body runs only when something
+    /// resumes it — so the two differ by the object allocated and nothing else.
+    /// The bound namespace becomes the generator's stack region, which is what
+    /// a frame's locals are.
+    fn create_generator(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+        cells: &[HeapId],
+        defaults: &[Value],
+        globals: Option<HeapId>,
+        args: ArgValues,
+    ) -> Result<CallResult, RunError> {
+        let namespace = Vec::with_capacity(func.namespace_size);
+        let mut namespace_guard = DropGuard::new(namespace, self);
+        let (namespace, this) = namespace_guard.as_parts_mut();
+        func.signature.bind(args, defaults, this, func.name, namespace)?;
+        this.install_closure_cells(func, cells, namespace);
+
+        let (namespace, this) = namespace_guard.into_parts();
+        let namespace_of = function_namespace(globals, &*this.heap);
+        let generator = Generator::new(GeneratorKind::Generator, func_id, namespace, namespace_of);
+        let generator_id = this.heap.allocate(HeapData::Generator(Box::new(generator)));
+
+        Ok(CallResult::Value(Value::Ref(generator_id)))
     }
 
     /// Installs owned cell variables and captured free-var cells into a frame's
@@ -1034,6 +1199,11 @@ impl<'h> VM<'h> {
 
     /// Constructs an instance of a user-defined class — the `Foo(...)` path.
     ///
+    /// A class that inherits `str` takes the other path: its instance is a
+    /// string built from the same arguments `str(...)` takes, carrying the
+    /// class. Such a class cannot define `__init__` (refused where the class is
+    /// built), so nothing below applies to it.
+    ///
     /// Allocates the instance with an empty `__dict__`, then:
     /// - **No `__init__`:** rejects any arguments (like `object()`), returns the
     ///   instance directly.
@@ -1056,20 +1226,18 @@ impl<'h> VM<'h> {
     /// on external/OS calls; the `is_initializer` flag is threaded through frame
     /// serialization so a suspended initializer resumes correctly.
     pub(crate) fn instantiate_class(&mut self, class_id: HeapId, args: ArgValues) -> Result<CallResult, RunError> {
+        if class_inherits_str(class_id, self) {
+            return self.instantiate_str_class(class_id, args).map(CallResult::Value);
+        }
         let instance_id = self
             .heap
             .allocate(HeapData::Instance(Box::new(Instance::new(class_id, Dict::new()))));
         // The instance now owns a reference to its class object.
         self.heap.inc_ref(class_id);
 
-        // Look up `__init__` in the class namespace (cloned out to release the borrow).
-        let init = match self.heap.get(class_id) {
-            HeapData::Class(class) => class
-                .namespace()
-                .get_by_str("__init__", self.heap, self.interns)
-                .map(|v| v.clone_with_heap(self)),
-            _ => None,
-        };
+        // Look up `__init__` along the class chain (cloned out to release the
+        // borrow), so a subclass that defines none uses its base's.
+        let init = class_member(class_id, "__init__", self);
 
         match init {
             // A dataclass with no user-defined `__init__` binds its fields
@@ -1082,6 +1250,10 @@ impl<'h> VM<'h> {
                 };
                 dataclasses::dataclass_init(self, &class, Value::Ref(instance_id), args)
             }
+            // An exception class with no `__init__` binds its positional
+            // arguments as `args`, which is what `BaseException.__init__` does
+            // and what `str(exc)` and `exc.args` read back.
+            None if class_builtin_exc(class_id, self).is_some() => self.bind_exception_args(instance_id, args),
             None if matches!(args, ArgValues::Empty) => Ok(CallResult::Value(Value::Ref(instance_id))),
             None => {
                 args.drop_with(self);
@@ -1143,6 +1315,56 @@ impl<'h> VM<'h> {
                 }
             }
         }
+    }
+
+    /// Binds `args` on a freshly allocated exception instance, as
+    /// `BaseException.__init__` does, and answers the instance.
+    ///
+    /// Keywords are refused with CPython's own wording: `BaseException` takes
+    /// none, and a class that wants them writes its own `__init__`.
+    fn bind_exception_args(&mut self, instance_id: HeapId, args: ArgValues) -> Result<CallResult, RunError> {
+        let class_id = match self.heap.get(instance_id) {
+            HeapData::Instance(inst) => inst.class(),
+            _ => unreachable!("freshly allocated instance"),
+        };
+        let name = class_name(class_id, self.heap, self.interns).into_owned();
+        let positional = match args.into_pos_only(&name, self.heap) {
+            Ok(positional) => positional,
+            Err(e) => {
+                Value::Ref(instance_id).drop_with(self);
+                return Err(e);
+            }
+        };
+        let positional: TupleVec = positional.collect();
+        let tuple = allocate_tuple(positional, self.heap);
+        let name = Value::InternString(self.interns.intern_static(StaticStrings::Args));
+        let HeapReadOutput::Instance(mut instance) = self.heap.read(instance_id) else {
+            unreachable!("freshly allocated instance")
+        };
+        let replaced = instance.set_attr_unchecked(name, tuple, self)?;
+        replaced.drop_with(self);
+        drop(instance);
+        Ok(CallResult::Value(Value::Ref(instance_id)))
+    }
+
+    /// Constructs an instance of a class that inherits `str`.
+    ///
+    /// The arguments build the characters exactly as `str(...)` does, error
+    /// messages included, and the result is re-allocated carrying the class:
+    /// an instance is a string that knows what it is an instance of, so every
+    /// string operation reads it as the string it is, and the class only adds
+    /// methods and type identity.
+    fn instantiate_str_class(&mut self, class_id: HeapId, args: ArgValues) -> RunResult<Value> {
+        let this = self;
+        let converted = Str::init(this, args)?;
+        defer_drop!(converted, this);
+        let Some(text) = converted.as_either_str(this.heap) else {
+            unreachable!("str() answers a string")
+        };
+        let text = text.as_str(this.interns).to_owned();
+        // The instance takes the reference, released by `Str::py_dec_ref_ids`.
+        this.heap.inc_ref(class_id);
+        Ok(allocate_class_string(text, class_id, this.heap))
     }
 
     /// Whether `value` is a plain Python function object (`def`, closure, or

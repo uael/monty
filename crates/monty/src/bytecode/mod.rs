@@ -23,7 +23,7 @@ pub use code::Code;
 pub use compiler::Compiler;
 #[cfg(test)]
 pub(crate) use op::opcode_fingerprint;
-pub(crate) use op::{NAME_CALLABLE, NAME_GLOBAL_ONLY, Opcode};
+pub(crate) use op::{MatchShape, NAME_CALLABLE, NAME_GLOBAL_ONLY, Opcode};
 pub(crate) use vm::{
     CallResult, ContainsVM, FrameNamespace, PendingLookupEffect, RecursionToken, RunReentryGuard, unpack_exact,
 };
@@ -32,8 +32,9 @@ pub use vm::{FrameExit, VM, VMSnapshot};
 /// Module-level dunder names Monty exposes with fixed values for CPython
 /// compatibility (e.g. so `if __name__ == '__main__':` works).
 ///
-/// Monty has no module object or `globals()` dict, so these are not real
-/// namespace entries: they are resolved on *read* when the global slot is
+/// Monty has no module object, and module globals are slots rather than a
+/// namespace dict, so these are not real namespace entries (`globals()` does
+/// not carry them): they are resolved on *read* when the global slot is
 /// `Undefined` (see `VM::module_dunder`, whose match must stay in sync with
 /// this list) and are read-only — assigning one at module or global scope is
 /// rejected at compile time with a `NotImplementedError` (see

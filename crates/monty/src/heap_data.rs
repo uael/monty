@@ -11,7 +11,7 @@ use monty_types::ExcType;
 
 use crate::{
     args::ArgValues,
-    asyncio::{Awaiter, Coroutine, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
+    asyncio::{Awaiter, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcTypeExt, RunError, RunResult, SimpleException},
@@ -63,6 +63,8 @@ macro_rules! heap_payloads {
             Range(inline $crate::types::Range),
             /// A slice object such as `slice(1, 10, 2)`.
             Slice(inline $crate::types::Slice),
+            /// A code object, what `compile()` answers and `eval()`/`exec()` take.
+            Code(boxed $crate::types::Code),
             /// An exception instance such as `ValueError('message')`.
             Exception(inline $crate::exception_private::SimpleException),
             /// A host-backed class instance (the heap form of the wire `ClassInstance`).
@@ -105,8 +107,9 @@ macro_rules! heap_payloads {
             LongInt(inline $crate::types::LongInt),
             /// A Python module and its attributes.
             Module(boxed $crate::types::Module),
-            /// A coroutine object from an async function call.
-            Coroutine(inline $crate::asyncio::Coroutine),
+            /// A generator or coroutine object: a function body frozen between
+            /// two `yield`s or two `await`s.
+            Generator(boxed $crate::types::generator::Generator),
             /// An `asyncio.gather()` result tracking multiple coroutines or tasks.
             GatherFuture(boxed $crate::asyncio::GatherFuture),
             /// An external future driven by the host.
@@ -148,6 +151,22 @@ macro_rules! heap_payloads {
             Union(inline $crate::types::Union),
             /// A `random.Random` generator instance.
             Random(boxed $crate::types::Random),
+            /// PEP 695 `typing.TypeAliasType`: the value of `type X = ...`.
+            TypeAliasType(inline $crate::types::TypeAliasType),
+            /// A `@property` on a user-defined class: the getter it binds.
+            ClassProperty(inline $crate::types::property::ClassProperty),
+            /// PEP 750 `string.templatelib.Template`: a `t"..."` literal's value.
+            Template(inline $crate::types::Template),
+            /// PEP 750 `string.templatelib.Interpolation`: one `{...}` field of a
+            /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
+            /// payload ceiling for a type nothing hot allocates.
+            Interpolation(boxed $crate::types::Interpolation),
+            /// The event loop `asyncio.get_running_loop()` hands back.
+            EventLoop(inline $crate::types::EventLoop),
+            /// A `contextvars.ContextVar` and the value it currently holds.
+            ContextVar(inline $crate::types::ContextVar),
+            /// The `contextvars.Token` a `ContextVar.set()` handed back.
+            ContextVarToken(inline $crate::types::ContextVarToken),
         }
     };
 }
@@ -220,18 +239,34 @@ impl HeapData {
             | Self::SetIterator(_)
             | Self::CallableIterator(_)
             | Self::Module(_)
-            | Self::Coroutine(_)
+            | Self::Generator(_)
             | Self::GatherFuture(_)
             | Self::ExternalFuture(_)
             | Self::Partial(_)
             | Self::GenericAlias(_)
-            | Self::Union(_) => true,
+            | Self::Union(_)
+            // An alias's memoized `__value__` can reach back to the alias itself,
+            // and a template holds arbitrary interpolated values.
+            | Self::TypeAliasType(_)
+            | Self::Template(_)
+            | Self::Interpolation(_)
+            // A context variable holds whatever was set in it, and its token
+            // holds the variable back.
+            | Self::EventLoop(_)
+            | Self::ContextVar(_)
+            | Self::ContextVarToken(_)
+            // A getter is a closure, which can capture the class it belongs to.
+            | Self::ClassProperty(_) => true,
+            // An instance of a class that inherits `str` holds that class, which
+            // can reach the instance again through a method default or a class
+            // variable; a plain string holds nothing and stays a leaf.
+            Self::Str(value) => value.class().is_some(),
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
-            Self::Str(_)
-            | Self::Bytes(_)
+            Self::Bytes(_)
             | Self::Range(_)
             | Self::Slice(_)
+            | Self::Code(_)
             | Self::Exception(_)
             | Self::DataclassParams(_)
             | Self::StringIterator(_)
@@ -252,13 +287,11 @@ impl HeapData {
         }
     }
 
-    /// Whether calling a `Ref` to this heap data would succeed at dispatch.
+    /// Whether calling a `Ref` to this heap data would dispatch.
     ///
-    /// A conservative subset of the types overriding [`PyTrait::py_call`]: it
-    /// is what `partial()` and friends screen a callable argument with, and it
-    /// has never admitted `HostClassType` or `NamedTupleClass`, both of which
-    /// dispatch perfectly well. Widening it changes what those builtins accept,
-    /// so it is not simply the list of `py_call` overrides.
+    /// Exactly the types overriding [`PyTrait::py_call`], so it is what
+    /// `callable()` answers and what `partial()` and friends screen a callable
+    /// argument with. A new callable type belongs here as well as there.
     #[must_use]
     pub(crate) fn is_callable(&self) -> bool {
         matches!(
@@ -270,6 +303,8 @@ impl HeapData {
                 | Self::ExtFunction(_)
                 | Self::Partial(_)
                 | Self::GenericAlias(_)
+                | Self::NamedTupleClass(_)
+                | Self::HostClassType(_)
         )
     }
 
@@ -290,6 +325,13 @@ impl HeapData {
             Self::Dict(_) => Type::Dict,
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
+            Self::TypeAliasType(_) => Type::TypeAliasType,
+            Self::EventLoop(_) => Type::EventLoop,
+            Self::ContextVar(_) => Type::ContextVar,
+            Self::ContextVarToken(_) => Type::ContextVarToken,
+            Self::ClassProperty(_) => Type::Property,
+            Self::Template(_) => Type::Template,
+            Self::Interpolation(_) => Type::Interpolation,
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::Union(_) => Type::Union,
             Self::DictKeysView(_) => Type::DictKeys,
@@ -301,6 +343,7 @@ impl HeapData {
             Self::Cell(_) => Type::Cell,
             Self::Range(_) => Type::Range,
             Self::Slice(_) => Type::Slice,
+            Self::Code(_) => Type::Code,
             Self::Exception(e) => Type::Exception(e.exc_type()),
             Self::HostClass(_) => Type::HostClass,
             Self::HostClassType(_) => Type::Type,
@@ -312,7 +355,8 @@ impl HeapData {
             Self::DataclassParams(_) => Type::DataclassParams,
             Self::LongInt(_) => Type::Int,
             Self::Module(_) => Type::Module,
-            Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::Generator(generator) => generator.py_type(),
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
             Self::RePattern(_) => Type::RePattern,
@@ -542,16 +586,6 @@ impl HeapItem for LongInt {
     }
 }
 
-impl HeapItem for Coroutine {
-    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
-        // Decrement ref count for namespace values that are heap references
-        for value in &mut self.namespace {
-            value.py_dec_ref_ids(stack);
-        }
-        stack.extend(self.globals);
-    }
-}
-
 impl HeapItem for GatherFuture {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         // Decrement ref count for items the gather owns (every entry in
@@ -617,6 +651,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::DictValueIterator($value) => $body,
             Self::SetIterator($value) => $body,
             Self::CallableIterator($value) => $body,
+            Self::Generator($value) => $body,
             Self::Itertools($value) => $body,
             Self::Partial($value) => $body,
             Self::Random($value) => $body,
@@ -633,6 +668,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::FrozenSet($value) => $body,
             Self::Range($value) => $body,
             Self::Slice($value) => $body,
+            Self::Code($value) => $body,
             Self::HostClass($value) => $body,
             Self::HostClassType($value) => $body,
             Self::Class($value) => $body,
@@ -653,12 +689,16 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Closure($value) => $body,
             Self::FunctionDefaults($value) => $body,
             Self::ExtFunction($value) => $body,
-            Self::Cell(_)
-            | Self::Exception(_)
-            | Self::Module(_)
-            | Self::Coroutine(_)
-            | Self::GatherFuture(_)
-            | Self::ExternalFuture(_) => $fallback,
+            Self::TypeAliasType($value) => $body,
+            Self::ClassProperty($value) => $body,
+            Self::Template($value) => $body,
+            Self::Interpolation($value) => $body,
+            Self::EventLoop($value) => $body,
+            Self::ContextVar($value) => $body,
+            Self::ContextVarToken($value) => $body,
+            Self::Cell(_) | Self::Exception(_) | Self::Module(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => {
+                $fallback
+            }
         }
     };
 }
@@ -704,7 +744,6 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(_)
                     | Self::Exception(_)
                     | Self::Module(_)
-                    | Self::Coroutine(_)
                     | Self::GatherFuture(_)
                     | Self::ExternalFuture(_) => Ok(true),
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
@@ -870,7 +909,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
         heap_read_output_py_trait_forward!(
             self,
             |value| value.py_enter(vm),
-            else { Err(ExcType::attribute_error(self.py_type_name(vm), "__enter__")) }
+            else Err(ExcType::attribute_error(self.py_type_name(vm), "__enter__"))
         )
     }
 
@@ -878,7 +917,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
         heap_read_output_py_trait_forward!(
             self,
             |value| value.py_exit(vm, exc),
-            else { Err(ExcType::attribute_error(self.py_type_name(vm), "__exit__")) }
+            else Err(ExcType::attribute_error(self.py_type_name(vm), "__exit__"))
         )
     }
 
@@ -891,7 +930,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(_) => Type::Cell,
                     Self::Exception(e) => e.py_type(vm),
                     Self::Module(_) => Type::Module,
-                    Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+                    Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+                    Self::Generator(_) => Type::Generator,
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
                 }
             }
@@ -911,7 +951,6 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(_)
                     | Self::Exception(_)
                     | Self::Module(_)
-                    | Self::Coroutine(_)
                     | Self::GatherFuture(_)
                     | Self::ExternalFuture(_) => Ok(None),
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
@@ -930,7 +969,6 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(value) => Ok(Some(identity_hash(value.id()))),
                     Self::Exception(_)
                     | Self::Module(_)
-                    | Self::Coroutine(_)
                     | Self::GatherFuture(_)
                     | Self::ExternalFuture(_) => Ok(None),
                     _ => unreachable!("py-trait variants handled by heap_read_output_py_trait_forward"),
@@ -948,11 +986,6 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
                     Self::Cell(cell) => Ok(write!(f, "<cell: {} object>", cell.get(vm.heap).0.py_type_name(vm))?),
                     Self::Exception(e) => Ok(e.get(vm.heap).py_repr_fmt(f)?),
                     Self::Module(m) => Ok(write!(f, "<module '{}'>", vm.interns.get_str(m.get(vm.heap).name()))?),
-                    Self::Coroutine(coro) => {
-                        let func = vm.interns.get_function(coro.get(vm.heap).func_id);
-                        let name = vm.interns.get_str(func.name.name_id);
-                        Ok(write!(f, "<coroutine object {name}>")?)
-                    }
                     Self::GatherFuture(gather) => Ok(write!(f, "<gather({})>", gather.get(vm.heap).item_count())?),
                     Self::ExternalFuture(fut) => Ok(write!(
                         f,
@@ -1026,7 +1059,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
         heap_read_output_py_trait_forward!(
             self,
             |value| value.py_getitem(key, vm),
-            else { Err(ExcType::type_error_not_sub(&self.py_type_name(vm))) }
+            else Err(ExcType::type_error_not_sub(&self.py_type_name(vm)))
         )
     }
 
@@ -1044,12 +1077,37 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
         )
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        heap_read_output_py_trait_forward!(
+            self,
+            |item| item.py_delitem(key, vm),
+            else {
+                key.drop_with(vm);
+                Err(ExcType::type_error_no_item_deletion(&self.py_type_name(vm)))
+            }
+        )
+    }
+
     fn py_set_attr(&mut self, name: &EitherStr, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         heap_read_output_py_trait_forward!(
             self,
             |item| item.py_set_attr(name, value, vm),
             else {
                 value.drop_with(vm);
+                let type_name = self.py_type_name(vm);
+                Err(ExcType::attribute_error_no_setattr(
+                    &type_name,
+                    name.as_str(vm.interns),
+                ))
+            }
+        )
+    }
+
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
+        heap_read_output_py_trait_forward!(
+            self,
+            |item| item.py_del_attr(name, vm),
+            else {
                 let type_name = self.py_type_name(vm);
                 Err(ExcType::attribute_error_no_setattr(
                     &type_name,
@@ -1075,6 +1133,14 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
 
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
         match self {
+            Self::Generator(value) => value.py_iter(vm),
+            Self::TypeAliasType(value) => value.py_iter(vm),
+            Self::ClassProperty(value) => value.py_iter(vm),
+            Self::Template(value) => value.py_iter(vm),
+            Self::Interpolation(value) => value.py_iter(vm),
+            Self::EventLoop(value) => value.py_iter(vm),
+            Self::ContextVar(value) => value.py_iter(vm),
+            Self::ContextVarToken(value) => value.py_iter(vm),
             Self::Str(value) => value.py_iter(vm),
             Self::Bytes(value) => value.py_iter(vm),
             Self::List(value) => value.py_iter(vm),
@@ -1101,6 +1167,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::FrozenSet(value) => value.py_iter(vm),
             Self::Range(value) => value.py_iter(vm),
             Self::Slice(value) => value.py_iter(vm),
+            Self::Code(value) => value.py_iter(vm),
             Self::HostClass(value) => value.py_iter(vm),
             Self::HostClassType(value) => value.py_iter(vm),
             Self::Class(value) => value.py_iter(vm),
@@ -1129,7 +1196,6 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             | Self::Exception(_)
             | Self::LongInt(_)
             | Self::Module(_)
-            | Self::Coroutine(_)
             | Self::GatherFuture(_)
             | Self::ExternalFuture(_) => Err(ExcType::type_error_not_iterable(&self.py_type_name(vm))),
         }
@@ -1140,6 +1206,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Str(value) => value.py_next(vm),
             Self::Bytes(value) => value.py_next(vm),
             Self::List(value) => value.py_next(vm),
+            Self::Generator(value) => value.py_next(vm),
             Self::ListIterator(value) => value.py_next(vm),
             Self::DequeIterator(value) => value.py_next(vm),
             Self::TupleIterator(value) => value.py_next(vm),
@@ -1162,6 +1229,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::FrozenSet(value) => value.py_next(vm),
             Self::Range(value) => value.py_next(vm),
             Self::Slice(value) => value.py_next(vm),
+            Self::Code(value) => value.py_next(vm),
             Self::HostClass(value) => value.py_next(vm),
             Self::HostClassType(value) => value.py_next(vm),
             Self::Class(value) => value.py_next(vm),

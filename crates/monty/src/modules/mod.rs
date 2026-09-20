@@ -13,10 +13,14 @@ use crate::{
     intern::StaticStrings,
 };
 
+pub(crate) mod ast;
 pub(crate) mod asyncio;
 pub(crate) mod base64;
 pub(crate) mod binascii;
+pub(crate) mod builtins_module;
 pub(crate) mod collections;
+pub(crate) mod collections_abc;
+pub(crate) mod contextvars;
 pub(crate) mod copy;
 pub(crate) mod dataclasses;
 pub(crate) mod datetime;
@@ -30,7 +34,9 @@ pub(crate) mod os;
 pub(crate) mod pathlib;
 pub(crate) mod random;
 pub(crate) mod re;
+pub(crate) mod string_templatelib;
 pub(crate) mod sys;
+pub(crate) mod table;
 pub(crate) mod time;
 pub(crate) mod typing;
 pub(crate) mod unicodedata;
@@ -44,6 +50,8 @@ pub(crate) enum StandardLib {
     Typing,
     /// The `asyncio` module providing async/await support (only `run()` and `gather()` implemented).
     Asyncio,
+    /// The `ast` module, which here is `PyCF_ALLOW_TOP_LEVEL_AWAIT` alone.
+    Ast,
     /// The `pathlib` module providing object-oriented filesystem paths.
     Pathlib,
     /// The `os` module providing operating system interface (only `getenv()` implemented).
@@ -78,9 +86,19 @@ pub(crate) enum StandardLib {
     Random,
     /// The `copy` module providing `copy()` and `deepcopy()`.
     Copy,
+    /// The `collections.abc` module exposing the abstract base classes as
+    /// annotation markers.
+    CollectionsAbc,
+    /// The `string.templatelib` module exposing the PEP 750 `Template` and
+    /// `Interpolation` type objects (no functions).
+    StringTemplatelib,
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
+    /// The `builtins` module: every name a bare identifier resolves to.
+    Builtins,
+    /// The `contextvars` module exposing `ContextVar` and its `Token`.
+    Contextvars,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -95,6 +113,7 @@ impl StandardLib {
             StaticStrings::Sys => Some(Self::Sys),
             StaticStrings::Typing => Some(Self::Typing),
             StaticStrings::Asyncio => Some(Self::Asyncio),
+            StaticStrings::Ast => Some(Self::Ast),
             StaticStrings::Pathlib => Some(Self::Pathlib),
             StaticStrings::Os => Some(Self::Os),
             StaticStrings::Math => Some(Self::Math),
@@ -110,7 +129,11 @@ impl StandardLib {
             StaticStrings::Binascii => Some(Self::Binascii),
             StaticStrings::Random => Some(Self::Random),
             StaticStrings::Copy => Some(Self::Copy),
+            StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
+            StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::Time => Some(Self::Time),
+            StaticStrings::Contextvars => Some(Self::Contextvars),
+            StaticStrings::Builtins => Some(Self::Builtins),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -124,6 +147,7 @@ impl StandardLib {
             Self::Sys => sys::create_module(vm),
             Self::Typing => typing::create_module(vm),
             Self::Asyncio => asyncio::create_module(vm),
+            Self::Ast => ast::create_module(vm),
             Self::Pathlib => pathlib::create_module(vm),
             Self::Os => os::create_module(vm),
             Self::Math => math::create_module(vm),
@@ -139,7 +163,11 @@ impl StandardLib {
             Self::Binascii => binascii::create_module(vm),
             Self::Random => random::create_module(vm),
             Self::Copy => copy::create_module(vm),
+            Self::CollectionsAbc => collections_abc::create_module(vm),
+            Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::Time => time::create_module(vm),
+            Self::Contextvars => contextvars::create_module(vm),
+            Self::Builtins => builtins_module::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

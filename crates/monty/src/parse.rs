@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, fmt, mem};
 
 use monty_types::{MontyException, StackFrame};
 use num_bigint::BigInt;
@@ -15,16 +15,18 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
+    builtins::Builtins,
     exception_private::{ExcType, ExcTypeExt, RunError, SimpleException},
     expressions::{
-        AssignTarget, Callable, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName, Literal,
-        Node, Operator, SequenceItem, UnpackTarget,
+        AssignTarget, Callable, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier,
+        ImportName, Literal, MatchCase, Node, Operator, Pattern, SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, ParsedFormatSpec, encode_format_spec},
     intern::{CompileInterns, StringId},
     source_map::{SourceMap, StackFrameExt},
     stringize::stringize_annotation,
-    types::long_int::INT_MAX_STR_DIGITS,
+    tstring::{ParsedTemplate, TemplateInterpolation},
+    types::{Type, long_int::INT_MAX_STR_DIGITS, str::StringRepr},
     value::EitherStr,
 };
 
@@ -128,7 +130,7 @@ impl ParsedSignature {
 /// Contains the function name, signature, and body as parsed AST nodes.
 /// During the prepare phase, this is transformed into `PreparedFunctionDef`
 /// with resolved names and scope information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawFunctionDef {
     /// The function name identifier (not yet resolved to a namespace index).
     pub name: Identifier,
@@ -370,11 +372,30 @@ impl<'a, 'i> Parser<'a, 'i> {
                 Some(value) => Some(self.parse_expression(*value)?),
                 None => None,
             })),
-            Stmt::Delete(d) => Err(ParseError::not_implemented(
-                "the 'del' statement",
-                self.convert_range(d.range),
-            )),
-            Stmt::TypeAlias(t) => Err(ParseError::not_implemented("type aliases", self.convert_range(t.range))),
+            Stmt::Delete(ast::StmtDelete { targets, .. }) => {
+                let mut parsed = Vec::with_capacity(targets.len());
+                for target in targets {
+                    self.parse_delete_targets(target, &mut parsed)?;
+                }
+                Ok(Node::Delete(parsed))
+            }
+            Stmt::TypeAlias(ast::StmtTypeAlias {
+                name,
+                type_params,
+                value,
+                ..
+            }) => {
+                // Type parameters are parsed for their syntax only; see
+                // `check_type_params`.
+                self.check_type_params(type_params.as_deref())?;
+                let name = self.parse_identifier(*name)?;
+                // PEP 695 defers the value until `__value__` is read, which is
+                // what lets an alias mention itself (`type Wire = ... list[Wire]`).
+                // A zero-arg function is exactly that deferral, and reuses the
+                // whole closure/scope pipeline.
+                let value = self.parse_thunk(name, *value)?;
+                Ok(Node::TypeAlias { name, value })
+            }
             Stmt::Assign(ast::StmtAssign {
                 mut targets,
                 value,
@@ -543,10 +564,7 @@ impl<'a, 'i> Parser<'a, 'i> {
                 self.depth_remaining += levels;
                 Ok(node)
             }
-            Stmt::Match(m) => Err(ParseError::not_implemented(
-                "pattern matching (match statements)",
-                self.convert_range(m.range),
-            )),
+            Stmt::Match(m) => self.parse_match(m),
             Stmt::Raise(ast::StmtRaise { exc, .. }) => {
                 // TODO add cause to Node::Raise
                 let expr = match exc {
@@ -810,22 +828,26 @@ impl<'a, 'i> Parser<'a, 'i> {
     /// recorded in `members`, in source order, for namespace assembly.
     ///
     /// `pass` and `...` are ignored; a leading docstring becomes a `__doc__`
-    /// member, and annotated names a stringized `__annotations__`. Class
-    /// decorators are supported (enclosing scope, applied bottom-up);
-    /// inheritance, function/method decorators, and anything else in the body
-    /// are rejected as not-implemented, reserving the syntax for later.
+    /// member, and annotated names a stringized `__annotations__`. Decorators
+    /// are supported on the class and on its methods (evaluated in the
+    /// enclosing scope and the class-body scope respectively, applied
+    /// bottom-up); inheritance and anything else in the body are rejected as
+    /// not-implemented, reserving the syntax for later.
     fn parse_class_def(&mut self, class: ast::StmtClassDef) -> Result<ParseNode, ParseError> {
         let position = self.class_keyword_range(&class);
         let decorators = self.parse_decorators(class.decorator_list)?;
-        // `class.arguments` carries base classes and metaclass keywords.
-        if class
-            .arguments
-            .is_some_and(|a| !a.args.is_empty() || !a.keywords.is_empty())
-        {
-            return Err(ParseError::not_implemented(
-                "class inheritance and metaclasses",
-                position,
-            ));
+        // `class.arguments` carries base classes and metaclass keywords. The
+        // bases are ordinary expressions of the enclosing scope, which is where
+        // CPython evaluates them; a keyword there is a metaclass, which Monty
+        // has no notion of.
+        let mut bases = Vec::new();
+        if let Some(arguments) = class.arguments {
+            if !arguments.keywords.is_empty() {
+                return Err(ParseError::not_implemented("metaclasses", position));
+            }
+            for base in arguments.args {
+                bases.push(self.parse_expression(base)?);
+            }
         }
 
         let name = self.identifier(&class.name.id, class.name.range);
@@ -850,26 +872,22 @@ impl<'a, 'i> Parser<'a, 'i> {
         for (i, stmt) in class.body.into_iter().enumerate() {
             match stmt {
                 Stmt::FunctionDef(function) => {
-                    if !function.decorator_list.is_empty() {
-                        return Err(ParseError::not_implemented(
-                            "method decorators (classmethod/staticmethod/property)",
-                            self.convert_range(function.range),
-                        ));
+                    // A decorator expression and a parameter default both evaluate
+                    // in the class-body scope, so a walrus target in either would
+                    // become a class member (see `reject_class_body_walrus`);
+                    // walrus in the method *body* binds in the method scope and is
+                    // fine.
+                    for decorator in &function.decorator_list {
+                        self.reject_class_body_walrus(&decorator.expression)?;
                     }
-                    // Parameter defaults evaluate in the class-body scope, so a
-                    // walrus target there would become a class member (see
-                    // `reject_class_body_walrus`); walrus in the method *body*
-                    // binds in the method scope and is fine.
                     for param in function.parameters.iter_non_variadic_params() {
                         if let Some(default) = &param.default {
                             self.reject_class_body_walrus(default)?;
                         }
                     }
                     let (method, decorators) = self.parse_function_def(function)?;
-                    // Rejected above, so a decorated method never reaches the
-                    // class namespace — where a decorator's return value, not a
-                    // function, would end up bound as the member.
-                    debug_assert!(decorators.is_empty(), "method decorators are rejected above");
+                    // The member is bound to whatever the decorators return, since
+                    // the namespace is assembled from the body's final local values.
                     members.push(method.name);
                     body.push(Node::FunctionDef {
                         def: method,
@@ -926,6 +944,21 @@ impl<'a, 'i> Parser<'a, 'i> {
                             self.convert_range(range),
                         ));
                     }
+                }
+                // `type X = ...` binds a `TypeAliasType` member, like a class var
+                // whose value is deferred.
+                Stmt::TypeAlias(ast::StmtTypeAlias {
+                    name,
+                    type_params,
+                    value,
+                    ..
+                }) => {
+                    self.check_type_params(type_params.as_deref())?;
+                    self.reject_class_body_walrus(&value)?;
+                    let alias = self.parse_identifier(*name)?;
+                    let value = self.parse_thunk(alias, *value)?;
+                    members.push(alias);
+                    body.push(Node::TypeAlias { name: alias, value });
                 }
                 // `pass` and `...` (the common `class C: ...` stub idiom) are
                 // no-ops. A leading string literal is the class docstring and
@@ -998,6 +1031,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             name,
             body,
             members,
+            bases,
             decorators,
             position,
         })
@@ -1193,6 +1227,99 @@ impl<'a, 'i> Parser<'a, 'i> {
             AstExpr::Starred(ast::ExprStarred { range, .. }) => Err(starred_root_target(self.convert_range(range))),
             other => Ok(AssignTarget::Name(self.parse_identifier(other)?)),
         }
+    }
+
+    /// Flattens one `del` target expression into [`DeleteTarget`]s.
+    ///
+    /// A parenthesized or bracketed list is equivalent to listing its members
+    /// (`del (a, b)` is `del a, b`), so those are flattened away here rather
+    /// than given a nested variant nothing would read.
+    fn parse_delete_targets(&mut self, target: AstExpr, out: &mut Vec<DeleteTarget>) -> Result<(), ParseError> {
+        self.decr_depth_remaining(|| target.range())?;
+        let result = match target {
+            AstExpr::Name(ast::ExprName { id, range, .. }) => {
+                out.push(DeleteTarget::Name(self.identifier(&id, range)));
+                Ok(())
+            }
+            AstExpr::Attribute(ast::ExprAttribute { value, attr, range, .. }) => {
+                let position = self.convert_range(range);
+                let object = self.parse_expression(*value)?;
+                out.push(DeleteTarget::Attr {
+                    object,
+                    attr: EitherStr::Interned(self.interner.intern(attr.id())),
+                    position,
+                });
+                Ok(())
+            }
+            AstExpr::Subscript(ast::ExprSubscript {
+                value, slice, range, ..
+            }) => {
+                let position = self.convert_range(range);
+                let object = self.parse_expression(*value)?;
+                let index = self.parse_expression(*slice)?;
+                out.push(DeleteTarget::Subscript {
+                    object,
+                    index,
+                    position,
+                });
+                Ok(())
+            }
+            AstExpr::Tuple(ast::ExprTuple { elts, .. }) | AstExpr::List(ast::ExprList { elts, .. }) => {
+                for elt in elts {
+                    self.parse_delete_targets(elt, out)?;
+                }
+                Ok(())
+            }
+            // CPython: `SyntaxError: cannot delete starred`.
+            AstExpr::Starred(s) => Err(ParseError::syntax("cannot delete starred", self.convert_range(s.range))),
+            other => Err(ParseError::syntax(
+                format!("cannot delete {}", describe_expr_kind(&other)),
+                self.convert_range(other.range()),
+            )),
+        };
+        self.depth_remaining += 1;
+        result
+    }
+
+    /// Wraps `value` in a synthetic zero-argument function whose body returns it.
+    ///
+    /// PEP 695 defers a type alias's right-hand side, and a function is exactly
+    /// that deferral: it reuses the scope, closure and call machinery instead of
+    /// inventing a second kind of suspended expression.
+    fn parse_thunk(&mut self, name: Identifier, value: AstExpr) -> Result<RawFunctionDef, ParseError> {
+        // The synthetic `return` adds a nesting level the source did not have.
+        self.decr_depth_remaining(|| value.range())?;
+        let result = self.parse_expression(value);
+        self.depth_remaining += 1;
+        let body = vec![Node::Return(Some(result?))];
+        Ok(RawFunctionDef {
+            name,
+            signature: ParsedSignature::default(),
+            body,
+            is_async: false,
+        })
+    }
+
+    /// Accepts PEP 695 type parameters (`def f[T]`, `class C[T]`, `type X[T] = ...`)
+    /// without giving them runtime meaning.
+    ///
+    /// Monty stringizes annotations (see `limitations/typing.md`), so a type
+    /// parameter is never *evaluated* in the position that motivates it. Binding
+    /// one would mean inventing a `TypeVar` object, so the names are dropped
+    /// instead and a body that reads one raises `NameError`. The bounds and
+    /// defaults are still walked for the nesting-depth budget, since nothing
+    /// else will look at them.
+    fn check_type_params(&mut self, type_params: Option<&ast::TypeParams>) -> Result<(), ParseError> {
+        for param in type_params.into_iter().flat_map(|p| p.iter()) {
+            let bound = match param {
+                ast::TypeParam::TypeVar(t) => t.bound.as_deref(),
+                ast::TypeParam::TypeVarTuple(_) | ast::TypeParam::ParamSpec(_) => None,
+            };
+            for expr in [bound, param.default()].into_iter().flatten() {
+                self.check_expression_depth(expr)?;
+            }
+        }
+        Ok(())
     }
 
     /// Parses an expression from the ruff AST into Monty's ExprLoc representation.
@@ -1441,32 +1568,25 @@ impl<'a, 'i> Parser<'a, 'i> {
             AstExpr::Generator(ast::ExprGenerator {
                 elt, generators, range, ..
             }) => {
-                // TODO: When proper generators are implemented, this should produce
-                // Expr::Generator instead of Expr::ListComp. Currently we treat generator
-                // expressions as list comprehensions since we don't have generator support.
-                let elt = Box::new(self.parse_expression(*elt)?);
+                let position = self.convert_range(range);
+                let elt = self.parse_expression(*elt)?;
                 let generators = self.parse_comprehension_generators(generators)?;
-                Ok(ExprLoc::new(
-                    self.convert_range(range),
-                    Expr::ListComp {
-                        elt,
-                        generators,
-                        captured_slots: Vec::new(),
-                    },
-                ))
+                self.parse_generator_expression(elt, generators, position, range)
             }
             AstExpr::Await(a) => {
                 let value = self.parse_expression(*a.value)?;
                 Ok(ExprLoc::new(self.convert_range(a.range), Expr::Await(Box::new(value))))
             }
-            AstExpr::Yield(y) => Err(ParseError::not_implemented(
-                "yield expressions",
-                self.convert_range(y.range),
-            )),
-            AstExpr::YieldFrom(y) => Err(ParseError::not_implemented(
-                "yield from expressions",
-                self.convert_range(y.range),
-            )),
+            AstExpr::Yield(y) => {
+                let range = self.convert_range(y.range);
+                let value = y.value.map(|v| self.parse_expression(*v)).transpose()?;
+                Ok(ExprLoc::new(range, Expr::Yield(value.map(Box::new))))
+            }
+            AstExpr::YieldFrom(y) => {
+                let range = self.convert_range(y.range);
+                let value = self.parse_expression(*y.value)?;
+                Ok(ExprLoc::new(range, Expr::YieldFrom(Box::new(value))))
+            }
             AstExpr::Compare(ast::ExprCompare {
                 left,
                 ops,
@@ -1551,10 +1671,7 @@ impl<'a, 'i> Parser<'a, 'i> {
                 }
             }
             AstExpr::FString(ast::ExprFString { value, range, .. }) => self.parse_fstring(&value, range),
-            AstExpr::TString(t) => Err(ParseError::not_implemented(
-                "template strings (t-strings)",
-                self.convert_range(t.range),
-            )),
+            AstExpr::TString(ast::ExprTString { value, range, .. }) => self.parse_tstring(&value, range),
             AstExpr::StringLiteral(ast::ExprStringLiteral { value, range, .. }) => {
                 let string_id = self.interner.intern(&value.to_string());
                 Ok(ExprLoc::new(
@@ -1925,6 +2042,188 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
     }
 
+    /// Parses a PEP 634 `match` statement.
+    ///
+    /// The subject binds to a hidden local named `<match>`, which no source
+    /// expression can name, so every case reads it back without keeping it on
+    /// the operand stack across a case body.
+    fn parse_match(&mut self, stmt: ast::StmtMatch) -> Result<ParseNode, ParseError> {
+        let position = self.convert_range(stmt.range);
+        let subject = self.parse_expression(*stmt.subject)?;
+        let slot = Identifier::new(self.interner.intern("<match>"), position);
+        let mut cases = Vec::with_capacity(stmt.cases.len());
+        let case_count = stmt.cases.len();
+        for (i, case) in stmt.cases.into_iter().enumerate() {
+            let case_position = self.convert_range(case.range);
+            let irrefutable = case.pattern.is_irrefutable();
+            let pattern = self.parse_pattern(case.pattern)?;
+            // CPython rejects a case that can never fail before the last one,
+            // naming the capture that swallowed the rest. A guard makes the
+            // case refutable again, so it is only unreachable without one.
+            if irrefutable && case.guard.is_none() && i + 1 < case_count {
+                let mut names = Vec::new();
+                collect_pattern_bindings(&pattern, &mut names);
+                let msg = match names.first() {
+                    Some(name) => format!(
+                        "name capture '{}' makes remaining patterns unreachable",
+                        self.interner.get_str(name.name_id)
+                    ),
+                    None => "wildcard makes remaining patterns unreachable".to_owned(),
+                };
+                return Err(ParseError::syntax(msg, case_position));
+            }
+            let guard = case.guard.map(|g| self.parse_expression(*g)).transpose()?;
+            let body = self.parse_statements(case.body)?;
+            cases.push(MatchCase { pattern, guard, body });
+        }
+        Ok(Node::Match {
+            subject,
+            slot,
+            cases,
+            position,
+        })
+    }
+
+    /// Parses one pattern, rejecting the shapes CPython rejects at compile time.
+    fn parse_pattern(&mut self, pattern: ast::Pattern) -> Result<Pattern, ParseError> {
+        let position = self.convert_range(pattern.range());
+        let parsed = match pattern {
+            ast::Pattern::MatchValue(v) => Pattern::Value(self.parse_expression(*v.value)?),
+            ast::Pattern::MatchSingleton(s) => Pattern::Singleton(match s.value {
+                ast::Singleton::None => Literal::None,
+                ast::Singleton::True => Literal::Bool(true),
+                ast::Singleton::False => Literal::Bool(false),
+            }),
+            ast::Pattern::MatchSequence(seq) => {
+                let mut items = Vec::with_capacity(seq.patterns.len());
+                let mut starred = false;
+                for item in seq.patterns {
+                    if matches!(item, ast::Pattern::MatchStar(_)) {
+                        if starred {
+                            return Err(ParseError::syntax(
+                                "multiple starred names in sequence pattern",
+                                position,
+                            ));
+                        }
+                        starred = true;
+                    }
+                    items.push(self.parse_pattern(item)?);
+                }
+                Pattern::Sequence(items)
+            }
+            ast::Pattern::MatchStar(star) => {
+                Pattern::Star(star.name.map(|n| self.identifier(&n.id, n.range)).filter(|n| {
+                    // `*_` binds nothing, exactly as a bare `_` does.
+                    self.interner.get_str(n.name_id) != "_"
+                }))
+            }
+            ast::Pattern::MatchMapping(map) => {
+                let mut keys = Vec::with_capacity(map.keys.len());
+                let mut seen: Vec<String> = Vec::with_capacity(map.keys.len());
+                for key in map.keys {
+                    let rendered = render_pattern_key(&key);
+                    if let Some(rendered) = rendered {
+                        if seen.contains(&rendered) {
+                            return Err(ParseError::syntax(
+                                format!("mapping pattern checks duplicate key ({rendered})"),
+                                position,
+                            ));
+                        }
+                        seen.push(rendered);
+                    }
+                    keys.push(self.parse_expression(key)?);
+                }
+                let patterns = map
+                    .patterns
+                    .into_iter()
+                    .map(|p| self.parse_pattern(p))
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                Pattern::Mapping {
+                    keys,
+                    patterns,
+                    rest: map.rest.map(|n| self.identifier(&n.id, n.range)),
+                }
+            }
+            ast::Pattern::MatchClass(class) => {
+                let cls = self.parse_expression(*class.cls)?;
+                let positional = class
+                    .arguments
+                    .patterns
+                    .into_iter()
+                    .map(|p| self.parse_pattern(p))
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                let mut keywords = Vec::with_capacity(class.arguments.keywords.len());
+                for keyword in class.arguments.keywords {
+                    let attr = self.identifier(&keyword.attr.id, keyword.attr.range);
+                    keywords.push((attr, self.parse_pattern(keyword.pattern)?));
+                }
+                Pattern::Class {
+                    cls,
+                    positional,
+                    keywords,
+                }
+            }
+            ast::Pattern::MatchAs(as_pattern) => {
+                let name = as_pattern
+                    .name
+                    .map(|n| self.identifier(&n.id, n.range))
+                    .filter(|n| self.interner.get_str(n.name_id) != "_");
+                match (as_pattern.pattern, name) {
+                    (None, None) => Pattern::Wildcard,
+                    (None, Some(name)) => Pattern::Capture(name),
+                    (Some(inner), None) => self.parse_pattern(*inner)?,
+                    (Some(inner), Some(name)) => Pattern::As {
+                        pattern: Box::new(self.parse_pattern(*inner)?),
+                        name,
+                    },
+                }
+            }
+            ast::Pattern::MatchOr(or) => {
+                let alternatives = or
+                    .patterns
+                    .into_iter()
+                    .map(|p| self.parse_pattern(p))
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                // Every alternative must bind the same names, since the code
+                // after the case reads them without knowing which one matched.
+                let mut expected: Option<Vec<StringId>> = None;
+                for alternative in &alternatives {
+                    let mut names = Vec::new();
+                    collect_pattern_bindings(alternative, &mut names);
+                    let mut ids: Vec<StringId> = names.iter().map(|n| n.name_id).collect();
+                    ids.sort_by_key(|id| id.index());
+                    match &expected {
+                        None => expected = Some(ids),
+                        Some(first) if *first == ids => {}
+                        Some(_) => {
+                            return Err(ParseError::syntax(
+                                "alternative patterns bind different names",
+                                position,
+                            ));
+                        }
+                    }
+                }
+                Pattern::Or(alternatives)
+            }
+        };
+        // One name may not be bound twice by one pattern: the second binding
+        // would silently overwrite the first.
+        let mut names = Vec::new();
+        collect_pattern_bindings(&parsed, &mut names);
+        for (i, name) in names.iter().enumerate() {
+            if names[..i].iter().any(|earlier| earlier.name_id == name.name_id) {
+                return Err(ParseError::syntax(
+                    format!(
+                        "multiple assignments to name '{}' in pattern",
+                        self.interner.get_str(name.name_id)
+                    ),
+                    position,
+                ));
+            }
+        }
+        Ok(parsed)
+    }
+
     fn identifier(&mut self, id: &Name, range: TextRange) -> Identifier {
         let string_id = self.interner.intern(id);
         Identifier::new(string_id, self.convert_range(range))
@@ -1979,6 +2278,98 @@ impl<'a, 'i> Parser<'a, 'i> {
             .collect()
     }
 
+    /// Writes a generator expression out as a call of an implicit generator
+    /// function, which is what makes it lazy.
+    ///
+    /// The loops and the filters become `for` and `if` statements around a
+    /// `yield` of the element, innermost last, and the outermost iterable
+    /// leaves the body: it is read where the expression is written, as CPython
+    /// reads it, and its iterator arrives as the one parameter. So
+    /// `(x for x in y if c)` becomes `<genexpr>(iter(y))` of
+    /// `def <genexpr>(.0): for x in .0: if c: yield x`.
+    ///
+    /// `.0` is the name CPython gives that parameter. No Python name can be
+    /// spelled that way, so it can collide with nothing in the body.
+    ///
+    /// Each `for` and each `if` is one more level of the tree, so each one is
+    /// charged to the same depth budget that bounds nesting written out in the
+    /// source. Without that, a flat line of clauses would build a tree deeper
+    /// than [`MAX_NESTING_DEPTH`] and overflow the host stack in the phases
+    /// that walk it. The budget is given back on success, so a later sibling
+    /// pays nothing for this one.
+    fn parse_generator_expression(
+        &mut self,
+        elt: ExprLoc,
+        mut generators: Vec<Comprehension>,
+        position: CodeRange,
+        range: TextRange,
+    ) -> Result<ExprLoc, ParseError> {
+        let mut levels: u16 = 0;
+        for comp in &generators {
+            for _ in 0..=comp.ifs.len() {
+                self.decr_depth_remaining(|| range)?;
+                levels += 1;
+            }
+        }
+
+        let name_id = self.interner.intern("<genexpr>");
+        let param_id = self.interner.intern(".0");
+        let first = generators
+            .first_mut()
+            .expect("ruff gives a generator expression at least one generator");
+        let outer = mem::replace(
+            &mut first.iter,
+            ExprLoc::new(position, Expr::Name(Identifier::new(param_id, position))),
+        );
+
+        let mut body = vec![Node::Expr(ExprLoc::new(elt.position, Expr::Yield(Some(Box::new(elt)))))];
+        for comp in generators.into_iter().rev() {
+            for cond in comp.ifs.into_iter().rev() {
+                body = vec![Node::If {
+                    test: cond,
+                    body,
+                    or_else: Vec::new(),
+                }];
+            }
+            body = vec![Node::For {
+                target: comp.target,
+                iter: comp.iter,
+                body,
+                or_else: Vec::new(),
+            }];
+        }
+
+        let signature = ParsedSignature {
+            args: vec![ParsedParam {
+                name: param_id,
+                default: None,
+            }],
+            ..ParsedSignature::default()
+        };
+        let iterator = ExprLoc::new(
+            outer.position,
+            Expr::Call {
+                callable: Callable::Builtin(Builtins::Type(Type::Iterator)),
+                args: Box::new(ArgExprs::One(outer)),
+            },
+        );
+        self.depth_remaining += levels;
+        Ok(ExprLoc::new(
+            position,
+            Expr::IndirectCall {
+                callable: Box::new(ExprLoc::new(
+                    position,
+                    Expr::GenExprRaw {
+                        name_id,
+                        signature,
+                        body,
+                    },
+                )),
+                args: Box::new(ArgExprs::One(iterator)),
+            },
+        ))
+    }
+
     /// Parses an f-string value into expression parts.
     ///
     /// F-strings in ruff AST are represented as `FStringValue` containing
@@ -2018,6 +2409,112 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
 
         Ok(ExprLoc::new(self.convert_range(range), Expr::FString(parts)))
+    }
+
+    /// Parses a t-string (PEP 750) into an [`Expr::TString`].
+    ///
+    /// Unlike an f-string nothing is joined: the literal segments and the
+    /// replacement fields stay separate, because a `Template` hands both to its
+    /// consumer. The two vectors are normalized here so `strings` is always one
+    /// longer than `interpolations`, empty segments included, which is the shape
+    /// CPython guarantees.
+    fn parse_tstring(&mut self, value: &ast::TStringValue, range: TextRange) -> Result<ExprLoc, ParseError> {
+        // Field-relative borrow of the source, so interning (which needs
+        // `&mut self.interner`) can happen while a source slice is live.
+        let code = self.code;
+        let mut segments: Vec<String> = vec![String::new()];
+        let mut interpolations = Vec::new();
+
+        for element in value.elements() {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    segments
+                        .last_mut()
+                        .expect("one segment exists before any field")
+                        .push_str(&lit.value);
+                }
+                InterpolatedStringElement::Interpolation(interp) => {
+                    // `t"{x=}"` puts `x=` in the *literal* text, not in the
+                    // interpolation, and makes `repr` the default conversion
+                    // unless the field carries a conversion or a format spec.
+                    let mut conversion = convert_conversion_flag(interp.conversion);
+                    if let Some(debug_text) = &interp.debug_text {
+                        let segment = segments.last_mut().expect("one segment exists before any field");
+                        segment.push_str(debug_text.leading());
+                        segment.push_str(&code[interp.expression.range()]);
+                        segment.push_str(debug_text.trailing());
+                        if matches!(conversion, ConversionFlag::None) && interp.format_spec.is_none() {
+                            conversion = ConversionFlag::Repr;
+                        }
+                    }
+                    // CPython reports the source from just past the `{` to the
+                    // end of the expression, so leading whitespace survives
+                    // (`t"{ x }".interpolations[0].expression == " x"`) while
+                    // trailing whitespace does not.
+                    let open_brace: usize = interp.range().start().into();
+                    let expr_start = if code.as_bytes().get(open_brace) == Some(&b'{') {
+                        open_brace + 1
+                    } else {
+                        open_brace
+                    };
+                    let expr_end: usize = interp.expression.range().end().into();
+                    let expression = self.interner.intern(&code[expr_start..expr_end]);
+                    let format_spec = match &interp.format_spec {
+                        Some(spec) => self.parse_tstring_format_spec(spec)?,
+                        None => Vec::new(),
+                    };
+                    let expr = Box::new(self.parse_expression((*interp.expression).clone())?);
+                    interpolations.push(TemplateInterpolation {
+                        expr,
+                        expression,
+                        conversion,
+                        format_spec,
+                    });
+                    segments.push(String::new());
+                }
+            }
+        }
+
+        let strings = segments.iter().map(|s| self.interner.intern(s)).collect();
+        Ok(ExprLoc::new(
+            self.convert_range(range),
+            Expr::TString(Box::new(ParsedTemplate {
+                strings,
+                interpolations,
+            })),
+        ))
+    }
+
+    /// Parses a t-string field's format spec into parts concatenated at runtime.
+    ///
+    /// A t-string never *applies* a spec, it reports the rendered text, so the
+    /// spec is neither parsed nor bit-packed the way
+    /// [`parse_format_spec`](Self::parse_format_spec) does for an f-string: a
+    /// static spec stays verbatim and a nested field (`t"{x:>{w}}"`) is
+    /// formatted with `str()` and concatenated, matching CPython.
+    fn parse_tstring_format_spec(
+        &mut self,
+        spec: &ast::InterpolatedStringFormatSpec,
+    ) -> Result<Vec<FStringPart>, ParseError> {
+        let mut parts = Vec::with_capacity(spec.elements.len());
+        for element in &spec.elements {
+            match element {
+                InterpolatedStringElement::Literal(lit) => {
+                    parts.push(FStringPart::Literal(self.interner.intern(&lit.value)));
+                }
+                InterpolatedStringElement::Interpolation(nested) => {
+                    parts.push(FStringPart::Interpolation {
+                        expr: Box::new(self.parse_expression((*nested.expression).clone())?),
+                        conversion: convert_conversion_flag(nested.conversion),
+                        // Python forbids a spec inside a spec, and `=` there is
+                        // not a debug field.
+                        format_spec: None,
+                        debug_prefix: None,
+                    });
+                }
+            }
+        }
+        Ok(parts)
     }
 
     /// Parses a single f-string element (literal or interpolation).
@@ -2581,5 +3078,68 @@ fn parse_int_literal(s: &str, position: CodeRange) -> Result<BigInt, ParseError>
         cleaned
             .parse::<BigInt>()
             .map_err(|e| ParseError::syntax(format!("invalid integer literal {s:?}, error: {e}"), position))
+    }
+}
+
+/// Collects every name a pattern binds, in the order the pattern binds them.
+///
+/// Used for the three compile-time checks CPython makes: an irrefutable case
+/// before the last one, a name bound twice by one pattern, and alternatives
+/// that bind different names. An `Or` reports only its first alternative's
+/// names, because the check that every alternative agrees runs first.
+fn collect_pattern_bindings(pattern: &Pattern, names: &mut Vec<Identifier>) {
+    match pattern {
+        Pattern::Wildcard | Pattern::Value(_) | Pattern::Singleton(_) => {}
+        Pattern::Capture(name) => names.push(*name),
+        Pattern::Star(name) => names.extend(name.iter().copied()),
+        Pattern::Sequence(items) => {
+            for item in items {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        Pattern::Mapping { patterns, rest, .. } => {
+            for item in patterns {
+                collect_pattern_bindings(item, names);
+            }
+            names.extend(rest.iter().copied());
+        }
+        Pattern::Class {
+            positional, keywords, ..
+        } => {
+            for item in positional {
+                collect_pattern_bindings(item, names);
+            }
+            for (_, item) in keywords {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        Pattern::Or(alternatives) => {
+            if let Some(first) = alternatives.first() {
+                collect_pattern_bindings(first, names);
+            }
+        }
+        Pattern::As { pattern, name } => {
+            collect_pattern_bindings(pattern, names);
+            names.push(*name);
+        }
+    }
+}
+
+/// Renders a mapping-pattern key for the duplicate-key check, or `None` for a
+/// key that is not a literal (a dotted name, whose value is only known at
+/// runtime, so CPython does not check it either).
+fn render_pattern_key(key: &AstExpr) -> Option<String> {
+    match key {
+        AstExpr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => Some(i.to_string()),
+            ast::Number::Float(f) => Some(f.to_string()),
+            // A complex key is rare enough that letting it through only costs
+            // the duplicate check, which is a diagnostic rather than a rule.
+            ast::Number::Complex { .. } => None,
+        },
+        AstExpr::StringLiteral(s) => Some(StringRepr(s.value.to_str()).to_string()),
+        AstExpr::NoneLiteral(_) => Some("None".to_owned()),
+        AstExpr::BooleanLiteral(b) => Some(if b.value { "True".to_owned() } else { "False".to_owned() }),
+        _ => None,
     }
 }

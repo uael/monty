@@ -487,10 +487,9 @@ pub(crate) trait PyTrait<'h>: PyObjectIdentity {
     /// over from there), and anything needing the host is the matching
     /// suspension.
     ///
-    /// Overriding this is what makes a type callable.
-    /// [`HeapData::is_callable`](crate::heap::HeapData::is_callable) is a
-    /// deliberate subset of the overrides, so a new one need not be added
-    /// there — but everything listed there must override this.
+    /// Overriding this is what makes a type callable, so a new override must
+    /// also join [`HeapData::is_callable`](crate::heap::HeapData::is_callable),
+    /// which is what `callable()` reports.
     ///
     /// A callable that dispatches onward holds its `HeapRead`, and so an active
     /// reader count, for the whole nested call. That is sound only because every
@@ -631,6 +630,15 @@ pub(crate) trait PyTrait<'h>: PyObjectIdentity {
         .into())
     }
 
+    /// Python subscript delete (`__delitem__`), e.g. `del d[key]`.
+    ///
+    /// Consumes `key` on both success and error, like
+    /// [`py_setitem`](PyTrait::py_setitem). The default rejects deletion.
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        key.drop_with(vm);
+        Err(ExcType::type_error_no_item_deletion(&self.py_type_name(vm)))
+    }
+
     /// Python attribute assignment, consuming `value` on both success and error.
     ///
     /// The default rejects assignment. Mutable attribute-bearing types override
@@ -638,6 +646,18 @@ pub(crate) trait PyTrait<'h>: PyObjectIdentity {
     fn py_set_attr(&mut self, name: &EitherStr, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         value.drop_with(vm);
         let type_name = self.py_type_name(vm);
+        Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
+    }
+
+    /// Python attribute deletion (`__delattr__`), e.g. `del obj.attr`.
+    ///
+    /// The default rejects deletion, which is right for every builtin type here:
+    /// their attributes are computed, not stored. It reports the same
+    /// "no `__dict__`" wording as assignment because CPython does: a type
+    /// without an instance dict can neither bind nor unbind an attribute.
+    /// Types with a real `__dict__` override it.
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
+        let type_name = self.py_type_name(vm).into_owned();
         Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
     }
 

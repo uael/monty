@@ -33,6 +33,7 @@ use crate::{
         Class, DataclassOptions, Dict, Instance, LazyHeapSet, Module, PyTrait,
         host_class::{host_class_type, write_dataclass_repr},
         instance::{class_defines, class_dunder, class_name, instance_attr},
+        tuple::{TupleVec, allocate_tuple},
     },
     value::Value,
 };
@@ -45,6 +46,8 @@ pub(crate) enum DataclassesFunctions {
     Dataclass,
     /// `is_dataclass(obj)` — true for a dataclass class or instance.
     IsDataclass,
+    /// `fields(obj)` — the `Field`s of a dataclass class or instance, in order.
+    Fields,
     /// The decorator `@dataclass(...)` returns while it waits for the class,
     /// carrying the bound options so `d = dataclass(frozen=True)` then `@d`
     /// works. Named for the user-visible decorator, not the variant.
@@ -66,6 +69,11 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         vm,
     );
     module.set_attr(
+        StaticStrings::Fields,
+        Value::ModuleFunction(ModuleFunctions::Dataclasses(DataclassesFunctions::Fields)),
+        vm,
+    );
+    module.set_attr(
         StaticStrings::FrozenInstanceError,
         Value::Builtin(Builtins::ExcType(ExcType::FrozenInstanceError)),
         vm,
@@ -78,6 +86,7 @@ pub(super) fn call(vm: &mut VM<'_>, func: DataclassesFunctions, args: ArgValues)
     match func {
         DataclassesFunctions::Dataclass => dataclass_decorator(vm, args),
         DataclassesFunctions::IsDataclass => is_dataclass(vm, args),
+        DataclassesFunctions::Fields => fields(vm, args),
         // The options are already bound; this call supplies the class.
         DataclassesFunctions::Configured(options) => {
             let ConfiguredArgs { cls } = ConfiguredArgs::from_args(args, vm)?;
@@ -239,6 +248,7 @@ fn apply_dataclass(vm: &mut VM<'_>, cls: Value, options: DataclassOptions) -> Ru
     // can still fail; a class left with fields alone reads back as a default one.
     store_dataclass_fields(&mut class, fields, vm)?;
     store_dataclass_params(&mut class, options, vm)?;
+    store_match_args(&mut class, *class_id, vm)?;
     // Last, so the options a class acts on are only ever those of a decoration
     // that ran to completion.
     class.set_dataclass_options(options, vm);
@@ -319,6 +329,27 @@ fn store_dataclass_params<'h>(
     let params = vm.heap.allocate_as(DataclassParams::new(options)).into_value();
     let name = Value::InternString(vm.interns.intern_static(StaticStrings::DataclassParams));
     let replaced = class.set_attr(name, params, vm)?;
+    replaced.drop_with(vm);
+    Ok(())
+}
+
+/// Writes `__match_args__`, the field names a positional class pattern binds,
+/// unless the class body wrote one of its own.
+///
+/// The fields are the ones the constructor takes positionally, which here is
+/// all of them: `init` and `kw_only` are both refused away from their defaults.
+fn store_match_args<'h>(class: &mut HeapRead<'h, Class>, class_id: HeapId, vm: &mut VM<'h>) -> RunResult<()> {
+    if class_defines(class_id, "__match_args__", vm) {
+        return Ok(());
+    }
+    let names: TupleVec = dataclass_fields(class_id, vm)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Value::InternString)
+        .collect();
+    let match_args = allocate_tuple(names, vm.heap);
+    let name = Value::InternString(vm.interns.intern_static(StaticStrings::DunderMatchArgs));
+    let replaced = class.set_attr(name, match_args, vm)?;
     replaced.drop_with(vm);
     Ok(())
 }
@@ -908,4 +939,32 @@ fn is_dataclass(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     };
     arg.drop_with(vm);
     Ok(Value::Bool(result))
+}
+
+/// `dataclasses.fields(obj)`: the `Field` objects of a dataclass class or one
+/// of its instances, as a tuple in definition order.
+///
+/// A class that is not a dataclass raises CPython's own `TypeError`, and so
+/// does a host-backed class: those carry dataclass-ness as a flag rather than
+/// a `__dataclass_fields__` mapping, so there are no `Field` objects to hand
+/// back (see `limitations/dataclasses.md`).
+fn fields(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    let arg = args.get_one_arg("fields", vm.heap)?;
+    defer_drop!(arg, vm);
+    let class_id = match arg {
+        Value::Ref(id) => match vm.heap.get(*id) {
+            HeapData::Class(_) => Some(*id),
+            HeapData::Instance(instance) => Some(instance.class()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(fields_id) = class_id.and_then(|id| class_fields_dict_id(id, vm)) else {
+        return Err(ExcType::type_error("must be called with a dataclass type or instance"));
+    };
+    let HeapData::Dict(dict) = vm.heap.get(fields_id) else {
+        unreachable!("class_fields_dict_id only answers for a dict");
+    };
+    let items: TupleVec = dict.iter().map(|(_, value)| value.clone_with_heap(vm.heap)).collect();
+    Ok(allocate_tuple(items, vm.heap))
 }

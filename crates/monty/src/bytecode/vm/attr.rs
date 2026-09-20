@@ -106,4 +106,15 @@ impl VM<'_> {
         // py_set_attr takes ownership of value and drops it on error
         obj.py_set_attr(&EitherStr::Interned(name_id), value, this)
     }
+
+    /// Removes the named attribute from the object on top of the stack
+    /// (`del obj.attr`).
+    pub(super) fn delete_attr(&mut self, name_id: StringId) -> Result<(), RunError> {
+        let this = self;
+
+        let obj = this.pop();
+        defer_drop!(obj, this);
+
+        obj.py_del_attr(&EitherStr::Interned(name_id), this)
+    }
 }

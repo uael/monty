@@ -18,7 +18,7 @@ use crate::{
     resource_checks::{check_repeat_size, check_value_buffer_growth},
     sorting::parse_and_sort,
     types::{
-        LazyHeapSet, Type,
+        LazyHeapSet, Type, collect_iterable,
         long_int::repeat_count,
         slice::{normalize_sequence_index, slice_collect_iterator, value_to_i64_bound},
     },
@@ -126,6 +126,28 @@ impl List {
     }
 }
 
+/// The positions a slice selects, in walk order.
+///
+/// `start`, `stop` and `step` come from [`Slice::indices`], which clamps them
+/// to the sequence, so every position produced is a valid index and the walk
+/// terminates.
+fn extended_slice_positions(start: i64, stop: i64, step: i64) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut index = start;
+    if step > 0 {
+        while index < stop {
+            positions.push(usize::try_from(index).expect("indices() keeps a forward walk non-negative"));
+            index += step;
+        }
+    } else {
+        while index > stop {
+            positions.push(usize::try_from(index).expect("indices() keeps a backward walk non-negative"));
+            index += step;
+        }
+    }
+    positions
+}
+
 impl<'h> HeapRead<'h, List> {
     /// Appends an element to the end of the list.
     ///
@@ -224,6 +246,81 @@ impl<'h> HeapRead<'h, List> {
         })?;
         let heap_id = vm.heap.allocate(HeapData::List(List::new(items)));
         Ok(Value::Ref(heap_id))
+    }
+
+    /// Replaces every item a slice selects (`lst[1:3] = xs`, `lst[::2] = xs`).
+    ///
+    /// The right-hand side is collected first, so `lst[:] = lst` and
+    /// `lst[:] = (x for x in lst)` both read the list as it was. A contiguous
+    /// slice splices, taking any number of items; an extended slice replaces
+    /// position by position and so demands exactly as many, which is the one
+    /// case CPython reports as a `ValueError` rather than growing the list.
+    fn setitem_slice(&mut self, slice: &super::Slice, value: &Value, vm: &mut VM<'h>) -> RunResult<()> {
+        if !value.py_is_iterable(vm) {
+            return Err(ExcType::type_error("must assign iterable to extended slice"));
+        }
+        let items = collect_iterable(value, vm)?;
+        defer_drop!(items, vm);
+        let len = self.get(vm.heap).items.len();
+        let (start, stop, step) = slice.indices(len)?;
+        let contains_refs = items.iter().any(|item| matches!(item, Value::Ref(_)));
+        let mut replacement = Vec::with_capacity(items.len());
+        for item in items {
+            replacement.push(item.clone_with_heap(vm.heap));
+        }
+        let mut replacement = DropGuard::new(replacement, vm);
+        let (replacement, vm) = replacement.as_parts_mut();
+        if step == 1 {
+            let stop = usize::try_from(stop.max(start)).expect("clamped to start, which is non-negative");
+            let start = usize::try_from(start).expect("indices() keeps a step-1 walk non-negative");
+            vm.heap
+                .tracker
+                .check_allocation(replacement.len().saturating_mul(VALUE_SIZE))?;
+            let removed: Vec<Value> = self
+                .get_mut(vm.heap)
+                .items
+                .splice(start..stop, replacement.drain(..))
+                .collect();
+            removed.drop_with(vm);
+        } else {
+            let positions = extended_slice_positions(start, stop, step);
+            if positions.len() != replacement.len() {
+                return Err(ExcType::value_error(format!(
+                    "attempt to assign sequence of size {} to extended slice of size {}",
+                    replacement.len(),
+                    positions.len()
+                )));
+            }
+            for (index, item) in positions.into_iter().zip(replacement.drain(..)) {
+                let old = mem::replace(&mut self.get_mut(vm.heap).items[index], item);
+                old.drop_with(vm);
+            }
+        }
+        if contains_refs {
+            self.get_mut(vm.heap).contains_refs = true;
+        }
+        Ok(())
+    }
+
+    /// Removes every item a slice selects (`del lst[1:3]`, `del lst[::2]`).
+    ///
+    /// The selected positions are removed back to front, so each removal leaves
+    /// the positions still to go where they were. An empty selection is a no-op,
+    /// as it is in CPython.
+    fn delitem_slice(&mut self, slice: &super::Slice, vm: &mut VM<'h>) -> RunResult<()> {
+        let len = self.get(vm.heap).items.len();
+        let (start, stop, step) = slice.indices(len)?;
+        // Descending, so `Vec::remove` never shifts a position still to come.
+        let mut doomed = extended_slice_positions(start, stop, step);
+        if step > 0 {
+            doomed.reverse();
+        }
+        for (count, idx) in doomed.into_iter().enumerate() {
+            vm.heap.tracker.check_time_every(count)?;
+            let removed = self.get_mut(vm.heap).items.remove(idx);
+            removed.drop_with(vm);
+        }
+        Ok(())
     }
 
     /// Clones the item at the given index with proper refcount management.
@@ -471,9 +568,38 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, List> {
         Ok(self.get(vm.heap).items[idx].clone_with_heap(vm))
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        if let Value::Ref(id) = key
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
+        {
+            let slice = slice.clone();
+            return self.delitem_slice(&slice, vm);
+        }
+        let index = key.as_index(vm, Type::List)?;
+        let len = i64::try_from(self.get(vm.heap).len()).expect("list length exceeds i64::MAX");
+        let normalized_index = if index < 0 { index + len } else { index };
+        if normalized_index < 0 || normalized_index >= len {
+            return Err(ExcType::list_assignment_index_error());
+        }
+        let idx = usize::try_from(normalized_index).expect("index validated non-negative");
+        // `contains_refs` stays set: it is a conservative "may contain" flag, and
+        // clearing it would need a full rescan of the remaining items.
+        let removed = self.get_mut(vm.heap).items.remove(idx);
+        removed.drop_with(vm);
+        Ok(())
+    }
+
     fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         defer_drop!(key, vm);
         defer_drop_mut!(value, vm);
+
+        if let Value::Ref(id) = key
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
+        {
+            let slice = slice.clone();
+            return self.setitem_slice(&slice, value, vm);
+        }
 
         // Extract integer index, accepting Int, Bool (True=1, False=0), and LongInt.
         // Note: The LongInt-to-i64 conversion is defensive code. In normal execution,

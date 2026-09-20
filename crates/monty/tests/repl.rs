@@ -804,6 +804,9 @@ async def main():
 
     let progress = call.resume_pending(PrintWriter::Stdout).unwrap();
     let loaded = round_trip_progress(&progress);
+    // The dumped original is finished with, and a suspended progress that is
+    // dropped rather than given up holds every heap reference in its snapshot.
+    drop(progress.into_repl());
     let state = loaded.into_resolve_futures().expect("expected resolve futures");
     assert_eq!(state.pending_call_ids(), &[call_id]);
 
@@ -2098,7 +2101,7 @@ fn repl_rejected_snippet_locations() {
     for source in [
         "\n\nfrom . import missing",
         "\n\nfrom math import *",
-        "\n\ndel missing",
+        "\n\n1 + 2j",
         "\n\n__name__ = 'changed'",
     ] {
         let error = feed_run_print(&mut repl, &format!("exec({source:?})")).unwrap_err();

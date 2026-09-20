@@ -21,14 +21,19 @@ ALLOWED_FUNCTIONS = {
     'all',
     'any',
     'bin',
+    'callable',
     'chr',
+    # Not yet regenerated into the vendored stub: see limitations/builtins.md.
+    'compile',
     'divmod',
     'eval',
     'exec',
+    'globals',
     'hash',
     'hex',
     'id',
     'isinstance',
+    'issubclass',
     'iter',
     'len',
     'locals',
@@ -159,6 +164,7 @@ base64: 3.0-
 binascii: 3.0-
 builtins: 3.0-
 collections: 3.0-
+contextvars: 3.7-
 copy: 3.0-
 dataclasses: 3.7-
 datetime: 3.0-

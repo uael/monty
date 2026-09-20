@@ -16,15 +16,19 @@ use super::{
     RESERVED_MODULE_DUNDERS,
     builder::{CodeBuilder, JumpLabel, JumpTarget, Offset},
     code::{Code, HandlerKind},
-    op::{FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, NAME_CALLABLE, NAME_GLOBAL_ONLY, Opcode, assert_flags},
+    op::{
+        FORMAT_VALUE_HAS_SPEC, FORMAT_VALUE_STATIC_SPEC, MatchShape, NAME_CALLABLE, NAME_GLOBAL_ONLY, Opcode,
+        assert_flags,
+    },
 };
 use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
     builtins::{Builtins, BuiltinsFunctions},
     exception_private::{ExcType, RunError, SimpleException},
     expressions::{
-        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier,
-        Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
+        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc,
+        Identifier, Literal, MatchCase, NameScope, Node, Operator, Pattern, PreparedFunctionDef, PreparedNode,
+        SequenceItem, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
@@ -34,6 +38,8 @@ use crate::{
     parse::{CodeRange, ExceptHandler, Try, syntax_error_in_snippet},
     run::CompileOptions,
     source_map::{SourceMap, StackFrameExt},
+    tstring::ParsedTemplate,
+    types::Type,
     value::{EitherStr, Value},
 };
 
@@ -122,6 +128,19 @@ fn check_comp_generators(count: usize, position: CodeRange) -> Result<(), Compil
         ))
     } else {
         Ok(())
+    }
+}
+
+/// The single-character `str` CPython stores in `Interpolation.conversion`,
+/// or `None` when the field carries no `!` conversion.
+///
+/// A t-string never applies the conversion; it reports which one was written.
+fn conversion_char(conversion: ConversionFlag) -> Option<u8> {
+    match conversion {
+        ConversionFlag::None => None,
+        ConversionFlag::Str => Some(b's'),
+        ConversionFlag::Repr => Some(b'r'),
+        ConversionFlag::Ascii => Some(b'a'),
     }
 }
 
@@ -302,7 +321,15 @@ struct ScopeFlags {
     /// Rejects `await` at snippet top level and in its class bodies.
     /// Nested function bodies reset this restriction.
     forbid_await: bool,
+    /// Why `yield` cannot appear in the body being compiled, or `None` where it
+    /// can. A message rather than a flag because the reasons differ: outside a
+    /// function it is CPython's own syntax error, while in an `async def` it is
+    /// a body Monty does not compile yet.
+    yield_refusal: Option<&'static str>,
 }
+
+/// CPython's message for a `yield` that is not inside a function.
+const YIELD_OUTSIDE_FUNCTION: &str = "'yield' outside function";
 
 /// Jump targets needed to compile `break` and `continue`.
 struct LoopInfo {
@@ -535,7 +562,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         globals: &NameMap,
         options: CompileOptions,
     ) -> Result<Code, CompileError> {
-        Self::compile_module_inner(nodes, interns, globals, options, None)
+        Self::compile_module_inner(nodes, interns, globals, options, None, false)
     }
 
     /// Compiles a prepared `eval()` / `exec()` snippet, rejecting top-level await.
@@ -547,17 +574,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
         globals: &NameMap,
         options: CompileOptions,
         globals_by_name: bool,
+        top_level_await: bool,
     ) -> Result<Code, CompileError> {
-        Self::compile_module_inner(nodes, interns, globals, options, Some(globals_by_name))
+        Self::compile_module_inner(nodes, interns, globals, options, Some(globals_by_name), top_level_await)
     }
 
-    /// Shared module compiler; `snippet` is `Some(globals_by_name)` for eval/exec.
+    /// Shared module compiler; `snippet` is `Some(globals_by_name)` for
+    /// eval/exec, and `top_level_await` is what
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` lets one of those do.
     fn compile_module_inner(
         nodes: &[PreparedNode],
         interns: &mut CompileInterns<'_>,
         globals: &NameMap,
         options: CompileOptions,
         snippet: Option<bool>,
+        top_level_await: bool,
     ) -> Result<Code, CompileError> {
         check_namespace_size_u16(globals.len(), "module")?;
         // Module frames have `locals_count = 0` at runtime (globals live in
@@ -566,7 +597,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
         let flags = ScopeFlags {
             assert_message_annotations: options.assert_message_annotations.enabled(),
             globals_by_name: snippet.unwrap_or(false),
-            forbid_await: snippet.is_some(),
+            forbid_await: snippet.is_some() && !top_level_await,
+            yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
         };
         let mut compiler = Compiler::new(interns, true, 0, flags);
 
@@ -598,6 +630,11 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // the locals region into the operand-stack region.
         let flags = ScopeFlags {
             forbid_await: false,
+            // An `async def` that yields is an async generator, which needs the
+            // `__aiter__` / `__anext__` protocol rather than this one.
+            yield_refusal: func_def
+                .is_async
+                .then_some("'yield' inside an async function is not supported"),
             ..flags
         };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
@@ -661,6 +698,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
             } => {
                 self.compile_expr(object)?;
                 self.emit_unpack_store(targets, *targets_position)?;
+            }
+            Node::Delete(targets) => {
+                for target in targets {
+                    self.compile_delete_target(target)?;
+                }
+            }
+            Node::TypeAlias { name, value } => {
+                // The value stays unevaluated inside the alias: PEP 695 defers it
+                // to the first `__value__` read, which is what lets an alias name
+                // itself.
+                self.emit_make_function(value, "type alias value")?;
+                let name_idx = check_name_index_u16(name.name_id, name.position)?;
+                self.code.set_location(name.position, None);
+                self.code.emit_u16(Opcode::MakeTypeAlias, name_idx)?;
+                self.compile_store(name)?;
             }
             Node::OpAssign { target, op, value } => {
                 let Some(opcode) = operator_to_inplace_opcode(op) else {
@@ -757,6 +809,12 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.compile_assign_target(last)?;
             }
             Node::If { test, body, or_else } => self.compile_if(test, body, or_else)?,
+            Node::Match {
+                subject,
+                slot,
+                cases,
+                position,
+            } => self.compile_match(subject, slot, cases, *position)?,
             Node::For {
                 target,
                 iter,
@@ -778,9 +836,10 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 name,
                 body,
                 members,
+                bases,
                 decorators,
                 position,
-            } => self.compile_class_def(name, body, members, decorators, *position)?,
+            } => self.compile_class_def(name, body, members, bases, decorators, *position)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
             Node::With {
                 context, target, body, ..
@@ -801,6 +860,318 @@ impl<'a, 'i> Compiler<'a, 'i> {
             Node::Pass | Node::Global { .. } | Node::Nonlocal { .. } => {}
         }
         Ok(())
+    }
+
+    /// Compiles a PEP 634 `match` statement.
+    ///
+    /// The subject is evaluated once into its hidden local; each case then
+    /// loads it back, runs its pattern, and — if the pattern matched and the
+    /// guard passed — runs its body and jumps past the rest. Nothing of the
+    /// match is left on the operand stack when a body runs, so a `return` or
+    /// `break` out of one needs no unwinding.
+    fn compile_match(
+        &mut self,
+        subject: &ExprLoc,
+        slot: &Identifier,
+        cases: &'a [MatchCase<PreparedFunctionDef>],
+        position: CodeRange,
+    ) -> Result<(), CompileError> {
+        self.compile_expr(subject)?;
+        self.code.set_location(position, None);
+        self.compile_store(slot)?;
+        let mut done = Vec::with_capacity(cases.len());
+        for case in cases {
+            self.compile_name(slot)?;
+            let mut failed = self.compile_pattern(&case.pattern)?;
+            if let Some(guard) = &case.guard {
+                self.compile_expr(guard)?;
+                failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+            }
+            self.compile_block(&case.body)?;
+            done.push(self.code.emit_jump(Opcode::Jump)?);
+            for label in failed {
+                self.code.patch_jump(label)?;
+            }
+        }
+        for label in done {
+            self.code.patch_jump(label)?;
+        }
+        Ok(())
+    }
+
+    /// Compiles one pattern.
+    ///
+    /// Contract, held by every arm and relied on by the recursive ones: the
+    /// value to match is on top of the stack on entry, and is popped on *both*
+    /// exits — falling through on a match, or jumping to one of the returned
+    /// labels on a failure. That is what lets a sub-pattern be compiled with no
+    /// knowledge of what is underneath it on the stack.
+    fn compile_pattern(&mut self, pattern: &Pattern) -> Result<Vec<JumpLabel>, CompileError> {
+        // The wildcard tests nothing, so it needs neither the failure epilogue
+        // nor a jump out of it.
+        if matches!(pattern, Pattern::Wildcard) {
+            self.code.emit(Opcode::Pop)?;
+            return Ok(Vec::new());
+        }
+        let failed = self.compile_pattern_tests(pattern)?;
+        // Matched: drop the subject and step over the failure epilogue.
+        self.code.emit(Opcode::Pop)?;
+        let matched = self.code.emit_jump(Opcode::Jump)?;
+        for label in failed {
+            self.code.patch_jump(label)?;
+        }
+        // Failed: drop the subject too, so both exits leave the same stack.
+        self.code.emit(Opcode::Pop)?;
+        let out = self.code.emit_jump(Opcode::Jump)?;
+        self.code.patch_jump(matched)?;
+        Ok(vec![out])
+    }
+
+    /// The tests one pattern makes, with the subject on the stack throughout.
+    ///
+    /// Returns the labels a failure jumps to; the caller's epilogue pops the
+    /// subject behind them. Never emits the pop itself, which is what keeps the
+    /// two exits of [`compile_pattern`](Self::compile_pattern) symmetric.
+    fn compile_pattern_tests(&mut self, pattern: &Pattern) -> Result<Vec<JumpLabel>, CompileError> {
+        match pattern {
+            // Handled by `compile_pattern`, which never calls in for one.
+            Pattern::Wildcard => Ok(Vec::new()),
+            Pattern::Capture(name) => {
+                self.code.emit(Opcode::Dup)?;
+                self.compile_store(name)?;
+                Ok(Vec::new())
+            }
+            Pattern::Singleton(literal) => {
+                self.code.emit(Opcode::Dup)?;
+                self.compile_literal(literal)?;
+                // `is`, not `==`: `case True` must not match `1`.
+                self.code.emit(Opcode::CompareIs)?;
+                Ok(vec![self.code.emit_jump(Opcode::JumpIfFalse)?])
+            }
+            Pattern::Value(expr) => {
+                self.code.emit(Opcode::Dup)?;
+                self.compile_expr(expr)?;
+                self.code.emit(Opcode::CompareEq)?;
+                Ok(vec![self.code.emit_jump(Opcode::JumpIfFalse)?])
+            }
+            Pattern::Sequence(items) => self.compile_sequence_pattern(items),
+            // Only ever reached through `Pattern::Sequence`, which handles the
+            // slicing a star needs.
+            Pattern::Star(_) => Err(CompileError::new(
+                "a starred pattern outside a sequence pattern",
+                CodeRange::default(),
+            )),
+            Pattern::Mapping { keys, patterns, rest } => self.compile_mapping_pattern(keys, patterns, rest.as_ref()),
+            Pattern::Class {
+                cls,
+                positional,
+                keywords,
+            } => self.compile_class_pattern(cls, positional, keywords),
+            Pattern::Or(alternatives) => self.compile_or_pattern(alternatives),
+            Pattern::As { pattern, name } => {
+                self.code.emit(Opcode::Dup)?;
+                let failed = self.compile_pattern(pattern)?;
+                self.code.emit(Opcode::Dup)?;
+                self.compile_store(name)?;
+                Ok(failed)
+            }
+        }
+    }
+
+    /// `[a, *rest, b]`: a sequence of the right length, element by element.
+    ///
+    /// Elements before the star index from the front and elements after it from
+    /// the back, so the star can absorb any number in between; the star's own
+    /// slice becomes a `list`, as CPython's does whatever the subject was.
+    fn compile_sequence_pattern(&mut self, items: &[Pattern]) -> Result<Vec<JumpLabel>, CompileError> {
+        let star = items.iter().position(|item| matches!(item, Pattern::Star(_)));
+        let mut failed = Vec::new();
+        // Every `MatchShape` reads the subject without consuming it, so none of
+        // them needs a `Dup` in front.
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::IsSequence as u8)?;
+        failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::Len as u8)?;
+        let required = i64::try_from(if star.is_some() { items.len() - 1 } else { items.len() })
+            .map_err(|_| CompileError::new("sequence pattern is too long", CodeRange::default()))?;
+        let bound = self.code.add_const(Value::Int(required))?;
+        self.code.emit_u16(Opcode::LoadConst, bound)?;
+        self.code.emit(if star.is_some() {
+            Opcode::CompareGe
+        } else {
+            Opcode::CompareEq
+        })?;
+        failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+        let after = star.map_or(0, |at| items.len() - at - 1);
+        for (i, item) in items.iter().enumerate() {
+            if let (Some(at), Pattern::Star(name)) = (star, item) {
+                if let Some(name) = name {
+                    self.code.emit(Opcode::Dup)?;
+                    // Copied to a list *before* slicing, for two reasons: the
+                    // star binds a list whatever the subject was (a tuple or
+                    // range slice would keep its own type), and not every
+                    // sequence Monty accepts here can be sliced at all.
+                    self.code
+                        .emit_call_builtin_type(Type::List.callable_to_u8().expect("list is callable"), 1)?;
+                    self.emit_int_const(i64::try_from(at).unwrap_or(i64::MAX))?;
+                    if after == 0 {
+                        self.code.emit(Opcode::LoadNone)?;
+                    } else {
+                        self.emit_int_const(-i64::try_from(after).unwrap_or(i64::MAX))?;
+                    }
+                    self.code.emit(Opcode::LoadNone)?;
+                    self.code.emit(Opcode::BuildSlice)?;
+                    self.code.emit(Opcode::BinarySubscr)?;
+                    self.compile_store(name)?;
+                }
+            } else {
+                let index = match star {
+                    Some(at) if i > at => -i64::try_from(items.len() - i).unwrap_or(i64::MAX),
+                    _ => i64::try_from(i).unwrap_or(i64::MAX),
+                };
+                self.code.emit(Opcode::Dup)?;
+                self.emit_int_const(index)?;
+                self.code.emit(Opcode::BinarySubscr)?;
+                failed.extend(self.compile_pattern(item)?);
+            }
+        }
+        Ok(failed)
+    }
+
+    /// `{k: p, **rest}`: a mapping holding every key, whose values match.
+    fn compile_mapping_pattern(
+        &mut self,
+        keys: &[ExprLoc],
+        patterns: &[Pattern],
+        rest: Option<&Identifier>,
+    ) -> Result<Vec<JumpLabel>, CompileError> {
+        let mut failed = Vec::new();
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::IsMapping as u8)?;
+        failed.push(self.code.emit_jump(Opcode::JumpIfFalse)?);
+        let key_count = check_collection_size_u16(keys.len(), CodeRange::default())?;
+        // The key tuple is built twice when `**rest` needs one of its own: the
+        // key expressions are literals or dotted names, so evaluating them
+        // again is the cheaper of the two ways to keep the stack shallow.
+        if let Some(rest) = rest {
+            for key in keys {
+                self.compile_expr(key)?;
+            }
+            self.code.emit_u16(Opcode::BuildTuple, key_count)?;
+            self.code.emit_u8(Opcode::MatchShape, MatchShape::Rest as u8)?;
+            self.compile_store(rest)?;
+        }
+        for key in keys {
+            self.compile_expr(key)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, key_count)?;
+        self.code.emit_u8(Opcode::MatchShape, MatchShape::Keys as u8)?;
+        // A missing key answers `None` rather than raising, which is the match
+        // failing; the values tuple has to come off the stack either way.
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit(Opcode::CompareIs)?;
+        let missing = self.code.emit_jump(Opcode::JumpIfTrue)?;
+        // Every failure from here on happens with the values tuple still on
+        // the stack, so they share one epilogue that drops it before joining
+        // the pattern's own failures.
+        let mut with_values = vec![missing];
+        for (i, pattern) in patterns.iter().enumerate() {
+            self.code.emit(Opcode::Dup)?;
+            self.emit_int_const(i64::try_from(i).unwrap_or(i64::MAX))?;
+            self.code.emit(Opcode::BinarySubscr)?;
+            with_values.extend(self.compile_pattern(pattern)?);
+        }
+        self.code.emit(Opcode::Pop)?;
+        let matched = self.code.emit_jump(Opcode::Jump)?;
+        for label in with_values {
+            self.code.patch_jump(label)?;
+        }
+        self.code.emit(Opcode::Pop)?;
+        failed.push(self.code.emit_jump(Opcode::Jump)?);
+        self.code.patch_jump(matched)?;
+        Ok(failed)
+    }
+
+    /// `C(p, attr=q)`: an instance of `C` whose named attributes match.
+    fn compile_class_pattern(
+        &mut self,
+        cls: &ExprLoc,
+        positional: &[Pattern],
+        keywords: &[(Identifier, Pattern)],
+    ) -> Result<Vec<JumpLabel>, CompileError> {
+        let mut failed = Vec::new();
+        self.code.emit(Opcode::Dup)?;
+        self.compile_expr(cls)?;
+        for (attr, _) in keywords {
+            let name = self.code.add_const(Value::InternString(attr.name_id))?;
+            self.code.emit_u16(Opcode::LoadConst, name)?;
+        }
+        let keyword_count = check_collection_size_u16(keywords.len(), cls.position)?;
+        self.code.emit_u16(Opcode::BuildTuple, keyword_count)?;
+        let positional_count = check_collection_size_u16(positional.len(), cls.position)?;
+        self.code.set_location(cls.position, None);
+        self.code.emit_u16(Opcode::MatchClass, positional_count)?;
+        self.code.emit(Opcode::Dup)?;
+        self.code.emit(Opcode::LoadNone)?;
+        self.code.emit(Opcode::CompareIs)?;
+        let no_match = self.code.emit_jump(Opcode::JumpIfTrue)?;
+        // Every failure from here on happens with the attribute tuple still on
+        // the stack, so they share one epilogue that drops it.
+        let mut with_attrs = vec![no_match];
+        // The attribute tuple is in sub-pattern order: positional first, then
+        // the keywords in source order, which is how `MatchClass` builds it.
+        for (i, pattern) in positional.iter().chain(keywords.iter().map(|(_, p)| p)).enumerate() {
+            self.code.emit(Opcode::Dup)?;
+            self.emit_int_const(i64::try_from(i).unwrap_or(i64::MAX))?;
+            self.code.emit(Opcode::BinarySubscr)?;
+            with_attrs.extend(self.compile_pattern(pattern)?);
+        }
+        self.code.emit(Opcode::Pop)?;
+        let matched = self.code.emit_jump(Opcode::Jump)?;
+        for label in with_attrs {
+            self.code.patch_jump(label)?;
+        }
+        self.code.emit(Opcode::Pop)?;
+        failed.push(self.code.emit_jump(Opcode::Jump)?);
+        self.code.patch_jump(matched)?;
+        Ok(failed)
+    }
+
+    /// `p | q`: the first alternative that matches wins.
+    ///
+    /// Each alternative but the last works on a copy of the subject, so a
+    /// failure leaves the original for the next one to try.
+    fn compile_or_pattern(&mut self, alternatives: &[Pattern]) -> Result<Vec<JumpLabel>, CompileError> {
+        let Some((last, rest)) = alternatives.split_last() else {
+            return Err(CompileError::new(
+                "an alternative pattern with no alternatives",
+                CodeRange::default(),
+            ));
+        };
+        let mut matched = Vec::with_capacity(rest.len());
+        for alternative in rest {
+            self.code.emit(Opcode::Dup)?;
+            let failed = self.compile_pattern(alternative)?;
+            matched.push(self.code.emit_jump(Opcode::Jump)?);
+            for label in failed {
+                self.code.patch_jump(label)?;
+            }
+        }
+        // The last alternative works on the subject itself, so its failure is
+        // the whole pattern's; its success has already popped the subject, and
+        // the earlier alternatives' has not, which the epilogue below evens out.
+        self.code.emit(Opcode::Dup)?;
+        let failed = self.compile_pattern(last)?;
+        for label in matched {
+            self.code.patch_jump(label)?;
+        }
+        Ok(failed)
+    }
+
+    /// Pushes an integer constant, for the indices and slice bounds a pattern
+    /// computes at compile time.
+    fn emit_int_const(&mut self, value: i64) -> Result<(), CompileError> {
+        let index = self.code.add_const(Value::Int(value))?;
+        self.code.emit_u16(Opcode::LoadConst, index)
     }
 
     /// Compiles a function definition.
@@ -965,6 +1336,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         name: &Identifier,
         body: &PreparedFunctionDef,
         members: &[Identifier],
+        bases: &[ExprLoc],
         decorators: &[ExprLoc],
         position: CodeRange,
     ) -> Result<(), CompileError> {
@@ -973,14 +1345,27 @@ impl<'a, 'i> Compiler<'a, 'i> {
         for decorator in decorators {
             self.compile_expr(decorator)?;
         }
+        // `type(name, bases, namespace)`: the name and the bases tuple are
+        // pushed here, in the enclosing scope, because that is where CPython
+        // evaluates a base expression. Evaluating one in the class body would
+        // let a base name collide with a member of the same name.
+        let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
+        self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
+        for base in bases {
+            self.compile_expr(base)?;
+        }
+        let base_count = check_collection_size_u16(bases.len(), position)?;
+        self.code.emit_u16(Opcode::BuildTuple, base_count)?;
         // Build the class-body function/closure value on the stack...
-        self.emit_make_class_body(body, members, name, position)?;
-        // ...call it with zero args — it runs the body and returns the `Class`.
-        // Record the class statement as the call site so a traceback from inside
-        // the class body attributes this frame to the `class` statement (like
-        // CPython) rather than falling back to `CodeRange::default()`.
+        self.emit_make_class_body(body, members, position)?;
+        // ...call it with zero args — it runs the body and returns the namespace
+        // dict. Record the class statement as the call site so a traceback from
+        // inside the class body attributes this frame to the `class` statement
+        // (like CPython) rather than falling back to `CodeRange::default()`.
         self.code.set_location(position, None);
         self.code.emit_u8(Opcode::CallFunction, 0)?;
+        // ...and the 3-arg `type()` builtin turns the three into the class.
+        self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         // Each call consumes the callable below the current value: `deco(value)`.
         // Reversed so the bottom-most (last pushed) applies first, and located at
         // its own decorator so a traceback pins the one that raised, like CPython.
@@ -1004,30 +1389,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
         &mut self,
         body: &PreparedFunctionDef,
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
     ) -> Result<(), CompileError> {
         let flags = self.flags;
         self.emit_make_callable(body, "class body", |interns, namespace_size| {
-            Self::compile_class_body(
-                &body.body,
-                members,
-                class_name,
-                position,
-                interns,
-                namespace_size,
-                flags,
-            )
+            Self::compile_class_body(&body.body, members, position, interns, namespace_size, flags)
         })
     }
 
     /// Compiles a class body, mirroring
     /// [`compile_function_body`](Self::compile_function_body) but replacing the
-    /// implicit `LoadNone; ReturnValue` tail with a `type(name, (), {...})`
-    /// call: push the class name and an empty bases tuple, then for each
+    /// implicit `LoadNone; ReturnValue` tail with the namespace dict: for each
     /// member (in source order) push `LoadConst <name>` and the member's value
-    /// from its class-body slot, build the namespace dict, and call the 3-arg
-    /// `type()` builtin (which builds the `Class`), then `ReturnValue`.
+    /// from its class-body slot, build the dict, and return it. The caller
+    /// passes it to the 3-arg `type()` builtin along with the class name and
+    /// the bases, both of which belong to the enclosing scope.
     ///
     /// Members are plain locals (the prepare phase forces class-body locals to
     /// never be cells — see `prepare_class_def`), so [`compile_name`](Self::compile_name)
@@ -1036,12 +1412,15 @@ impl<'a, 'i> Compiler<'a, 'i> {
     fn compile_class_body(
         body: &[PreparedNode],
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
         interns: &mut CompileInterns<'_>,
         num_locals: u16,
         flags: ScopeFlags,
     ) -> Result<Code, CompileError> {
+        let flags = ScopeFlags {
+            yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
+            ..flags
+        };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
         compiler.compile_block(body)?;
 
@@ -1049,12 +1428,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // should point at the class statement, not the last member's line.
         compiler.code.set_location(position, None);
 
-        // type(name, (), {members...}): push the name and empty bases tuple...
-        let class_name_const = compiler.code.add_const(Value::InternString(class_name.name_id))?;
-        compiler.code.emit_u16(Opcode::LoadConst, class_name_const)?;
-        compiler.code.emit_u16(Opcode::BuildTuple, 0)?;
-
-        // ...then the namespace dict: (name, value) for each member in order.
+        // The namespace dict: (name, value) for each member in source order.
+        // The caller turns it into the class, because the name and the bases
+        // belong to the enclosing scope.
         for member in members {
             let name_const = compiler.code.add_const(Value::InternString(member.name_id))?;
             compiler.code.emit_u16(Opcode::LoadConst, name_const)?;
@@ -1062,11 +1438,6 @@ impl<'a, 'i> Compiler<'a, 'i> {
         }
         let member_count = check_collection_size_u16(members.len(), position)?;
         compiler.code.emit_u16(Opcode::BuildDict, member_count)?;
-
-        // ...and call the 3-arg type() builtin, which builds the class object.
-        compiler
-            .code
-            .emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         compiler.code.emit(Opcode::ReturnValue)?;
 
         Ok(compiler.code.build())
@@ -1075,6 +1446,20 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// Compiles an import, resolving the module only when execution reaches it.
     fn compile_import(&mut self, module_name: StringId, binding: &Identifier) -> Result<(), CompileError> {
         let position = binding.position;
+        // A dotted module with no `as` alias would bind a name containing a dot,
+        // which no expression can ever read, where CPython binds the top-level
+        // package. Monty has no package objects, so reject it and point at the
+        // forms that do work. See `limitations/modules.md`.
+        if binding.name_id == module_name && self.interns.get_str(module_name).contains('.') {
+            let dotted = self.interns.get_str(module_name).to_owned();
+            return Err(CompileError::not_implemented(
+                format!(
+                    "importing a submodule without an alias; use `import {dotted} as <name>` \
+                     or `from {dotted} import <name>`"
+                ),
+                position,
+            ));
+        }
         self.code.set_location(position, None);
         self.code
             .emit_u16(Opcode::LoadModule, check_name_index_u16(module_name, position)?)?;
@@ -1338,6 +1723,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let part_count = self.compile_fstring_parts(parts)?;
                 self.code.emit_u16(Opcode::BuildFString, part_count)?;
             }
+            Expr::TString(template) => self.compile_tstring(template, expr_loc.position)?,
 
             Expr::ListComp {
                 elt,
@@ -1372,17 +1758,88 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 // LambdaRaw should be converted to Lambda during prepare phase
                 unreachable!("Expr::LambdaRaw should not exist after prepare phase")
             }
+            Expr::GenExprRaw { .. } => {
+                // GenExprRaw should be converted to Lambda during prepare phase
+                unreachable!("Expr::GenExprRaw should not exist after prepare phase")
+            }
+
+            Expr::YieldFrom(value) => {
+                if let Some(refusal) = self.flags.yield_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
+                }
+                // The delegation loop, which is one `Send` step per turn:
+                //
+                //   <value>; GetIter     receiver
+                //   LoadNone             receiver, None: the first send
+                // start:
+                //   Send -> done         receiver, yielded  (or jumps to done)
+                //   Yield                receiver, sent-in
+                //   Jump start
+                // done:                  what the receiver returned
+                //
+                // The receiver stays beneath the value being passed either way,
+                // so `Yield` hands out what the inner one yielded and leaves
+                // what was sent in exactly where the next `Send` wants it.
+                self.compile_expr(value)?;
+                self.code.set_location(expr_loc.position, None);
+                // A generator is its own iterator, so this passes one straight
+                // through and calls `iter()` on anything else.
+                self.code.mark_generator();
+                self.code.emit(Opcode::GetIter)?;
+                self.code.emit(Opcode::LoadNone)?;
+                let start = self.code.current_jump_target();
+                let done = self.code.emit_jump(Opcode::Send)?;
+                self.code.emit(Opcode::Yield)?;
+                self.code.emit_jump_to(Opcode::Jump, start)?;
+                self.code.patch_jump(done)?;
+            }
+
+            Expr::Yield(value) => {
+                if let Some(refusal) = self.flags.yield_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
+                }
+                // `yield` with no value yields `None`, so the instruction always
+                // has exactly one operand to take.
+                match value {
+                    Some(value) => self.compile_expr(value)?,
+                    None => self.code.emit(Opcode::LoadNone)?,
+                }
+                self.code.set_location(expr_loc.position, None);
+                self.code.mark_generator();
+                self.code.emit(Opcode::Yield)?;
+            }
 
             Expr::Await(value) => {
                 if self.flags.forbid_await {
                     return Err(CompileError::new("'await' outside function", expr_loc.position));
                 }
-                // Await expressions: compile the inner expression, then emit Await
-                // Await handles ExternalFuture, Coroutine, and GatherFuture
+                // The same delegation loop `yield from` compiles to, which is
+                // how CPython compiles an `await` too:
+                //
+                //   <value>; Await       receiver
+                //   LoadNone             receiver, None: the first send
+                // start:
+                //   Send -> done         receiver, yielded  (or jumps to done)
+                //   Yield                receiver, sent-in
+                //   Jump start
+                // done:                  what the receiver settled on
+                //
+                // `Await` leaves what drives the wait: a coroutine, a future,
+                // or what the object's own `__await__` handed back. `Send`
+                // steps it, and the `Yield` between the two is reached only by
+                // a `__await__` that yields, which is how a word of a model
+                // says an act to whoever drives its frame.
                 self.compile_expr(value)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
+                self.code.mark_coroutine();
                 self.code.emit(Opcode::Await)?;
+                self.code.emit(Opcode::LoadNone)?;
+                let start = self.code.current_jump_target();
+                let done = self.code.emit_jump(Opcode::Send)?;
+                self.code.emit(Opcode::Yield)?;
+                self.code.emit_jump_to(Opcode::Jump, start)?;
+                self.code.patch_jump(done)?;
             }
 
             Expr::Slice { lower, upper, step } => {
@@ -3478,6 +3935,47 @@ impl<'a, 'i> Compiler<'a, 'i> {
         Ok(())
     }
 
+    /// Compiles a t-string into a `Template`.
+    ///
+    /// Nothing is joined: the literal segments become one tuple, and each
+    /// replacement field becomes an `Interpolation` holding its value and the
+    /// three pieces of metadata a consumer inspects. Only the *format spec* is
+    /// rendered here, because CPython stores its text after substituting any
+    /// nested field (`t"{x:>{w}}"` records `">5"`).
+    fn compile_tstring(&mut self, template: &ParsedTemplate, position: CodeRange) -> Result<(), CompileError> {
+        let strings_len = u16::try_from(template.strings.len())
+            .map_err(|_| CompileError::new("t-string has too many literal segments", position))?;
+        for string_id in &template.strings {
+            let const_idx = self.code.add_const(Value::InternString(*string_id))?;
+            self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, strings_len)?;
+
+        let interpolations_len = u16::try_from(template.interpolations.len())
+            .map_err(|_| CompileError::new("t-string has too many interpolations", position))?;
+        for interpolation in &template.interpolations {
+            self.compile_expr(&interpolation.expr)?;
+            let expression_idx = self.code.add_const(Value::InternString(interpolation.expression))?;
+            self.code.emit_u16(Opcode::LoadConst, expression_idx)?;
+            match conversion_char(interpolation.conversion) {
+                Some(flag) => {
+                    let const_idx = self.code.add_const(Value::InternString(StringId::from_ascii(flag)))?;
+                    self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+                }
+                None => self.code.emit(Opcode::LoadNone)?,
+            }
+            let spec_parts = self.compile_fstring_parts(&interpolation.format_spec)?;
+            self.code.emit_u16(Opcode::BuildFString, spec_parts)?;
+            self.code.set_location(interpolation.expr.position, None);
+            self.code.emit(Opcode::BuildInterpolation)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, interpolations_len)?;
+
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::BuildTemplate)?;
+        Ok(())
+    }
+
     /// Compiles f-string parts, returning the number of string parts to concatenate.
     ///
     /// Each part is compiled to leave a string value on the stack:
@@ -3867,6 +4365,55 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// implicitly emits a delete on the bound name, but functions with 256+
     /// locals plus an `except as` are exotic enough that we surface a
     /// `SyntaxError` rather than introduce a new opcode just for this).
+    /// Compiles one `del` target.
+    ///
+    /// A name delete emits a load first: `DeleteLocal` and `DeleteCell`
+    /// overwrite unconditionally, and it is that load which raises the
+    /// `UnboundLocalError` CPython raises for a name that was never bound.
+    fn compile_delete_target(&mut self, target: &DeleteTarget) -> Result<(), CompileError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                // `DeleteName` and `DeleteGlobal` raise for themselves; only the
+                // two that overwrite unconditionally need the guarding load.
+                let needs_guard = match ident.scope {
+                    NameScope::Local => !self.is_module_scope,
+                    NameScope::Cell => true,
+                    NameScope::Global | NameScope::CompVar | NameScope::Name => false,
+                };
+                if needs_guard {
+                    self.compile_name(ident)?;
+                    self.code.set_location(ident.position, None);
+                    self.code.emit(Opcode::Pop)?;
+                }
+                self.code.set_location(ident.position, None);
+                self.compile_delete(ident)?;
+            }
+            DeleteTarget::Attr { object, attr, position } => {
+                let Some(name_id) = attr.string_id() else {
+                    return Err(CompileError::new(
+                        "internal error: attribute name in AST must be interned",
+                        *position,
+                    ));
+                };
+                let name_idx = check_name_index_u16(name_id, *position)?;
+                self.compile_expr(object)?;
+                self.code.set_location(*position, None);
+                self.code.emit_u16(Opcode::DeleteAttr, name_idx)?;
+            }
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                self.code.set_location(*position, None);
+                self.code.emit(Opcode::DeleteSubscr)?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_delete(&mut self, target: &Identifier) -> Result<(), CompileError> {
         let slot = target.namespace_id().as_u16();
         match target.scope {

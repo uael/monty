@@ -17,6 +17,7 @@ use crate::{
     exception_private::{ExcTypeExt, RunError, RunResult},
     heap::{DropWithContext, Heap, HeapReader},
     intern::{CompileInterns, Interns, StringId},
+    modules::table::ModuleTable,
     name_map::NameMap,
     namespace::NamespaceId,
     object_bridge::MontyObjectExt,
@@ -247,6 +248,12 @@ pub(crate) struct SessionTables {
     pub(crate) global_names: NameMap,
     /// Interned strings and compiled functions used during execution.
     pub(crate) interns: Interns,
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Defaulted so a dump written before the table existed still loads: a
+    /// session that imported nothing and one that has no table read the same.
+    #[serde(default)]
+    pub(crate) modules: ModuleTable,
 }
 
 /// The module code, source and environment, borrowed immutably during execution.
@@ -381,6 +388,7 @@ impl Executor {
             tables: SessionTables {
                 global_names: globals,
                 interns,
+                modules: ModuleTable::default(),
             },
             program: Program {
                 module_code: Arc::new(module_code),
@@ -406,11 +414,13 @@ impl Executor {
     /// On success the tables move into the executor; on failure they remain unchanged.
     /// `script_name` identifies this feed's source; `session` supplies the user-facing
     /// filename and working directory.
+    #[expect(clippy::too_many_arguments, reason = "one snippet needs the session's whole compiler state")]
     pub(crate) fn new_repl_snippet(
         code: Arc<str>,
         script_name: &str,
         globals: &mut NameMap,
         interns: &mut Interns,
+        modules: &mut ModuleTable,
         input_names: &[String],
         options: CompileOptions,
         session: ReplSession<'_>,
@@ -436,6 +446,7 @@ impl Executor {
             tables: SessionTables {
                 global_names: mem::take(globals),
                 interns: interns.take(),
+                modules: mem::take(modules),
             },
             program: Program {
                 module_code: Arc::new(module_code),
@@ -471,6 +482,7 @@ impl Executor {
         script_name: &str,
         mut existing_globals: NameMap,
         interns: &mut Interns,
+        modules: &mut ModuleTable,
         options: CompileOptions,
         session: ReplSession<'_>,
     ) -> Result<Self, MontyException> {
@@ -514,6 +526,7 @@ impl Executor {
         let tables = SessionTables {
             global_names: existing_globals,
             interns: interns.take(),
+            modules: mem::take(modules),
         };
 
         Ok(Self {

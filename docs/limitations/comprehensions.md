@@ -6,6 +6,10 @@ object. The user-visible behaviour follows
 synthetic frame in tracebacks, comprehension targets do not leak into the
 enclosing scope.
 
+A generator expression is not one of these: it is a generator, so it has a
+frame of its own and a `<genexpr>` line in a traceback, as in CPython. See
+[generators.md](generators.md).
+
 ## Divergences from CPython
 
 - **A comprehension target must be a name.** CPython accepts
@@ -13,14 +17,13 @@ enclosing scope.
     `SyntaxError: comprehension target must be a name, not an attribute` (or
     `not a subscript`). A comprehension's targets live in operand-stack slots,
     which a store to an object cannot reach. Attribute and subscript targets
-    work in every other unpacking position.
+    work in every other unpacking position, a generator expression's own
+    targets included.
 - **`locals()` while a comprehension is running.** CPython exposes the
     comprehension's active targets in `locals()` during the comprehension body.
     Monty does not implement `locals()` introspection.
-- **Generator expressions.** `(x for x in iterable)` parses but currently
-    materialises to a `list` rather than a lazy iterator.
-- **Maximum number of `for` clauses.** Monty caps a single comprehension at
-    255 `for` clauses; exceeding this raises
+- **Maximum number of `for` clauses.** Monty caps a single list, set or dict
+    comprehension at 255 `for` clauses; exceeding this raises
     `SyntaxError: comprehension has too many nested clauses (N); maximum is 255`. Per-clause operand-stack
     growth means real comprehensions hit a tighter
     `SyntaxError: comprehension target + iterator count exceeds u8 depth operand` well before that point.

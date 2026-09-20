@@ -62,6 +62,17 @@ package = false
 # make sure to use relative durations:
 exclude-newer = "7 days"
 
+# The datatest harness runs `crates/monty/test_cases/` against CPython 3.14 only
+# (see `.python-version`), so a fixture may use syntax newer than the package's
+# own `requires-python` floor. Listed per file rather than for the whole
+# directory: raising the target for every fixture also changes how ruff
+# *formats* unrelated ones (3.14 allows unparenthesized `except` groups).
+[tool.ruff.per-file-target-version]
+# PEP 750 t-strings.
+"crates/monty/test_cases/tstring__all.py" = "py314"
+# PEP 695 `type X = ...` and type parameter lists, with PEP 696 defaults.
+"crates/monty/test_cases/typealias__pep695.py" = "py313"
+
 [tool.ruff.lint]
 extend-select = [
     "Q",      # https://docs.astral.sh/ruff/rules/#flake8-quotes-q
@@ -82,7 +93,12 @@ known-first-party = ["pydantic_monty"]
     "F506", # mixed positional and named placeholders - tests CPython's argument consumption order
     "F507", # placeholder/argument count mismatch - the point of the argument-count tests
 ]
+"crates/monty/test_cases/modules__sys_modules.py" = [
+    "S102", # use of `exec` - building a module from source is what the test is about
+]
 "crates/monty/test_cases/*.py" = [
+    "B018", # useless expression - a bare read is the test when the read itself must raise
+    "BLE001", # blind `except Exception` - the test is that a broad handler catches the narrow raise
     "E722", # bare except - needed for testing try/except with bare except clauses
     "E711", # Comparison to `None` should be `cond is None`
     "E712", # Comparison to True/False - needed for testing boolean behavior
@@ -106,6 +122,10 @@ known-first-party = ["pydantic_monty"]
     "E402", # Typing test file has multiple import sections to test different import patterns
     "E401", # Multiple imports on one line - needed for testing `import a, b` syntax
     "I001", # Import block unsorted - needed for testing `import a, b` syntax
+]
+
+"crates/monty/test_cases/class__str_base.py" = [
+    "UP031", # percent formatting of an instance of a class that inherits str is the test
 ]
 
 "crates/monty/test_cases/class__annotations.py" = [

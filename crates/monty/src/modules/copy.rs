@@ -165,6 +165,7 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         | HeapReadOutput::LongInt(_)
         | HeapReadOutput::Range(_)
         | HeapReadOutput::Slice(_)
+        | HeapReadOutput::Code(_)
         | HeapReadOutput::RePattern(_)
         | HeapReadOutput::ReMatch(_)
         | HeapReadOutput::Exception(_)
@@ -189,6 +190,13 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         // `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
         | HeapReadOutput::Union(_)
+        // A PEP 695 alias is immutable apart from the `__value__` it memoizes
+        // once, and CPython has no `__copy__` for one either. A template and
+        // its interpolations are immutable outright.
+        | HeapReadOutput::TypeAliasType(_)
+        | HeapReadOutput::Template(_)
+        | HeapReadOutput::Interpolation(_)
+        | HeapReadOutput::ClassProperty(_)
         // A shallow copy of an immutable container holds the same items, so
         // CPython hands back the original; only `deepcopy` rebuilds these.
         | HeapReadOutput::Tuple(_)
@@ -218,14 +226,17 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         | HeapReadOutput::CallableIterator(_)
         | HeapReadOutput::Itertools(_)
         | HeapReadOutput::Module(_)
-        | HeapReadOutput::Coroutine(_)
+        | HeapReadOutput::Generator(_)
         | HeapReadOutput::GatherFuture(_)
         | HeapReadOutput::ExternalFuture(_)
         | HeapReadOutput::OpenFile(_)
         | HeapReadOutput::ExtFunction(_)
         | HeapReadOutput::Cell(_)
         | HeapReadOutput::DataclassField(_)
-        | HeapReadOutput::DataclassParams(_) => Err(cannot_copy(value, vm)),
+        | HeapReadOutput::DataclassParams(_)
+        | HeapReadOutput::EventLoop(_)
+        | HeapReadOutput::ContextVar(_)
+        | HeapReadOutput::ContextVarToken(_) => Err(cannot_copy(value, vm)),
     }
 }
 
@@ -298,6 +309,7 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::LongInt(_)
         | HeapReadOutput::Range(_)
         | HeapReadOutput::Slice(_)
+        | HeapReadOutput::Code(_)
         | HeapReadOutput::RePattern(_)
         | HeapReadOutput::ReMatch(_)
         | HeapReadOutput::Exception(_)
@@ -321,6 +333,10 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         // `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
         | HeapReadOutput::Union(_)
+        | HeapReadOutput::TypeAliasType(_)
+        | HeapReadOutput::Template(_)
+        | HeapReadOutput::Interpolation(_)
+        | HeapReadOutput::ClassProperty(_)
         | HeapReadOutput::FunctionDefaults(_) => Ok(source.clone_with_heap(vm.heap)),
         // Refused, with the `TypeError` CPython's pickler raises. Views and
         // iterators are positions into something else; the rest are host
@@ -347,14 +363,17 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::CallableIterator(_)
         | HeapReadOutput::Itertools(_)
         | HeapReadOutput::Module(_)
-        | HeapReadOutput::Coroutine(_)
+        | HeapReadOutput::Generator(_)
         | HeapReadOutput::GatherFuture(_)
         | HeapReadOutput::ExternalFuture(_)
         | HeapReadOutput::OpenFile(_)
         | HeapReadOutput::ExtFunction(_)
         | HeapReadOutput::Cell(_)
         | HeapReadOutput::DataclassField(_)
-        | HeapReadOutput::DataclassParams(_) => Err(cannot_copy(source, vm)),
+        | HeapReadOutput::DataclassParams(_)
+        | HeapReadOutput::EventLoop(_)
+        | HeapReadOutput::ContextVar(_)
+        | HeapReadOutput::ContextVarToken(_) => Err(cannot_copy(source, vm)),
     }?;
     // CPython only memoizes a copy that is a new object ("if y is not x").
     if same_object(source, &copy) {

@@ -28,6 +28,7 @@ use crate::{
         bytes::Bytes,
         date as date_type, datetime as datetime_type,
         dict::Dict,
+        generator::GeneratorKind,
         instance::class_name,
         list::List,
         set::{FrozenSet, Set},
@@ -470,7 +471,10 @@ impl GraphExporter {
             HeapReadOutput::Module(m) => {
                 MontyNode::Repr(format!("<module '{}'>", vm.interns.get_str(m.get(vm.heap).name())))
             }
-            HeapReadOutput::Coroutine(coro) => {
+            // A coroutine crosses without the address its `repr()` carries, so
+            // the same call gives a host the same node twice. A generator has
+            // always crossed as its `repr()` and still does.
+            HeapReadOutput::Generator(coro) if coro.get(vm.heap).kind == GeneratorKind::Coroutine => {
                 let func_id = coro.get(vm.heap).func_id;
                 let func = vm.interns.get_function(func_id);
                 let name = vm.interns.get_str(func.name.name_id);
@@ -620,6 +624,12 @@ impl MontyTypeExt for MontyType {
     /// both matches are exhaustive so the compiler enforces totality.
     fn to_internal(&self) -> Type {
         match self {
+            Self::TypeAliasType => Type::TypeAliasType,
+            Self::Template => Type::Template,
+            Self::Interpolation => Type::Interpolation,
+            Self::ContextVar => Type::ContextVar,
+            Self::ContextVarToken => Type::ContextVarToken,
+            Self::EventLoop => Type::EventLoop,
             Self::Ellipsis => Type::Ellipsis,
             Self::NotImplementedType => Type::NotImplementedType,
             Self::Type => Type::Type,
@@ -712,6 +722,12 @@ impl MontyTypeExt for MontyType {
     /// routes a sandbox class to [`GraphExporter::sandbox_class_node`] first.
     fn from_internal_static(ty: Type) -> Option<Self> {
         Some(match ty {
+            Type::TypeAliasType => Self::TypeAliasType,
+            Type::Template => Self::Template,
+            Type::Interpolation => Self::Interpolation,
+            Type::ContextVar => Self::ContextVar,
+            Type::ContextVarToken => Self::ContextVarToken,
+            Type::EventLoop => Self::EventLoop,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,
@@ -770,6 +786,8 @@ impl MontyTypeExt for MontyType {
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
             Type::Random => return None,
+            // No host-side code type: a code object crosses as its repr.
+            Type::Code => return None,
             Type::Tuple => Self::Tuple,
             Type::NamedTuple => Self::NamedTuple,
             Type::Dict => Self::Dict,
@@ -792,7 +810,7 @@ impl MontyTypeExt for MontyType {
             Type::BuiltinFunction => Self::BuiltinFunction,
             Type::Cell => Self::Cell,
             Type::Iterator => Self::Iterator,
-            Type::Coroutine => Self::Coroutine,
+            Type::Coroutine | Type::Generator => Self::Coroutine,
             Type::Module => Self::Module,
             Type::TextIOWrapper => Self::TextIOWrapper,
             Type::BufferedReader => Self::BufferedReader,

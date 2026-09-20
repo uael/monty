@@ -362,19 +362,65 @@ fn external_function_as_itertools_callable_raises_not_implemented() {
     }
 }
 
-/// The 3-arg `type()` form rejects non-empty bases because Monty classes
-/// cannot inherit (documented in `limitations/classes.md`). Kept as a
-/// Rust-side test because CPython accepts bases, so the comparative
-/// test-case suite cannot cover the divergence.
+/// The 3-arg `type()` form rejects a builtin base other than an exception or
+/// `str`, for want of anything to inherit (documented in
+/// `limitations/classes.md`). Kept as a Rust-side test because CPython accepts
+/// the base, so the comparative test-case suite cannot cover the divergence.
 #[test]
-fn dynamic_type_with_bases_raises_type_error() {
+fn dynamic_type_with_builtin_base_raises_type_error() {
     let code = "type('A', (int,), {})";
     let mut ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
     let err = ex.run_no_limits(vec![]).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "Traceback (most recent call last):\n  File \"test.py\", line 1, in <module>\n    type('A', (int,), {})\n    ~~~~~~~~~~~~~~~~~~~~~\nTypeError: type() bases are not supported"
+        "Traceback (most recent call last):\n  File \"test.py\", line 1, in <module>\n    type('A', (int,), {})\n    ~~~~~~~~~~~~~~~~~~~~~\nTypeError: a class can only inherit from a class defined in the sandbox, a builtin exception or str"
     );
+}
+
+/// A class that inherits `str` may not define `__init__`: its instance is a
+/// string and holds no attributes of its own, so the body would have nothing to
+/// write to. Kept Rust-side because CPython runs the body, so the comparative
+/// suite cannot cover it (documented in `limitations/classes.md`).
+#[test]
+fn class_inheriting_str_with_init_raises_type_error() {
+    let code = "class A(str):\n    def __init__(self, v):\n        self.v = v\n";
+    let mut ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let err = ex.run_no_limits(vec![]).unwrap_err();
+    assert!(
+        err.to_string().ends_with(
+            "TypeError: class 'A' inherits str and defines __init__; an instance of it is a string, which holds no attributes of its own"
+        ),
+        "{err}"
+    );
+}
+
+/// A class that inherits `str` may not define a dunder the string answers
+/// itself, because Monty runs the string's protocol and would never reach the
+/// class member. Refused where the class is built rather than left to give the
+/// string's answer; CPython dispatches to the class, so this is Rust-side
+/// (documented in `limitations/classes.md`).
+#[test]
+fn class_inheriting_str_with_shadowed_dunder_raises_type_error() {
+    for dunder in ["__repr__", "__str__", "__eq__", "__len__", "__add__", "__getitem__"] {
+        let code = format!("class A(str):\n    def {dunder}(self, *args):\n        return 1\n");
+        let mut ex = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
+        let err = ex.run_no_limits(vec![]).unwrap_err();
+        assert!(
+            err.to_string().ends_with(&format!(
+                "TypeError: class 'A' inherits str and defines {dunder}, which the string answers itself"
+            )),
+            "{err}"
+        );
+    }
+}
+
+/// A dunder `str` does not answer is untouched by the base: a class that
+/// inherits `str` may define it, and it behaves as it does on any other class.
+#[test]
+fn class_inheriting_str_may_define_a_dunder_str_does_not_answer() {
+    let code = "class A(str):\n    def __await__(self):\n        return iter([])\n\n\nA('q')\n";
+    let mut ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    ex.run_no_limits(vec![]).unwrap();
 }
 
 /// The 3-arg `type()` form rejects non-string namespace keys with a
@@ -552,4 +598,34 @@ p = functools.partial(len, Mutator())
         ex.run_no_limits(vec![]).unwrap().py_repr(),
         "[[[1, 2, 3]], Repr('functools.partial(<built-in function len>, m)'), Holder(x=[9])]"
     );
+}
+
+/// `compile()` refuses the arguments Monty has nothing to do with: `'single'`
+/// mode, a non-zero `flags`, and an `optimize` level. CPython accepts all
+/// three, so the comparative test-case suite cannot cover the divergence
+/// (documented in `limitations/eval_exec.md`).
+#[test]
+fn compile_refuses_arguments_monty_does_not_model() {
+    for (call, message) in [
+        (
+            "compile('1', 'f.py', 'single')",
+            "NotImplementedError: compile() does not yet support the 'single' mode",
+        ),
+        (
+            "compile('1', 'f.py', 'eval', 1024)",
+            "ValueError: compile(): unrecognised flags",
+        ),
+        (
+            "compile('1', 'f.py', 'eval', 0, False, 2)",
+            "NotImplementedError: compile() does not yet support the optimize argument",
+        ),
+        (
+            "compile('1', 'f.py', 'eval', 0, False, 7)",
+            "ValueError: compile(): invalid optimize value",
+        ),
+    ] {
+        let mut ex = MontyRun::new(call.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+        let err = ex.run_no_limits(vec![]).unwrap_err();
+        assert!(err.to_string().ends_with(message), "{call}: {err}");
+    }
 }
