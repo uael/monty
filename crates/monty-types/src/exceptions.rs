@@ -433,6 +433,15 @@ pub enum ExcType {
     /// `except GeneratorExit:` see it. Appended out of its grouping because
     /// this enum is postcard-encoded by variant index, so it grows at its end.
     GeneratorExit,
+
+    /// `asyncio.CancelledError`, the exception a cancelled await unwinds with.
+    ///
+    /// A direct `BaseException` subclass since Python 3.8, so `except
+    /// Exception:` does not swallow it. Named by the module path CPython
+    /// tracebacks print, which is also what keeps it importable-only: a bare
+    /// `CancelledError` is a `NameError` here as it is there.
+    #[strum(serialize = "asyncio.exceptions.CancelledError")]
+    CancelledError,
 }
 impl ExcType {
     /// Checks if this exception type is a subclass of another exception type.
@@ -453,10 +462,15 @@ impl ExcType {
             // BaseException catches all exceptions
             Self::BaseException => true,
             // Exception catches everything except BaseException and its direct
-            // subclasses: KeyboardInterrupt, SystemExit, GeneratorExit
+            // subclasses: KeyboardInterrupt, SystemExit, GeneratorExit,
+            // asyncio.CancelledError
             Self::Exception => !matches!(
                 self,
-                Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit | Self::GeneratorExit
+                Self::BaseException
+                    | Self::KeyboardInterrupt
+                    | Self::SystemExit
+                    | Self::GeneratorExit
+                    | Self::CancelledError
             ),
             // LookupError catches KeyError and IndexError
             Self::LookupError => matches!(self, Self::KeyError | Self::IndexError),

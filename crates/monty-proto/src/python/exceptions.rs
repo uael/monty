@@ -108,6 +108,16 @@ pub fn exc_monty_to_py(py: Python<'_>, mut exc: MontyException) -> PyErr {
                 exceptions::PyException::new_err(msg)
             }
         }
+        ExcType::CancelledError => {
+            if let Ok(cancelled) = get_cancelled_error(py)
+                && let Ok(exc_instance) = cancelled.call1((PyString::new(py, &msg),))
+            {
+                PyErr::from_value(exc_instance)
+            } else {
+                // Falls back to its own parent, `BaseException`.
+                exceptions::PyBaseException::new_err(msg)
+            }
+        }
     }
 }
 
@@ -346,10 +356,31 @@ fn py_err_to_exc_type(exc: &Bound<'_, exceptions::PyBaseException>) -> ExcType {
         ExcType::KeyboardInterrupt
     } else if exceptions::PyGeneratorExit::type_check(exc) {
         ExcType::GeneratorExit
+    // Last of the direct subclasses: it needs an isinstance call against an
+    // imported class rather than a PyO3 type check.
+    } else if is_cancelled_error(exc) {
+        ExcType::CancelledError
     // Catch-all for BaseException
     } else {
         ExcType::BaseException
     }
+}
+
+/// Checks if an exception is an `asyncio.CancelledError`, which PyO3 has no
+/// type of, so this isinstance-checks against the imported class.
+fn is_cancelled_error(exc: &Bound<'_, exceptions::PyBaseException>) -> bool {
+    if let Ok(cancelled_cls) = get_cancelled_error(exc.py()) {
+        exc.is_instance(cancelled_cls).unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// Returns the cached `asyncio.CancelledError` class.
+fn get_cancelled_error(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static CANCELLED_ERROR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+    CANCELLED_ERROR.import(py, "asyncio", "CancelledError")
 }
 
 /// Checks if an exception is a `dataclasses.FrozenInstanceError` (not a built-in

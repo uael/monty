@@ -16,17 +16,19 @@ these built-ins; `raise MyClass()` on a plain user class raises
 `UnboundLocalError`, `ValueError`, `UnicodeDecodeError`, `UnicodeEncodeError`,
 `ImportError`, `ModuleNotFoundError`, `OSError`, `FileNotFoundError`, `FileExistsError`,
 `IsADirectoryError`, `NotADirectoryError`, `PermissionError`,
-`AssertionError`, `MemoryError`, `StopIteration`, `SyntaxError`,
-`TimeoutError`, `TypeError`.
+`AssertionError`, `MemoryError`, `StopIteration`, `GeneratorExit`,
+`SyntaxError`, `TimeoutError`, `TypeError`.
 
 Module-specific: `json.JSONDecodeError` (subclass of `ValueError`),
 `re.PatternError` / `re.error`, `io.UnsupportedOperation` (catchable as
-both `OSError` and `ValueError`, matching CPython's dual parentage).
+both `OSError` and `ValueError`, matching CPython's dual parentage),
+`asyncio.CancelledError` (a direct `BaseException` subclass, which nothing
+in Monty raises — see [asyncio.md](asyncio.md)).
 
 ## Exception classes NOT implemented
 
 `Warning` and all its subclasses (`DeprecationWarning`, etc.),
-`BufferError`, `EOFError`, `FloatingPointError`, `GeneratorExit`,
+`BufferError`, `EOFError`, `FloatingPointError`,
 `ConnectionError` and subclasses (`ConnectionAbortedError`,
 `ConnectionRefusedError`, `ConnectionResetError`,
 `BrokenPipeError`), `BlockingIOError`, `ChildProcessError`,
@@ -58,8 +60,9 @@ not supported; passing more than one argument raises an internal error.
     doesn't track, so Monty's
     `repr()` uses the generic single-message form instead.
 - The dotted exception classes — `json.JSONDecodeError`, `re.PatternError`,
-    `binascii.Error`, `binascii.Incomplete` — repr under their qualified name:
-    `binascii.Error('bad')` where CPython gives `Error('bad')`.
+    `binascii.Error`, `binascii.Incomplete`, `asyncio.CancelledError` — repr
+    under their qualified name: `binascii.Error('bad')` where CPython gives
+    `Error('bad')`.
     `type(exc).__name__` and `str(type(exc))` match CPython.
 
 **Not implemented:** `__cause__`, `__context__`, `__suppress_context__`,

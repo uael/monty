@@ -14,6 +14,7 @@ use num_traits::ToPrimitive;
 use crate::{
     args::{ArgValues, FromArgs},
     asyncio::GatherFuture,
+    builtins::Builtins,
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunResult},
@@ -40,8 +41,9 @@ pub(crate) enum AsyncioFunctions {
 
 /// Creates the `asyncio` module and allocates it on the heap.
 ///
-/// The module contains only the `run`, `gather` and `sleep` functions. Other asyncio
-/// functions are not implemented as they would require additional VM/scheduler features.
+/// The module contains the `run`, `gather` and `sleep` functions and the
+/// `CancelledError` class. Other asyncio names are not implemented as they
+/// would require additional VM/scheduler features.
 pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     let mut module = Module::new(StaticStrings::Asyncio, vm.interns);
 
@@ -58,6 +60,13 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     module.set_attr(
         StaticStrings::Sleep,
         Value::ModuleFunction(ModuleFunctions::Asyncio(AsyncioFunctions::Sleep)),
+        vm,
+    );
+    // Nothing in Monty cancels an await, so this is here to be raised and
+    // caught by sandboxed code; see `limitations/asyncio.md`.
+    module.set_attr(
+        StaticStrings::CancelledError,
+        Value::Builtin(Builtins::ExcType(ExcType::CancelledError)),
         vm,
     );
 

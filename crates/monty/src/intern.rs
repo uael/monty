@@ -677,6 +677,9 @@ pub enum StaticStrings {
     /// `typing.Callable` marker.
     #[strum(serialize = "Callable")]
     Callable,
+    /// The `asyncio.CancelledError` exception type.
+    #[strum(serialize = "CancelledError")]
+    CancelledError,
     /// `capitalize()` method, shared by `str` and `bytes`.
     Capitalize,
     /// `str.casefold()` method.

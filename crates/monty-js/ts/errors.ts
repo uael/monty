@@ -256,6 +256,7 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   'binascii.Error',
   'binascii.Incomplete',
   'GeneratorExit',
+  'asyncio.exceptions.CancelledError',
 ])
 
 /**
