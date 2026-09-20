@@ -900,6 +900,18 @@ pub(crate) fn namespace_member<'v>(
     }
 }
 
+/// The sandbox class of a heap value, or `None` for a value that is not an
+/// instance of a sandbox class.
+///
+/// Unlike [`instance_class`], it does not panic on another value, so a dunder
+/// dispatch on any value can ask it.
+pub(crate) fn value_class(id: HeapId, vm: &VM<'_>) -> Option<HeapId> {
+    match vm.heap.get(id) {
+        HeapData::Instance(instance) => Some(instance.class),
+        _ => None,
+    }
+}
+
 /// Returns the `HeapId` of `self_id`'s class object.
 fn instance_class(self_id: HeapId, vm: &VM<'_>) -> HeapId {
     match vm.heap.get(self_id) {
@@ -952,7 +964,7 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 }
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
-fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
     match vm.heap.get(class_id) {
         HeapData::Class(class) => class
             .namespace()
@@ -989,7 +1001,12 @@ pub(crate) fn class_name<'i>(class_id: HeapId, heap: &Heap, interns: &'i Interns
 /// other callable value is called as-is. Shared by `py_call_attr` and the
 /// context-manager and iterator hooks so special-method invocation and
 /// ordinary method calls dispatch identically.
-fn call_member_bound(member: &Value, self_id: HeapId, args: ArgValues, vm: &mut VM<'_>) -> RunResult<CallResult> {
+pub(crate) fn call_member_bound(
+    member: &Value,
+    self_id: HeapId,
+    args: ArgValues,
+    vm: &mut VM<'_>,
+) -> RunResult<CallResult> {
     if is_method_value(member, vm) {
         vm.heap.inc_ref(self_id);
         vm.call_function(member, args.prepend(Value::Ref(self_id)))
