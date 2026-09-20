@@ -404,6 +404,27 @@ impl Type {
     ///
     /// This replaces the previous strum `FromStr` derive which matched ALL variants,
     /// including internal types that shouldn't be resolvable from bare names.
+    /// Every name [`Self::from_builtin_name`] answers, for a caller that must
+    /// walk them rather than ask about one.
+    pub const BUILTIN_NAMES: &'static [&'static str] = &[
+        "bool",
+        "int",
+        "float",
+        "str",
+        "bytes",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "range",
+        "slice",
+        "iter",
+        "type",
+        "property",
+        "object",
+    ];
+
     #[must_use]
     pub fn from_builtin_name(name: &str) -> Option<Self> {
         match name {

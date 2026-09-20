@@ -17,6 +17,7 @@ pub(crate) mod ast;
 pub(crate) mod asyncio;
 pub(crate) mod base64;
 pub(crate) mod binascii;
+pub(crate) mod builtins_module;
 pub(crate) mod collections;
 pub(crate) mod collections_abc;
 pub(crate) mod contextvars;
@@ -93,6 +94,8 @@ pub(crate) enum StandardLib {
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
+    /// The `builtins` module: every name a bare identifier resolves to.
+    Builtins,
     /// The `contextvars` module exposing `ContextVar` and its `Token`.
     Contextvars,
     /// The `gc` module exposing a single `collect()` for tests. Only present
@@ -129,6 +132,7 @@ impl StandardLib {
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::Time => Some(Self::Time),
             StaticStrings::Contextvars => Some(Self::Contextvars),
+            StaticStrings::Builtins => Some(Self::Builtins),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -162,6 +166,7 @@ impl StandardLib {
             Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::Time => time::create_module(vm),
             Self::Contextvars => contextvars::create_module(vm),
+            Self::Builtins => builtins_module::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }

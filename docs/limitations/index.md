@@ -73,6 +73,7 @@ The following modules are present:
 | `ast`             | [ast.md](ast.md)                 |
 | `asyncio`         | [asyncio.md](asyncio.md)         |
 | `base64`          | [base64.md](base64.md)           |
+| `builtins`        | [builtins.md](builtins.md)       |
 | `binascii`        | [base64.md](base64.md)           |
 | `collections`     | [collections.md](collections.md) |
 | `collections.abc` | [collections.md](collections.md) |
