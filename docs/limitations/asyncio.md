@@ -19,6 +19,18 @@ The `asyncio` module exposes three functions and one exception class:
 - `asyncio.sleep(delay, result=None)` — waits as the session's `sleep` setting
     says, then produces `result`. See
     [below](#asynciosleep-waits-at-the-call-not-at-the-await).
+- `asyncio.get_running_loop()` — proof that a loop is running, which here it
+    always is, so it never raises the `RuntimeError` CPython raises outside
+    one, not even at module level. What comes back answers `is_running()`
+    (always `True`) and `is_closed()` (always `False`) and **nothing else**:
+    `create_future`, `call_soon`, `run_until_complete` and the rest of the loop
+    API raise `AttributeError`. Each call makes a new object, so
+    `get_running_loop() is get_running_loop()` is `False` where CPython hands
+    back the one running loop.
+- `asyncio.current_task()` — always `None`. CPython answers `None` outside a
+    task and a `Task` inside one; Monty schedules coroutines without giving a
+    program an object for one, so a program that tells its runs apart by
+    `id(current_task())` sees one identity for all of them.
 - `asyncio.CancelledError` — raisable and catchable, but **nothing in Monty
     raises it**: no await is ever cancelled. A sibling of a failing `gather()`
     keeps running rather than having this raised at its `await`
@@ -29,8 +41,8 @@ The `asyncio` module exposes three functions and one exception class:
 
 Not implemented (raise `AttributeError`):
 
-`create_task`, `current_task`, `wait`, `wait_for`, `shield`, `to_thread`,
-`new_event_loop`, `get_event_loop`, `get_running_loop`, `Queue`, `Lock`,
+`create_task`, `wait`, `wait_for`, `shield`, `to_thread`,
+`new_event_loop`, `get_event_loop`, `Queue`, `Lock`,
 `Semaphore`, `Event`, `Future`, `Task`, `TaskGroup`, `timeout`,
 `timeout_at`, `Timeout`, `as_completed`, `iscoroutine`, `ensure_future`,
 `InvalidStateError`, the whole `asyncio.subprocess` / `asyncio.streams` /

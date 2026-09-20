@@ -161,6 +161,8 @@ macro_rules! heap_payloads {
             /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
             /// payload ceiling for a type nothing hot allocates.
             Interpolation(boxed $crate::types::Interpolation),
+            /// The event loop `asyncio.get_running_loop()` hands back.
+            EventLoop(inline $crate::types::EventLoop),
             /// A `contextvars.ContextVar` and the value it currently holds.
             ContextVar(inline $crate::types::ContextVar),
             /// The `contextvars.Token` a `ContextVar.set()` handed back.
@@ -250,6 +252,7 @@ impl HeapData {
             | Self::Interpolation(_)
             // A context variable holds whatever was set in it, and its token
             // holds the variable back.
+            | Self::EventLoop(_)
             | Self::ContextVar(_)
             | Self::ContextVarToken(_)
             // A getter is a closure, which can capture the class it belongs to.
@@ -323,6 +326,7 @@ impl HeapData {
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
             Self::TypeAliasType(_) => Type::TypeAliasType,
+            Self::EventLoop(_) => Type::EventLoop,
             Self::ContextVar(_) => Type::ContextVar,
             Self::ContextVarToken(_) => Type::ContextVarToken,
             Self::ClassProperty(_) => Type::Property,
@@ -689,6 +693,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::ClassProperty($value) => $body,
             Self::Template($value) => $body,
             Self::Interpolation($value) => $body,
+            Self::EventLoop($value) => $body,
             Self::ContextVar($value) => $body,
             Self::ContextVarToken($value) => $body,
             Self::Cell(_) | Self::Exception(_) | Self::Module(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => {
@@ -1133,6 +1138,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::ClassProperty(value) => value.py_iter(vm),
             Self::Template(value) => value.py_iter(vm),
             Self::Interpolation(value) => value.py_iter(vm),
+            Self::EventLoop(value) => value.py_iter(vm),
             Self::ContextVar(value) => value.py_iter(vm),
             Self::ContextVarToken(value) => value.py_iter(vm),
             Self::Str(value) => value.py_iter(vm),

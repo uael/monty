@@ -751,6 +751,9 @@ pub enum StaticStrings {
     Conversion,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
+    /// `asyncio.current_task()` function.
+    #[strum(serialize = "current_task")]
+    CurrentTask,
     /// `sys.copyright` attribute.
     Copyright,
     /// `math.copysign()` function.
@@ -1081,6 +1084,9 @@ pub enum StaticStrings {
     Gammavariate,
     /// `asyncio.gather()` function.
     Gather,
+    /// `asyncio.get_running_loop()` function.
+    #[strum(serialize = "get_running_loop")]
+    GetRunningLoop,
     /// `random.gauss()` function.
     Gauss,
     /// Module name for `import gc`.

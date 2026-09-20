@@ -1355,6 +1355,9 @@ pub enum MontyType {
     /// `contextvars.Token`, what `ContextVar.set()` returns.
     #[strum(serialize = "_contextvars.Token")]
     ContextVarToken,
+    /// The running event loop `asyncio.get_running_loop()` hands back.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
 }
 
 impl fmt::Display for MontyType {

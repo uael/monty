@@ -296,6 +296,9 @@ pub enum Type {
     /// `contextvars.Token`, what `ContextVar.set()` returns.
     #[strum(serialize = "_contextvars.Token")]
     ContextVarToken,
+    /// The running event loop, named as `asyncio`'s own loop classes are.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

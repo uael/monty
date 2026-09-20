@@ -234,6 +234,7 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         | HeapReadOutput::Cell(_)
         | HeapReadOutput::DataclassField(_)
         | HeapReadOutput::DataclassParams(_)
+        | HeapReadOutput::EventLoop(_)
         | HeapReadOutput::ContextVar(_)
         | HeapReadOutput::ContextVarToken(_) => Err(cannot_copy(value, vm)),
     }
@@ -370,6 +371,7 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::Cell(_)
         | HeapReadOutput::DataclassField(_)
         | HeapReadOutput::DataclassParams(_)
+        | HeapReadOutput::EventLoop(_)
         | HeapReadOutput::ContextVar(_)
         | HeapReadOutput::ContextVarToken(_) => Err(cannot_copy(source, vm)),
     }?;
