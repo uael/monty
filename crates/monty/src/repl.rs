@@ -27,6 +27,7 @@ use crate::{
     exception_private::{ExcTypeExt, RunError},
     heap::{DropWithContext, Heap, HeapData, HeapReader},
     intern::Interns,
+    modules::table::ModuleTable,
     name_map::NameMap,
     object_bridge::{MontyGraphExt, MontyObjectExt},
     run::{CompileOptions, DEFAULT_CWD, Executor, Program, ReplSession, SessionTables},
@@ -90,6 +91,13 @@ pub struct MontyRepl {
     /// The session's `random` state, carried between snippets like the
     /// globals so a `random.seed()` in one feed governs the draws of the next.
     random: SessionRandom,
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Session state like the globals: a module built for one snippet is the
+    /// same object the next one imports. Same ownership hand-off as
+    /// `global_names`.
+    #[serde(default)]
+    modules: ModuleTable,
     /// Persistent heap across snippets.
     heap: Heap,
     /// Persistent global variable values across snippets.
@@ -120,6 +128,7 @@ impl MontyRepl {
             auto_os_calls: Arc::new(AutoOsCalls::default()),
             cwd: Arc::from(DEFAULT_CWD),
             random: SessionRandom::default(),
+            modules: ModuleTable::default(),
             heap,
             globals: Vec::new(),
         }
@@ -218,6 +227,7 @@ impl MontyRepl {
             &input_script_name,
             &mut this.global_names,
             &mut this.interns,
+            &mut this.modules,
             &input_names,
             this.options,
             session,
@@ -310,6 +320,7 @@ impl MontyRepl {
             &input_script_name,
             &mut self.global_names,
             &mut self.interns,
+            &mut self.modules,
             &input_names,
             self.options,
             session,
@@ -402,6 +413,7 @@ impl MontyRepl {
             &input_script_name,
             self.global_names.clone(),
             &mut self.interns,
+            &mut self.modules,
             self.options,
             ReplSession {
                 script_name: &self.script_name,
@@ -481,6 +493,7 @@ impl MontyRepl {
         );
         self.global_names = executor.tables.global_names;
         self.interns = executor.tables.interns;
+        self.modules = executor.tables.modules;
         result
     }
 
@@ -524,9 +537,14 @@ impl MontyRepl {
     /// tables while globals still hold `FunctionId`/`StringId` values from
     /// the snippet.
     fn commit_executor(&mut self, executor: Executor) {
-        let SessionTables { global_names, interns } = executor.tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = executor.tables;
         self.global_names = global_names;
         self.interns = interns;
+        self.modules = modules;
     }
 
     /// Grows the globals vector to at least `size` slots.

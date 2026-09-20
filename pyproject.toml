@@ -93,6 +93,9 @@ known-first-party = ["pydantic_monty"]
     "F506", # mixed positional and named placeholders - tests CPython's argument consumption order
     "F507", # placeholder/argument count mismatch - the point of the argument-count tests
 ]
+"crates/monty/test_cases/modules__sys_modules.py" = [
+    "S102", # use of `exec` - building a module from source is what the test is about
+]
 "crates/monty/test_cases/*.py" = [
     "B018", # useless expression - a bare read is the test when the read itself must raise
     "BLE001", # blind `except Exception` - the test is that a broad handler catches the narrow raise

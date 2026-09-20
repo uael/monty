@@ -1420,6 +1420,8 @@ pub enum StaticStrings {
     /// `namedtuple(..., module=...)` keyword argument.
     #[strum(serialize = "module")]
     ModuleKwarg,
+    /// `sys.modules`, the session's table of imported modules.
+    Modules,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
     /// Value of `sys.platform`.

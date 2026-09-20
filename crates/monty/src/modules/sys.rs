@@ -118,6 +118,10 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     module.set_attr(StaticStrings::Argv, argv(vm), vm);
 
     // Numeric and text limits of the value representations Monty actually uses.
+    // The session's own table, live: a write to it is what the next import
+    // finds. See `modules::table`.
+    let modules = vm.modules_dict();
+    module.set_attr(StaticStrings::Modules, modules, vm);
     module.set_attr(StaticStrings::Maxsize, Value::Int(MAXSIZE), vm);
     module.set_attr(StaticStrings::Maxunicode, Value::Int(MAXUNICODE), vm);
     module.set_attr(

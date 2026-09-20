@@ -40,7 +40,7 @@ use crate::{
     heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
-    modules::{StandardLib, json::JsonStringCache, random::apply_seed_random, re::RePatternCache},
+    modules::{StandardLib, json::JsonStringCache, random::apply_seed_random, re::RePatternCache, table::ModuleTable},
     name_map::NameMap,
     object_bridge::MontyObjectExt,
     os_dispatch::{
@@ -851,6 +851,11 @@ pub struct VM<'h> {
     /// [`globals`](Self::globals) when runtime-compiled code binds a new name.
     pub(crate) global_names: &'h mut NameMap,
 
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Borrowed mutably because an import binds a name in it.
+    pub(crate) modules: &'h mut ModuleTable,
+
     /// Print output writer, borrowed so callers retain access to collected output.
     pub(crate) print_writer: PrintWriter<'h>,
 
@@ -967,7 +972,11 @@ impl<'h> VM<'h> {
         heap: &'h mut HeapReader<'h>,
         print_writer: PrintWriter<'h>,
     ) -> Self {
-        let SessionTables { global_names, interns } = tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = tables;
         Self {
             stack: Vec::with_capacity(64),
             globals,
@@ -976,6 +985,7 @@ impl<'h> VM<'h> {
             heap,
             interns,
             global_names,
+            modules,
             print_writer,
             exception_stack: Vec::new(),
             instruction_ip: 0,
@@ -1007,7 +1017,11 @@ impl<'h> VM<'h> {
         heap: &'h mut HeapReader<'h>,
         print_writer: PrintWriter<'h>,
     ) -> Self {
-        let SessionTables { global_names, interns } = tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = tables;
         // Reconstruct call frames from serialized form
         let frames: Vec<CallFrame<'_>> = snapshot
             .frames
@@ -1053,6 +1067,7 @@ impl<'h> VM<'h> {
             heap,
             interns,
             global_names,
+            modules,
             print_writer,
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
@@ -2203,16 +2218,25 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Loads a built-in module, raising `ModuleNotFoundError` for unknown names.
+    /// Loads a module, raising `ModuleNotFoundError` for unknown names.
+    ///
+    /// `sys.modules` answers first, as in CPython, so a module is built once
+    /// per session and a name a host put there is found. A standard module
+    /// that is not there yet is built and remembered.
     fn load_module(&mut self, module_id: u16) -> RunResult<()> {
         let name_id = StringId::from_index(module_id);
-        if let Some(module) = self.interns.static_string(name_id).and_then(StandardLib::from_static) {
-            let heap_id = module.create(self);
-            self.push(Value::Ref(heap_id));
-            Ok(())
-        } else {
-            Err(ExcType::module_not_found_error(self.interns.get_str(name_id)))
+        if let Some(held) = self.imported(name_id) {
+            self.push(held);
+            return Ok(());
         }
+        let Some(module) = self.interns.static_string(name_id).and_then(StandardLib::from_static) else {
+            return Err(ExcType::module_not_found_error(self.interns.get_str(name_id)));
+        };
+        let heap_id = module.create(self);
+        let held = Value::Ref(heap_id);
+        self.remember(name_id, held.clone_with_heap(self.heap))?;
+        self.push(held);
+        Ok(())
     }
 
     /// Resumes execution after an external call completes.

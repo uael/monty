@@ -36,6 +36,7 @@ pub(crate) mod random;
 pub(crate) mod re;
 pub(crate) mod string_templatelib;
 pub(crate) mod sys;
+pub(crate) mod table;
 pub(crate) mod time;
 pub(crate) mod typing;
 pub(crate) mod unicodedata;

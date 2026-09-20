@@ -1,19 +1,22 @@
 # Standard library modules
 
-Monty ships a fixed set of built-in stdlib modules. `import` of anything
-else raises `ModuleNotFoundError`: there is no `sys.path`, no site-packages,
-and no way for sandboxed code to load additional modules.
+Monty ships a fixed set of built-in stdlib modules. `import` of a name that is
+neither one of them nor bound in `sys.modules` raises `ModuleNotFoundError`:
+there is no `sys.path`, no site-packages, and nothing reads a file, so a module
+of your own reaches the sandbox only by being put in `sys.modules`.
 
-Every `import` builds a fresh module object; there is no `sys.modules` cache.
-So two imports of the same module are not the same object
-(`import math as a; import math as b` leaves `a is not b`), and a mutable
-attribute reverts on the next import — `sys.argv.append(...)` is not seen by a
-later `import sys`. Module attributes cannot be set at all
-(`sys.x = 1` raises `AttributeError`), so there is no way to share state
-through a module.
-The one exception is `random`'s module-level generator, which is session
-state: a `random.seed(...)` is still in effect after a later `import random`,
-in the next feed, and after a dump (see [random.md](random.md)).
+`sys.modules` is the session's own table, and `import` answers from it first, as
+in CPython. So a module is built once and every later import of that name finds
+the same object, across feeds and across a dump. Binding a name in it is what
+makes `import <name>` work for anything else: `sys.modules['x'] = obj` then
+`import x` binds `obj`, whatever `obj` is, exactly as CPython does.
+
+`import` is the only thing that reads the table. `__import__` and `importlib`
+are absent, a dotted name is not split into parent packages, and nothing else
+(a `from x import y`, a submodule, a reload) consults or writes it.
+Module attributes still cannot be set (`sys.x = 1` raises `AttributeError`), so
+state is shared through a module a program built itself rather than through a
+stdlib one.
 
 ## Modules available
 
