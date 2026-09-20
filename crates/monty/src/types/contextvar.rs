@@ -171,7 +171,7 @@ impl<'h> HeapObjectRead<'h, ContextVar> {
         } else {
             // CPython passes the variable itself as the exception's argument;
             // see `limitations/contextvars.md`.
-            let repr = repr_of(&Value::Ref(self.id()), vm)?;
+            let repr = repr_of_id(self.id(), vm)?;
             Err(SimpleException::new_msg(ExcType::LookupError, repr).into())
         }
     }
@@ -236,7 +236,7 @@ fn spend_token(token_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value> {
         unreachable!("the caller matched a token")
     };
     if token.get(vm.heap).used {
-        let repr = repr_of(&Value::Ref(token_id), vm)?;
+        let repr = repr_of_id(token_id, vm)?;
         return Err(
             SimpleException::new_msg(ExcType::RuntimeError, format!("{repr} has already been used once")).into(),
         );
@@ -337,4 +337,17 @@ fn repr_of(value: &Value, vm: &mut VM<'_>) -> RunResult<String> {
     let mut repr = String::new();
     value.py_repr_fmt(&mut repr, vm, &mut LazyHeapSet::default())?;
     Ok(repr)
+}
+
+/// The `repr()` of a heap entry named by its id, for the messages that name a
+/// variable or a token the caller holds no `Value` for.
+///
+/// The reference is owned for the length of the call. A borrowed id wrapped in
+/// a temporary `Value::Ref` is released by nothing, which is the reference
+/// counting bug `memory-model-checks` panics on.
+fn repr_of_id(id: HeapId, vm: &mut VM<'_>) -> RunResult<String> {
+    let held = Value::Ref(id);
+    vm.heap.inc_ref(id);
+    defer_drop!(held, vm);
+    repr_of(held, vm)
 }
