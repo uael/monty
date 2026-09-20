@@ -187,7 +187,7 @@ pub(crate) fn gather(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
             Value::Ref(id)
                 if matches!(
                     vm.heap.get(*id),
-                    HeapData::Coroutine(_) | HeapData::ExternalFuture(_) | HeapData::GatherFuture(_)
+                    HeapData::Generator(_) | HeapData::ExternalFuture(_) | HeapData::GatherFuture(_)
                 )
         ) {
             return Err(ExcType::type_error(

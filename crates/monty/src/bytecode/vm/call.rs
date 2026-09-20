@@ -11,7 +11,6 @@ use monty_types::{MontyUuid, OsFunctionCall};
 use super::{CallFrame, VM, attr::PendingLookupEffect, function_namespace, recursion::RunReentryGuard};
 use crate::{
     args::{ArgValues, KwargsValues},
-    asyncio::Coroutine,
     builtins::{Builtins, BuiltinsFunctions, BuiltinsFunctionsExt},
     bytecode::FrameExit,
     defer_drop,
@@ -26,7 +25,7 @@ use crate::{
     types::{
         Dict, Instance, PyTrait, Type, allocate_tuple,
         bytes::call_bytes_method,
-        generator::Generator,
+        generator::{Generator, GeneratorKind},
         instance::{class_builtin_exc, class_inherits_str, class_member, class_name},
         str::{Str, allocate_class_string, call_str_method},
         tuple::TupleVec,
@@ -1001,8 +1000,8 @@ impl<'h> VM<'h> {
         let callable = self.pop();
         debug_assert_exact_callable(&callable, func_id);
 
-        let coroutine = Coroutine::new(func_id, namespace, None);
-        let coroutine_id = self.heap.allocate(HeapData::Coroutine(coroutine));
+        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, namespace, None);
+        let coroutine_id = self.heap.allocate(HeapData::Generator(Box::new(coroutine)));
         CallResult::Value(Value::Ref(coroutine_id))
     }
 
@@ -1063,8 +1062,8 @@ impl<'h> VM<'h> {
         if let Some(globals) = globals {
             this.heap.inc_ref(globals);
         }
-        let coroutine = Coroutine::new(func_id, namespace, globals);
-        let coroutine_id = this.heap.allocate(HeapData::Coroutine(coroutine));
+        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, namespace, globals);
+        let coroutine_id = this.heap.allocate(HeapData::Generator(Box::new(coroutine)));
 
         Ok(CallResult::Value(Value::Ref(coroutine_id)))
     }
@@ -1095,7 +1094,7 @@ impl<'h> VM<'h> {
         if let Some(globals) = globals {
             this.heap.inc_ref(globals);
         }
-        let generator = Generator::new(func_id, namespace, globals);
+        let generator = Generator::new(GeneratorKind::Generator, func_id, namespace, globals);
         let generator_id = this.heap.allocate(HeapData::Generator(Box::new(generator)));
 
         Ok(CallResult::Value(Value::Ref(generator_id)))

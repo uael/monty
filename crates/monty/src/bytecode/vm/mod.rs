@@ -51,7 +51,7 @@ use crate::{
     types::{
         Dict, LongInt, PyTrait, SessionRandom, allocate_interpolation, allocate_template, allocate_type_alias,
         file::{apply_buffer_store, apply_open_name, apply_write_position},
-        generator::{Delegation, GeneratorState},
+        generator::{Delegation, GeneratorKind, GeneratorState},
         instance::instance_builtin_exc,
         match_pattern::{is_match_mapping, is_match_sequence, match_class, match_keys, match_len, match_rest},
         random::SEED_BYTES,
@@ -2628,11 +2628,12 @@ impl<'h> VM<'h> {
     /// exactly where a call's return value would.
     ///
     /// # Errors
-    /// `ValueError` when the generator is already running, `StopIteration` when
-    /// it has finished, and `TypeError` for a value sent to one that has not
-    /// started — all three as CPython reports them.
+    /// `ValueError` when the generator is already running, `TypeError` for a
+    /// value sent to one that has not started, and for one that has finished
+    /// `StopIteration` from a generator or `RuntimeError` from a coroutine,
+    /// which CPython refuses to let anything resume twice.
     pub(crate) fn resume_generator(&mut self, gen_id: HeapId, sent: Value) -> RunResult<CallResult> {
-        let state = self.generator_state(gen_id);
+        let (kind, state) = self.generator_kind_and_state(gen_id);
         match state {
             GeneratorState::Running => {
                 sent.drop_with(self);
@@ -2640,11 +2641,11 @@ impl<'h> VM<'h> {
             }
             GeneratorState::Done => {
                 sent.drop_with(self);
-                return Err(ExcType::stop_iteration());
+                return Err(kind.spent());
             }
             GeneratorState::Created if !matches!(sent, Value::None) => {
                 sent.drop_with(self);
-                return Err(ExcType::type_error_send_to_just_started());
+                return Err(ExcType::type_error_send_to_just_started(kind.word()));
             }
             GeneratorState::Created | GeneratorState::Suspended => {}
         }
@@ -2664,10 +2665,16 @@ impl<'h> VM<'h> {
 
     /// Where a generator is in its life.
     fn generator_state(&self, gen_id: HeapId) -> GeneratorState {
+        self.generator_kind_and_state(gen_id).1
+    }
+
+    /// Which of the two objects this is, and where it is in its life. The two
+    /// are read together because every refusal of a resume is worded from both.
+    fn generator_kind_and_state(&self, gen_id: HeapId) -> (GeneratorKind, GeneratorState) {
         let HeapData::Generator(generator) = self.heap.get(gen_id) else {
-            unreachable!("generator_state called off a generator")
+            unreachable!("generator_kind_and_state called off a generator")
         };
-        generator.state
+        (generator.kind, generator.state)
     }
 
     /// Raises `exception` inside a suspended generator, at the `yield` it
@@ -2688,8 +2695,12 @@ impl<'h> VM<'h> {
     /// exception is no error here: it is the [`CallResult::Raised`] the loop
     /// makes, which is what binds the object the caller threw.
     pub(crate) fn throw_into_generator(&mut self, gen_id: HeapId, exception: &Value) -> RunResult<CallResult> {
-        match self.generator_state(gen_id) {
+        let (kind, state) = self.generator_kind_and_state(gen_id);
+        match state {
             GeneratorState::Running => Err(ExcType::value_error_generator_running()),
+            // A coroutine that has run is spent, and CPython lets nothing reach
+            // it again, not even a throw.
+            GeneratorState::Done if kind == GeneratorKind::Coroutine => Err(kind.spent()),
             // Nothing is suspended to raise at, so it raises where it was asked
             // and leaves the generator exhausted, as CPython does.
             GeneratorState::Created | GeneratorState::Done => {

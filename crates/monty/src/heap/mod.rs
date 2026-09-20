@@ -2086,21 +2086,10 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 }
             }
         }
-        HeapData::Coroutine(coro) => {
-            // Add namespace values that are heap references
-            for value in &coro.namespace {
-                if let Value::Ref(id) = value {
-                    on_child(*id);
-                }
-            }
-            if let Some(globals) = coro.globals {
-                on_child(globals);
-            }
-        }
-        // Mirrors `Coroutine` above, and `Generator::py_dec_ref_ids`: a
-        // suspended frame owns every value in both of its saved regions, plus
-        // its globals dict. A generator can hold itself, so this edge is what
-        // lets the collector see such a cycle.
+        // Mirrors `Generator::py_dec_ref_ids`: a suspended frame owns every
+        // value in both of its saved regions, plus its globals dict. A
+        // generator can hold itself, so this edge is what lets the collector
+        // see such a cycle. A coroutine is one of these too.
         HeapData::Generator(generator) => {
             for value in generator.stack.iter().chain(&generator.exception_stack) {
                 if let Value::Ref(id) = value {
@@ -2254,13 +2243,6 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::ContextVar(var) => var.py_dec_ref_ids(stack),
         HeapData::ContextVarToken(token) => token.py_dec_ref_ids(stack),
         HeapData::Module(m) => m.py_dec_ref_ids(stack),
-        HeapData::Coroutine(coro) => {
-            // Decrement ref count for namespace values that are heap references
-            for value in &mut coro.namespace {
-                value.py_dec_ref_ids(stack);
-            }
-            stack.extend(coro.globals);
-        }
         // Mirrors `for_each_child_id` above; the body lives on `Generator` as
         // its `HeapItem` impl, so the two walkers cannot drift.
         HeapData::Generator(generator) => generator.py_dec_ref_ids(stack),

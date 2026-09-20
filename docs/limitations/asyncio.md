@@ -45,7 +45,16 @@ time (see [language.md](language.md)).
 - `async def` functions and `await` work; coroutines can call each other.
 - **Coroutines are single-shot.** Awaiting the same coroutine object twice
     raises `RuntimeError`. Store the *result*, not the coroutine, if you need
-    it again.
+    it again. `send()`, `throw()` and `close()` drive one by hand, as they
+    drive a generator (see [generators.md](generators.md)); one that has
+    already run refuses all three but `close()` with the same `RuntimeError`.
+- **`cr_frame`, `cr_running`, `cr_code`, `cr_await`** and the rest of the
+    introspection attributes are absent, and so is `__await__` on a coroutine.
+    Reading `send`, `throw` or `close` rather than calling it raises
+    `AttributeError`, as it does on a generator.
+- **A coroutine that is never awaited says nothing.** CPython warns
+    `RuntimeWarning: coroutine 'f' was never awaited` when it is collected;
+    Monty has no warnings.
 - `await` on a non-awaitable raises `TypeError`.
 - `async for` and `async with` are **rejected at parse time** (see
     [language.md](language.md)). Async iteration and async context-manager

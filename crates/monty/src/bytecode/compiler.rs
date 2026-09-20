@@ -1804,7 +1804,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     return Err(CompileError::new("'await' outside function", expr_loc.position));
                 }
                 // Await expressions: compile the inner expression, then emit Await
-                // Await handles ExternalFuture, Coroutine, and GatherFuture
+                // Await handles a coroutine, an ExternalFuture and a GatherFuture
                 self.compile_expr(value)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);

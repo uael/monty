@@ -14,8 +14,8 @@ use smallvec::{SmallVec, smallvec};
 use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, function_namespace, stack_index};
 use crate::{
     asyncio::{
-        AwaitedGather, Awaiter, CallId, Coroutine, CoroutineState, ExternalFuture, ExternalFutureState, GatherFuture,
-        GatherState, PendingChildren, TaskId,
+        AwaitedGather, Awaiter, CallId, ExternalFuture, ExternalFutureState, GatherFuture, GatherState,
+        PendingChildren, TaskId,
     },
     bytecode::vm::scheduler::SerializedTaskFrame,
     defer_drop, defer_drop_mut,
@@ -24,10 +24,12 @@ use crate::{
         ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapObjectRead, HeapRead, HeapReadOutput,
         HeapReader,
     },
-    intern::FunctionId,
     object_bridge::MontyObjectExt,
     run_progress::{ExtFunctionResult, ExtFunctionResultExt},
-    types::List,
+    types::{
+        List, Type,
+        generator::{Generator, GeneratorKind, GeneratorState},
+    },
     value::Value,
 };
 
@@ -41,7 +43,7 @@ impl<'h> VM<'h> {
     /// Executes the Await opcode.
     ///
     /// Pops the awaitable from the stack and handles it based on its type:
-    /// - `Coroutine`: validates state is New, then pushes a frame to execute it
+    /// - a coroutine: validates it has not run, then splices its frame in
     /// - `ExternalFuture`: blocks until resolved or yields if not ready
     /// - `GatherFuture`: spawns tasks for coroutines and tracks external futures
     ///
@@ -61,7 +63,7 @@ impl<'h> VM<'h> {
             Value::Ref(heap_id) => {
                 let heap_id = *heap_id;
                 let poll = match this.heap.read(heap_id) {
-                    HeapReadOutput::Coroutine(coro) => return this.await_coroutine(coro),
+                    HeapReadOutput::Generator(coro) => return this.await_coroutine(coro),
                     HeapReadOutput::GatherFuture(gather) => this.await_gather_future(gather, awaiter)?,
                     HeapReadOutput::ExternalFuture(mut fut) => this.await_external_future(&mut fut, awaiter)?,
                     _ => return Err(ExcType::object_not_awaitable(&awaitable.py_type_name(this))),
@@ -78,32 +80,37 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Awaits a coroutine by pushing a frame to execute it.
+    /// Awaits a coroutine by splicing its frame in as a delegation.
     ///
-    /// Validates the coroutine is in `New` state, extracts its captured namespace
-    /// and cells, marks it as `Running`, and pushes a frame to execute the coroutine body.
-    fn await_coroutine(&mut self, mut coro: HeapObjectRead<'h, Coroutine>) -> Result<AwaitResult, RunError> {
-        // Check if coroutine can be awaited (must be New)
-        if coro.get(self.heap).state != CoroutineState::New {
+    /// A coroutine is a saved frame (see [`GeneratorKind`]), so awaiting one is
+    /// resuming it. The coroutine stays on the awaiter's stack as the receiver
+    /// and the resumed frame carries `delegated_return`, so the value the body
+    /// returns takes its place where the `await` stands, exactly as the result
+    /// of a `yield from` does. A plain generator is not awaitable.
+    fn await_coroutine(&mut self, coro: HeapObjectRead<'h, Generator>) -> Result<AwaitResult, RunError> {
+        let coro_id = coro.id();
+        let saved = coro.get(self.heap);
+        let (kind, state) = (saved.kind, saved.state);
+        drop(coro);
+        if kind != GeneratorKind::Coroutine {
+            let name = Type::Generator.name(self.heap, self.interns).into_owned();
+            return Err(ExcType::object_not_awaitable(&name));
+        }
+        if state != GeneratorState::Created {
             return Err(ExcType::cannot_reuse_already_awaited_coroutine());
         }
-
-        // Extract coroutine data before mutating
-        let func_id = coro.get(self.heap).func_id;
-        let globals = coro.get(self.heap).globals;
-        let namespace_values: Vec<Value> = coro
-            .get(self.heap)
-            .namespace
-            .iter()
-            .map(|v| v.clone_with_heap(self))
-            .collect();
-
-        // Mark coroutine as Running
-        coro.get_mut(self.heap).state = CoroutineState::Running;
-
-        // Create namespace and push frame (guard drops awaitable at scope exit)
-        self.start_coroutine_frame(func_id, namespace_values, globals)?;
-
+        // The `await` resumes here once the body returns, which is where
+        // `finish_delegation` puts the frame back.
+        let done_ip = self.current_frame.ip;
+        self.heap.inc_ref(coro_id);
+        self.push(Value::Ref(coro_id));
+        if let Err(e) = self.splice_generator_frame(coro_id) {
+            // The receiver never became one, so it goes rather than waiting for
+            // a delegation that will not end.
+            self.pop().drop_with(self);
+            return Err(e);
+        }
+        self.current_frame.delegated_return = Some(done_ip);
         Ok(AwaitResult::FramePushed)
     }
 
@@ -236,13 +243,16 @@ impl<'h> VM<'h> {
             }
 
             let poll = match self.heap.read(item_id) {
-                HeapReadOutput::Coroutine(coro) => {
-                    // Reject reuse up-front: either the coroutine is no longer
-                    // `New`, or another gather already spawned it (`spawn`
-                    // returns `Ok(None)`).
-                    if coro.get(self.heap).state != CoroutineState::New
-                        || self.scheduler.spawn(self.heap, item_id, Some(gather_id)).is_none()
-                    {
+                HeapReadOutput::Generator(coro) => {
+                    // Reject reuse up-front: either the coroutine has already
+                    // run, or another gather spawned it (`spawn` returns
+                    // `Ok(None)`). A plain generator is no awaitable at all.
+                    let saved = coro.get(self.heap);
+                    if saved.kind != GeneratorKind::Coroutine || saved.state != GeneratorState::Created {
+                        return Err(ExcType::cannot_reuse_already_awaited_coroutine());
+                    }
+                    drop(coro);
+                    if self.scheduler.spawn(self.heap, item_id, Some(gather_id)).is_none() {
                         return Err(ExcType::cannot_reuse_already_awaited_coroutine());
                     }
                     Poll::Pending
@@ -272,7 +282,7 @@ impl<'h> VM<'h> {
                         return Ok(Some(self.open_gather_commit(item_id, sub_awaiter, Some(idx))));
                     }
                 }
-                _ => panic!("gather item is not a Coroutine, ExternalFuture, or GatherFuture"),
+                _ => panic!("gather item is not a coroutine, an ExternalFuture, or a GatherFuture"),
             };
 
             match poll {
@@ -370,40 +380,6 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Starts execution of a coroutine by pushing its locals onto the stack.
-    ///
-    /// Extends the VM stack with the coroutine's pre-bound namespace values
-    /// and pushes a new frame to execute the coroutine's function body.
-    fn start_coroutine_frame(
-        &mut self,
-        func_id: FunctionId,
-        namespace_values: Vec<Value>,
-        globals: Option<HeapId>,
-    ) -> Result<(), RunError> {
-        let call_offset = self.current_offset();
-        let code = &self.interns.get_function(func_id).code;
-        let locals_count = u16::try_from(namespace_values.len()).expect("coroutine namespace size exceeds u16");
-
-        // Extend the stack with the coroutine's pre-bound locals.
-        let stack_base = self.stack.len();
-        self.stack.extend(namespace_values);
-
-        // Push frame to execute the coroutine
-        let exc_stack_base = self.exception_stack.len();
-        let namespace = function_namespace(globals, &*self.heap);
-        self.push_frame(CallFrame::new_function(
-            code,
-            stack_base,
-            locals_count,
-            exc_stack_base,
-            func_id,
-            call_offset,
-            namespace,
-        ))?;
-
-        Ok(())
-    }
-
     /// Selects another task after blocking, or yields to the host with the current context intact.
     fn switch_or_yield(&mut self) -> Result<AwaitResult, RunError> {
         if let Some(next_task_id) = self.scheduler.next_ready_task() {
@@ -429,11 +405,7 @@ impl<'h> VM<'h> {
             .expect("handle_task_completion: spawned task without a coroutine");
 
         // Re-awaiting the coroutine must see that its execution has ended.
-        let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
-            panic!("task coroutine_id doesn't point to a Coroutine")
-        };
-        coro.get_mut(self.heap).state = CoroutineState::Completed;
-        drop(coro);
+        self.finish_generator(coroutine_id);
 
         self.scheduler.cancel_task(task_id, self.heap);
 
@@ -616,10 +588,10 @@ impl<'h> VM<'h> {
             // The previous task's frames are already saved. A reused coroutine
             // must fail this new task and select its successor before the
             // exception can propagate.
-            let HeapReadOutput::Coroutine(coro) = self.heap.read(coro_id) else {
-                panic!("task coroutine_id doesn't point to a Coroutine")
+            let HeapReadOutput::Generator(coro) = self.heap.read(coro_id) else {
+                panic!("task coroutine_id doesn't point to a coroutine")
             };
-            let is_new = coro.get(self.heap).state == CoroutineState::New;
+            let is_new = coro.get(self.heap).state == GeneratorState::Created;
             // Release the handle before either branch: both go on to drop
             // references to this coroutine, and freeing it under a live
             // reader panics.
@@ -641,27 +613,24 @@ impl<'h> VM<'h> {
     ///
     /// Similar to exec_get_awaitable's coroutine handling, but for task initialization.
     fn init_task_from_coroutine(&mut self, coroutine_id: HeapId) -> Result<(), RunError> {
-        let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
-            panic!("task coroutine_id doesn't point to a Coroutine")
+        let HeapReadOutput::Generator(mut coro) = self.heap.read(coroutine_id) else {
+            panic!("task coroutine_id doesn't point to a coroutine")
         };
 
         // Check state
-        if coro.get(self.heap).state != CoroutineState::New {
+        if coro.get(self.heap).state != GeneratorState::Created {
             return Err(ExcType::cannot_reuse_already_awaited_coroutine());
         }
 
-        // Extract coroutine data
+        // The frame takes the bound arguments rather than copying them: a task
+        // never lifts its frame back into the object, so the object keeps
+        // nothing while the task runs and `handle_task_completion` ends it.
         let func_id = coro.get(self.heap).func_id;
         let globals = coro.get(self.heap).globals;
-        let namespace_values: Vec<Value> = coro
-            .get(self.heap)
-            .namespace
-            .iter()
-            .map(|v| v.clone_with_heap(self))
-            .collect();
-
-        // Mark coroutine as Running
-        coro.get_mut(self.heap).state = CoroutineState::Running;
+        let saved = coro.get_mut(self.heap);
+        saved.state = GeneratorState::Running;
+        let namespace_values: Vec<Value> = mem::take(&mut saved.stack);
+        drop(coro);
 
         // Push locals onto stack and push frame directly (can't use start_coroutine_frame
         // because that needs a current frame for call_offset, but spawned tasks

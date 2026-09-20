@@ -1863,12 +1863,13 @@ pub(crate) trait ExcTypeExt: Sized {
     /// Creates the `TypeError` for `send()`ing a value to an unstarted generator.
     ///
     /// Matches CPython's format:
-    /// `TypeError: can't send non-None value to a just-started generator`
+    /// `TypeError: can't send non-None value to a just-started generator`,
+    /// which names a coroutine when that is what was sent to.
     #[must_use]
-    fn type_error_send_to_just_started() -> RunError {
+    fn type_error_send_to_just_started(kind: &str) -> RunError {
         SimpleException::new_msg(
             ExcType::TypeError,
-            "can't send non-None value to a just-started generator",
+            format!("can't send non-None value to a just-started {kind}"),
         )
         .into()
     }

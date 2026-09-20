@@ -11,7 +11,9 @@ and a `throw()` or a `close()` reaches the receiver first, at every depth.
 While it runs, a generator's frame is an ordinary frame on the VM's own frame
 stack; `yield` lifts it back off into the generator object. Its saved state is
 the frame and nothing else, so what is written below follows from what a frame
-here can hold.
+here can hold. A coroutine is the same saved frame, stopping at an `await`
+rather than at a `yield`, so `send()`, `throw()` and `close()` drive one the
+same way; see [asyncio.md](asyncio.md) for where the two part.
 
 ## Not implemented
 

@@ -280,7 +280,7 @@ pub enum Expr {
     UnaryInvert(Box<ExprLoc>),
     /// Await expression - suspends execution until the awaited value resolves.
     ///
-    /// Can await `ExternalFuture`, `Coroutine`, or `GatherFuture` values.
+    /// Can await a coroutine, an `ExternalFuture` or a `GatherFuture`.
     /// Raises `TypeError` for non-awaitable values.
     /// Unlike standard Python, `await` is allowed at module level (like Jupyter notebooks).
     Await(Box<ExprLoc>),
@@ -936,7 +936,7 @@ pub struct PreparedFunctionDef {
     pub default_exprs: Vec<ExprLoc>,
     /// Whether this is an async function (`async def`).
     ///
-    /// When true, calling this function creates a `Coroutine` object instead of
+    /// When true, calling this function hands back a coroutine instead of
     /// immediately pushing a frame.
     pub is_async: bool,
 }
