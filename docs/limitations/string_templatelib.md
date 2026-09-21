@@ -15,9 +15,6 @@ last binding `string` as CPython does.
 - **`string` holds `templatelib` alone.** `import string` gives a package with
     no other attribute, so `string.ascii_letters` and the rest of CPython's
     `string` module raise `AttributeError`.
-- **The import does not type-check.** The vendored typeshed carries no `string`
-    package, so the module does not resolve during type checking even though it
-    imports and runs.
 
 ## Module contents
 
