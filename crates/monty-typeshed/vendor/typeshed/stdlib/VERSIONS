@@ -24,6 +24,8 @@ pathlib: 3.4-
 pathlib.types: 3.14-
 random: 3.0-
 re: 3.0-
+string: 3.14-  # a namespace for templatelib: the package itself is not importable at runtime
+string.templatelib: 3.14-
 sys: 3.0-
 time: 3.0-
 typing: 3.5-
