@@ -47,7 +47,7 @@ use crate::{
 
 /// Inline capacity for small tuples. Tuples with 2 or fewer elements avoid
 /// heap allocation for the items storage.
-const TUPLE_INLINE_CAPACITY: usize = 2;
+pub(crate) const TUPLE_INLINE_CAPACITY: usize = 2;
 
 /// Storage type for tuple items. Uses SmallVec to inline small tuples.
 pub(crate) type TupleVec = SmallVec<[Value; TUPLE_INLINE_CAPACITY]>;
