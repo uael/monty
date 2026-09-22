@@ -1880,11 +1880,7 @@ impl<'h> VM<'h> {
                     let defaults_count = defaults_count as usize;
 
                     // A function defined under an explicit globals dict carries it.
-                    let globals = self
-                        .current_frame
-                        .namespace
-                        .as_deref()
-                        .and_then(FrameNamespace::dict_globals);
+                    let globals = self.dict_globals();
                     if defaults_count == 0 && globals.is_none() {
                         // No defaults - use inline Value::Function (no heap allocation)
                         self.push(Value::DefFunction(func_id));
@@ -1937,11 +1933,7 @@ impl<'h> VM<'h> {
 
                     // Pop default values from stack (drain maintains order: first pushed = first in vec)
                     let defaults = self.pop_n(defaults_count);
-                    let globals = self
-                        .current_frame
-                        .namespace
-                        .as_deref()
-                        .and_then(FrameNamespace::dict_globals);
+                    let globals = self.dict_globals();
                     if let Some(globals) = globals {
                         self.heap.inc_ref(globals);
                     }

@@ -88,6 +88,11 @@ pub(crate) struct Class {
     /// would report and what a future second base would extend; both
     /// `py_dec_ref_ids` and the GC child walk must report every id in it.
     bases: Vec<HeapId>,
+    /// The `exec()` / `eval()` globals dict the class was made under, as an
+    /// OWNED reference, or `None` for a class of the module: what a function
+    /// made under a dict carries too, so that a copy which makes again what
+    /// was made under one dict knows which classes are its.
+    globals: Option<HeapId>,
     /// The builtin type this class descends from, resolved once at creation
     /// because the chain cannot change afterwards, or `None` for a class that
     /// descends from `object` alone.
@@ -109,13 +114,44 @@ impl Class {
     /// Dataclass options start at their defaults; `@dataclass` sets them with
     /// [`HeapRead::set_dataclass_options`] once it has built the class.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, base: Option<BuiltinBase>) -> Self {
+    pub fn new(
+        name: EitherStr,
+        namespace: Dict,
+        bases: Vec<HeapId>,
+        base: Option<BuiltinBase>,
+        globals: Option<HeapId>,
+    ) -> Self {
         Self {
             name,
             namespace,
             bases,
+            globals,
             base,
             options: DataclassOptions::default(),
+            uuid: None,
+        }
+    }
+
+    /// The globals dict the class was made under, borrowed, or `None` for a
+    /// class of the module.
+    #[must_use]
+    pub fn globals(&self) -> Option<HeapId> {
+        self.globals
+    }
+
+    /// This class made again: its name, its builtin base and its dataclass
+    /// options over another namespace, other bases and another globals dict,
+    /// each an OWNED reference the copy takes, with no boundary identity yet,
+    /// since the copy has crossed nowhere.
+    #[must_use]
+    pub(crate) fn made_again(&self, namespace: Dict, bases: Vec<HeapId>, globals: Option<HeapId>) -> Self {
+        Self {
+            name: self.name.clone(),
+            namespace,
+            bases,
+            globals,
+            base: self.base,
+            options: self.options,
             uuid: None,
         }
     }
@@ -336,7 +372,8 @@ impl HeapItem for Class {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         self.namespace.py_dec_ref_ids(stack);
         // Mirrors the GC child walk in `heap::for_each_child_id`: a class owns
-        // a reference on each of its bases.
+        // a reference on each of its bases and on the dict it was made under.
         stack.extend(self.bases.iter().copied());
+        stack.extend(self.globals);
     }
 }

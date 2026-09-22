@@ -61,6 +61,7 @@ assert tuple(name for name in sys.builtin_module_names if name != 'gc') == (
     'itertools',
     'json',
     'math',
+    'monty',
     'os',
     'pathlib',
     'random',

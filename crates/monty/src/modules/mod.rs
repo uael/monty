@@ -29,6 +29,7 @@ pub(crate) mod gc;
 pub(crate) mod itertools;
 pub(crate) mod json;
 pub(crate) mod math;
+pub(crate) mod monty;
 pub(crate) mod os;
 pub(crate) mod pathlib;
 pub(crate) mod random;
@@ -95,6 +96,9 @@ pub(crate) enum StandardLib {
     Time,
     /// The `contextvars` module exposing `ContextVar` and its `Token`.
     Contextvars,
+    /// The `monty` module: what this interpreter does that CPython does not,
+    /// for the host that embeds it.
+    Monty,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -129,6 +133,7 @@ impl StandardLib {
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
             StaticStrings::Time => Some(Self::Time),
             StaticStrings::Contextvars => Some(Self::Contextvars),
+            StaticStrings::Monty => Some(Self::Monty),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -162,6 +167,7 @@ impl StandardLib {
             Self::StringTemplatelib => string_templatelib::create_module(vm),
             Self::Time => time::create_module(vm),
             Self::Contextvars => contextvars::create_module(vm),
+            Self::Monty => monty::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }
@@ -192,6 +198,7 @@ pub(crate) enum ModuleFunctions {
     Random(random::RandomFunctions),
     Copy(copy::CopyFunctions),
     Time(time::TimeFunctions),
+    Monty(monty::MontyFunctions),
     /// `gc` module functions — only present under the `test-hooks` feature.
     /// See [`gc`] for why it is gated; as in [`StandardLib`], the gated block
     /// goes last and new variants are appended ahead of it.
@@ -223,6 +230,7 @@ impl fmt::Display for ModuleFunctions {
             Self::Random(func) => write!(f, "{func}"),
             Self::Copy(func) => write!(f, "{func}"),
             Self::Time(func) => write!(f, "{func}"),
+            Self::Monty(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
             Self::Gc(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
@@ -253,6 +261,7 @@ impl ModuleFunctions {
             Self::Random(functions) => random::call(vm, functions, args),
             Self::Copy(functions) => copy::call(vm, functions, args).map(CallResult::Value),
             Self::Time(functions) => time::call(vm, functions, args),
+            Self::Monty(functions) => monty::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]
             Self::Gc(functions) => gc::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]

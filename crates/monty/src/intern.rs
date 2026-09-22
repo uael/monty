@@ -1420,7 +1420,8 @@ pub enum StaticStrings {
     ModuleKwarg,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
-    /// Value of `sys.platform`.
+    /// Value of `sys.platform`, and the `monty` module: what this interpreter
+    /// does that CPython does not.
     Monty,
     /// The value of `sys.copyright`.
     #[strum(serialize = "Copyright (c) Pydantic Services Inc. 2026 to present")]
@@ -1615,6 +1616,8 @@ pub enum StaticStrings {
     Readline,
     /// `file.readlines()` method.
     Readlines,
+    /// `monty.rebound()` function.
+    Rebound,
     /// `functools.reduce()` function.
     Reduce,
     /// Kwarg name `rel_tol` — `math.isclose(rel_tol=...)`.
@@ -1853,6 +1856,8 @@ pub enum StaticStrings {
     Tan,
     /// `math.tanh()` function.
     Tanh,
+    /// Parameter name `target` of `monty.rebound()`.
+    Target,
     /// `math.tau` constant
     Tau,
     /// `itertools.tee()` function.
