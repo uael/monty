@@ -1174,6 +1174,8 @@ pub enum StaticStrings {
     Initial,
     /// `list.insert()` method.
     Insert,
+    /// `monty.instance()` function.
+    Instance,
     /// `sys.flags.inspect` field.
     Inspect,
     /// `sys.flags.int_max_str_digits` field.
