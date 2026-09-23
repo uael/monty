@@ -336,7 +336,9 @@ pub enum ExcType {
 
     // --- AttributeError hierarchy ---
     AttributeError,
-    /// Subclass of AttributeError (from dataclasses module).
+    /// Subclass of AttributeError (from dataclasses module). Qualified like the other exceptions of a module, so a
+    /// bare `FrozenInstanceError` is no builtin and raises `NameError`, as it does in CPython.
+    #[strum(serialize = "dataclasses.FrozenInstanceError")]
     FrozenInstanceError,
 
     // --- NameError hierarchy ---

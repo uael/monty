@@ -6,7 +6,7 @@ Python.
 
 ## Implemented builtin functions
 
-`abs`, `all`, `any`, `bin`, `callable`, `chr`, `divmod`, `enumerate`, `eval`, `exec`,
+`abs`, `all`, `any`, `bin`, `callable`, `chr`, `compile`, `divmod`, `enumerate`, `eval`, `exec`,
 `filter`, `format`, `getattr`, `globals`, `hasattr`, `hash`, `hex`, `id`, `isinstance`,
 `issubclass`, `iter`, `len`, `locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`,
 `pow`, `print`, `repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
@@ -24,19 +24,24 @@ These raise `NameError`:
 
 - **Imports**: `__import__`.
 - **Namespace introspection**: `vars`, `dir`.
-- **Interactive**: `input`, `breakpoint`, `help`.
+- **Interactive**: `input`, `breakpoint`, `help`, and the other names the `site` module adds:
+    `exit`, `quit`, `copyright`, `credits`, `license`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`.
 - **Construction / coercion**: `bytearray`, `complex`, `memoryview`, `ascii`.
-- **Other**: `delattr`, `aiter`, `anext`.
+- **Other**: `delattr`, `aiter`, `anext`, and the aliases of `OSError`: `IOError`, `EnvironmentError`,
+    `WindowsError`.
 
 `super()` is the biggest practical omission: a class can name one base (see
 [classes.md](classes.md)), but an override cannot call the method it replaces.
 
-## Builtins a type-checked session rejects
+## Builtins and the type checker
 
-Monty's narrowed `builtins.pyi` (`crates/monty-typeshed/vendor/`) lags the interpreter, so a session with type checking
-enabled rejects `compile` and `issubclass` with `unresolved-reference` although both run.
-Feed the call through `eval()` / `exec()`, whose source is never type-checked, or turn type checking off.
+Monty's narrowed `builtins.pyi` (`crates/monty-typeshed/vendor/`) binds the names the interpreter binds and no
+other. A session with type checking enabled accepts every builtin that runs, and rejects every name above that
+raises `NameError`. `crates/monty-runtime/tests/typeshed_builtins.rs` holds the two to each other.
+
+`UnicodeDecodeError` and `UnicodeEncodeError` derive from `ValueError`, in the stub as in the interpreter:
+Monty has no `UnicodeError`.
 
 ## Behavioural divergences
 
