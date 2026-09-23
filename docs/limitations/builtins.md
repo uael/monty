@@ -24,14 +24,25 @@ These raise `NameError`:
 
 - **Code objects and imports**: `compile`, `__import__`.
 - **Namespace introspection**: `globals`, `vars`, `dir`.
-- **Interactive**: `input`, `breakpoint`, `help`.
-- **Decorators / descriptors**: `classmethod`, `staticmethod`, `property`,
-    `super`. (`@property` on functions is not recognized; use a method.)
-- **Construction / coercion**: `bytearray`, `memoryview`, `object`, `ascii`.
-- **Other**: `callable`, `delattr`, `issubclass`, `aiter`, `anext`.
+- **Interactive**: `input`, `breakpoint`, `help`, and the other names that the `site` module adds:
+    `exit`, `quit`, `copyright`, `credits`, `license`.
+- **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`. (`property` is a name, but
+    `@property` on functions is not recognized; use a method.)
+- **Construction / coercion**: `bytearray`, `memoryview`, `ascii`.
+- **Other**: `callable`, `delattr`, `issubclass`, `aiter`, `anext`, and the aliases of `OSError`:
+    `IOError`, `EnvironmentError`, `WindowsError`.
 
 `super()` is the biggest practical omission: with no class inheritance either
 (see [classes.md](classes.md)), there is no inheritance mechanism at all.
+
+## Builtins and the type checker
+
+Monty's narrowed `builtins.pyi` (`crates/monty-typeshed/vendor/`) binds the names that the interpreter binds and no
+other. A session with type checking enabled accepts every builtin that runs, and rejects every name above that
+raises `NameError`. `crates/monty-runtime/tests/typeshed_builtins.rs` holds the two to each other.
+
+`object` and `property` are names in both, but `object()` raises `TypeError`. `UnicodeDecodeError` and
+`UnicodeEncodeError` derive from `ValueError`, in the stub as in the interpreter: Monty has no `UnicodeError`.
 
 ## Behavioural divergences
 
