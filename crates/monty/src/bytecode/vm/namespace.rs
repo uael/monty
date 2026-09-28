@@ -134,6 +134,16 @@ impl<C: ContainsHeap> DropWithContext<C> for Box<FrameNamespace> {
 }
 
 impl VM<'_> {
+    /// The `exec()` / `eval()` globals dict the current frame resolves its
+    /// globals through, borrowed, or `None` for slot globals: what a function
+    /// or a class made in this frame carries.
+    pub(crate) fn dict_globals(&self) -> Option<HeapId> {
+        self.current_frame
+            .namespace
+            .as_deref()
+            .and_then(FrameNamespace::dict_globals)
+    }
+
     /// The namespace an `eval()` / `exec()` snippet runs in, from the call's
     /// `globals` / `locals` dicts (owned references, or `None`), and the mode
     /// its top level compiles in.

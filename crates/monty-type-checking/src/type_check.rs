@@ -45,7 +45,10 @@ impl TypeChecker {
     ///
     /// # Arguments
     /// * `python_source` - The python source code to type check.
-    /// * `stubs_file` - Optional stubs file to use for type checking.
+    /// * `stubs_file` - Optional stubs file to use for type checking. A bare
+    ///   file (`stubs.pyi`) is opened for the source with a star import; a
+    ///   file inside a package (`furb/engine.pyi`) is a module the source
+    ///   imports by its own name, and nothing is prepended.
     /// * `config` - Configuration for the type checking diagnostics.
     ///
     /// # Returns
@@ -62,7 +65,9 @@ impl TypeChecker {
         let main_path = src_root.join(python_source.path);
         let main_source = python_source.source_code;
 
-        let (main_file, code_offset): (File, u32) = if let Some(stubs_file) = stubs_file {
+        let (main_file, code_offset): (File, u32) = if let Some(stubs_file) = stubs_file
+            && !stubs_file.path.contains('/')
+        {
             let stubs_path = src_root.join(stubs_file.path);
             self.write_root_file(&stubs_path, stubs_file.source_code)?;
 
@@ -79,6 +84,11 @@ impl TypeChecker {
             // one line offset for errors vs. the original source code since we injected the stub import
             (main_file, offset)
         } else {
+            // A stub inside a package stands as the module it names, for the
+            // source to import as it would any other.
+            if let Some(stubs_file) = stubs_file {
+                self.write_root_file(&src_root.join(stubs_file.path), stubs_file.source_code)?;
+            }
             let main_file = self.write_root_file(&main_path, main_source)?;
             (main_file, 0)
         };

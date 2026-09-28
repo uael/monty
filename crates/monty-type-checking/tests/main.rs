@@ -248,6 +248,37 @@ fn reset_removes_previous_modules() {
     assert_snapshot!(second, @"main.py:1:6: error[unresolved-import] Cannot resolve imported module `leaky`");
 }
 
+/// The template string types monty exposes resolve, with the attributes the
+/// runtime answers.
+#[test]
+fn stdlib_templatelib_resolves() {
+    let code = "\
+from string.templatelib import Interpolation, Template
+
+def told(t: Template) -> list[str]:
+    return [one.expression for one in t.interpolations] + list(t.strings)
+";
+    let found = check_concise(code, "main.py");
+    assert!(found.is_none(), "{found:#?}");
+}
+
+/// A stub inside a package is the module it names: the source imports it by
+/// that name, nothing is prepended, and every line is the source's own.
+#[test]
+fn stub_inside_a_package_is_imported_by_name() {
+    let mut checker = TypeChecker::default();
+    let found = checker
+        .run(
+            &SourceFile::new("import furb.engine as e\nx: int = e.f()\n", "main.py"),
+            Some(&SourceFile::new("def f() -> str: ...\n", "furb/engine.pyi")),
+            concise(),
+        )
+        .unwrap()
+        .expect("a str is no int")
+        .to_string();
+    assert_snapshot!(found, @"main.py:2:10: error[invalid-assignment] Object of type `str` is not assignable to `int`");
+}
+
 /// Security-critical: stubs are files too — they must not survive `reset`
 /// either, or the next session could import the previous session's stubs.
 #[test]

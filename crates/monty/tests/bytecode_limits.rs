@@ -6,6 +6,8 @@
 //! - Local variable slots: Use wide instructions (u16), so up to 65535 locals work
 //! - Function call arguments: Limited to 255 (u8 operand) - returns SyntaxError if exceeded
 //! - Keyword argument counts: Limited to 255 (u8 operand) - returns SyntaxError if exceeded
+//! - Distinct names per code object: Limited to 65535 (u16 operand) - returns SyntaxError if exceeded
+//! - Functions defined per code object: Limited to 65536 (u16 operand) - returns SyntaxError if exceeded
 
 use std::fmt::Write;
 
@@ -377,6 +379,108 @@ mod stack_effect_limits {
             .expect("20000-entry dict literal should compile");
         let result = run.run_no_limits(vec![]);
         assert!(result.is_ok(), "20000-entry dict literal should run: {result:?}");
+    }
+}
+
+/// Generates `count` functions, each reading `names` distinct attributes of its
+/// argument, which the function's own name table holds.
+fn generate_attribute_readers(count: usize, names: usize) -> String {
+    let mut code = String::new();
+    for f in 0..count {
+        writeln!(code, "def f{f}(x):").unwrap();
+        for i in 0..names {
+            writeln!(code, "    x.a{f}_{i}").unwrap();
+        }
+    }
+    code
+}
+
+// A name operand is a `u16` index into the names of its own code object, and
+// `u16::MAX` stays free for `DictMerge`'s unknown callee, so one code object
+// holds at most 65 535 distinct names, while a module or a session holds any
+// number across its code objects.
+mod name_table_limits {
+    use super::*;
+
+    #[test]
+    fn code_object_at_name_table_limit_compiles() {
+        let code = generate_attribute_readers(1, usize::from(u16::MAX));
+        MontyRun::new(code, "test.py", vec![], CompileOptions::default())
+            .expect("65535 distinct names in one function should compile");
+    }
+
+    #[test]
+    fn code_object_past_name_table_limit_returns_syntax_error() {
+        let code = generate_attribute_readers(1, usize::from(u16::MAX) + 1);
+        let result = MontyRun::new(code, "test.py", vec![], CompileOptions::default());
+        assert_syntax_error(
+            result,
+            "function has too many distinct names; maximum is 65535 per function",
+        );
+    }
+
+    /// Two functions of 40 000 names each hold 80 000 names in one module.
+    #[test]
+    fn module_past_u16_names_across_code_objects_compiles() {
+        let code = generate_attribute_readers(2, 40_000);
+        MontyRun::new(code, "test.py", vec![], CompileOptions::default())
+            .expect("80000 distinct names across two functions should compile");
+    }
+}
+
+/// Generates `count` functions, each defining `nested` functions under one
+/// local name, which the function's own function table holds.
+fn generate_function_definers(count: usize, nested: usize) -> String {
+    let mut code = String::new();
+    for f in 0..count {
+        writeln!(code, "def f{f}():").unwrap();
+        for _ in 0..nested {
+            code.push_str("    def g():\n        pass\n");
+        }
+        code.push_str("    return g\n");
+    }
+    code
+}
+
+// A `MakeFunction` or `MakeClosure` operand is a `u16` index into the
+// functions of its own code object, so one code object defines at most
+// 65 536 functions, while a module or a session holds any number across its
+// code objects.
+mod function_table_limits {
+    use super::*;
+
+    #[test]
+    fn code_object_at_function_table_limit_runs() {
+        let mut code = generate_function_definers(1, usize::from(u16::MAX) + 1);
+        code.push_str("assert f0()() is None\n");
+        let mut run = MontyRun::new(code, "test.py", vec![], CompileOptions::default())
+            .expect("65536 functions in one function should compile");
+        let result = run.run_no_limits(vec![]);
+        assert!(result.is_ok(), "65536 functions in one function should run: {result:?}");
+    }
+
+    #[test]
+    fn code_object_past_function_table_limit_returns_syntax_error() {
+        let code = generate_function_definers(1, usize::from(u16::MAX) + 2);
+        let result = MontyRun::new(code, "test.py", vec![], CompileOptions::default());
+        assert_syntax_error(
+            result,
+            "function defines too many functions; maximum is 65536 per function",
+        );
+    }
+
+    /// Two functions of 40 000 nested functions each hold 80 002 functions in one module.
+    #[test]
+    fn module_past_u16_functions_across_code_objects_runs() {
+        let mut code = generate_function_definers(2, 40_000);
+        code.push_str("assert f1()() is None\n");
+        let mut run = MontyRun::new(code, "test.py", vec![], CompileOptions::default())
+            .expect("80002 functions across one module should compile");
+        let result = run.run_no_limits(vec![]);
+        assert!(
+            result.is_ok(),
+            "80002 functions across one module should run: {result:?}"
+        );
     }
 }
 

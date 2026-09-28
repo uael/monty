@@ -60,6 +60,11 @@ pub(crate) struct ClassProperty {
 }
 
 impl ClassProperty {
+    /// A property over this getter, which it owns from now on.
+    pub(crate) fn new(fget: Value) -> Self {
+        Self { fget }
+    }
+
     /// The getter, for the instance read that calls it. Borrowed, not owned.
     pub(crate) fn fget(&self) -> &Value {
         &self.fget
@@ -90,7 +95,7 @@ pub(crate) fn property_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value
             Err(ExcType::not_implemented(format!("property() does not yet support the {name} argument")).into())
         }
         None if matches!(fget, Value::None) => Err(ExcType::type_error("property() takes a getter")),
-        None => Ok(vm.heap.allocate_as(ClassProperty { fget }).into_value()),
+        None => Ok(vm.heap.allocate_as(ClassProperty::new(fget)).into_value()),
     }
 }
 

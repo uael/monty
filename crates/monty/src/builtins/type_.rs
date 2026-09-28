@@ -193,11 +193,18 @@ fn create_class(
     for base in &base_ids {
         vm.heap.inc_ref(*base);
     }
+    // A class made under an explicit globals dict carries it, as a function
+    // made there does; the reference is the class's, released with the bases.
+    let globals = vm.dict_globals();
+    if let Some(globals) = globals {
+        vm.heap.inc_ref(globals);
+    }
     let class_id = vm.heap.allocate(HeapData::Class(Box::new(Class::new(
         class_name,
         namespace_dict,
         base_ids,
         builtin_base,
+        globals,
     ))));
     Ok(Value::Ref(class_id))
 }

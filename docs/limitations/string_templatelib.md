@@ -16,9 +16,10 @@ notes below.
 - **`import string.templatelib` (no alias) is rejected** with
     `NotImplementedError: importing a submodule without an alias; use \`import
     string.templatelib as <name>\` or \`from string.templatelib import <name>\``. Monty interns a dotted module path as one name and has no package objects, so the plain form would bind a name no expression can spell; CPython binds `string\` and reaches the submodule through it.
-- **The import does not type-check.** The vendored typeshed carries no `string`
-    package, so the module does not resolve during type checking even though it
-    imports and runs.
+- **`import string` type-checks anyway.** The vendored typeshed carries the
+    `string` package as an empty namespace so that `string.templatelib` resolves,
+    since the checker walks into a package only when it exists; the package itself
+    still raises at runtime.
 
 ## Module contents
 

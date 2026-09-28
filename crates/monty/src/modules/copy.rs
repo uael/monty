@@ -12,9 +12,10 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapReadOutput},
+    heap_data::{CellValue, Closure, FunctionDefaults},
     intern::StaticStrings,
     modules::ModuleFunctions,
-    types::{Dict, List, Module, instance_call_copy_hook},
+    types::{Dict, List, Module, instance_call_copy_hook, property::ClassProperty},
     value::{VALUE_SIZE, Value},
 };
 
@@ -319,15 +320,10 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::TimeDelta(_)
         | HeapReadOutput::TimeZone(_)
         | HeapReadOutput::Path(_)
-        // Classes and functions. A `def`/`lambda` only reaches the heap once
-        // it captures an enclosing scope or evaluates a default; a plain one
-        // is a `Value::Function` and never gets here. Their state is mutable
-        // (`nonlocal`, class attributes) but CPython shares them anyway, so
-        // rebuilding would be the divergence.
-        | HeapReadOutput::Class(_)
+        // A class the host made, and a named tuple's: nothing of theirs was
+        // made under a globals dict, so a rebinding copy shares them too.
         | HeapReadOutput::NamedTupleClass(_)
         | HeapReadOutput::HostClassType(_)
-        | HeapReadOutput::Closure(_)
         // Type forms: `list[int]` and `int | None`. Nothing can mutate one, so
         // sharing is visible only to `is` — CPython rebuilds them through
         // `operator.getitem`, see `limitations/copy.md`.
@@ -335,19 +331,69 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::Union(_)
         | HeapReadOutput::TypeAliasType(_)
         | HeapReadOutput::Template(_)
-        | HeapReadOutput::Interpolation(_)
-        | HeapReadOutput::ClassProperty(_)
-        | HeapReadOutput::FunctionDefaults(_) => Ok(source.clone_with_heap(vm.heap)),
+        | HeapReadOutput::Interpolation(_) => Ok(source.clone_with_heap(vm.heap)),
+        // Classes and functions. A `def`/`lambda` only reaches the heap once
+        // it captures an enclosing scope, evaluates a default or is made under
+        // a globals dict; a plain one is a `Value::Function` and never gets
+        // here. Their state is mutable (`nonlocal`, class attributes) but
+        // CPython shares them anyway, so rebuilding would be the divergence:
+        // `copy.deepcopy` shares them, and only `monty.rebound` makes again
+        // the ones made under its source dict.
+        HeapReadOutput::Class(class) => match memo.rebinding() {
+            Some(under) if class.get(vm.heap).globals() == Some(under.source) => {
+                class_rebound(id, source, under.target, memo, vm)
+            }
+            _ => Ok(source.clone_with_heap(vm.heap)),
+        },
+        HeapReadOutput::Closure(closure) => match memo.rebinding() {
+            Some(under) if closure.get(vm.heap).globals == Some(under.source) => {
+                closure_rebound(id, source, under.target, memo, vm)
+            }
+            _ => Ok(source.clone_with_heap(vm.heap)),
+        },
+        HeapReadOutput::FunctionDefaults(function) => match memo.rebinding() {
+            Some(under) if function.get(vm.heap).globals == Some(under.source) => {
+                function_rebound(id, under.target, memo, vm)
+            }
+            _ => Ok(source.clone_with_heap(vm.heap)),
+        },
+        // A property is its getter's: made again over a getter made again,
+        // and shared over a shared one.
+        HeapReadOutput::ClassProperty(_) => match memo.rebinding() {
+            Some(_) => property_rebound(id, source, memo, vm),
+            None => Ok(source.clone_with_heap(vm.heap)),
+        },
+        // A cell is a closure's, and a closure made again takes cells of its
+        // own, so the two count apart. CPython has no copy of a cell, so
+        // `copy.deepcopy` refuses one as its pickler does.
+        HeapReadOutput::Cell(_) => match memo.rebinding() {
+            Some(_) => cell_rebound(id, source, memo, vm),
+            None => Err(cannot_copy(source, vm)),
+        },
+        // What a session has one of: a module, an object or a function of the
+        // host, the loop, a context variable, the reports of a dataclass, its
+        // fields and its options. A namespace made again shares them, as
+        // every namespace of the session does. CPython's pickler refuses
+        // them, and `copy.deepcopy` with it: a `HostClass` is the clearest
+        // case, since its identity belongs to the host, so a rebuilt one
+        // would answer lazy attribute reads through the very object it was
+        // supposed to be detached from.
+        HeapReadOutput::Module(_)
+        | HeapReadOutput::HostClass(_)
+        | HeapReadOutput::ExtFunction(_)
+        | HeapReadOutput::EventLoop(_)
+        | HeapReadOutput::ContextVar(_)
+        | HeapReadOutput::DataclassField(_)
+        | HeapReadOutput::DataclassParams(_) => match memo.rebinding() {
+            Some(_) => Ok(source.clone_with_heap(vm.heap)),
+            None => Err(cannot_copy(source, vm)),
+        },
         // Refused, with the `TypeError` CPython's pickler raises. Views and
-        // iterators are positions into something else; the rest are host
-        // objects or interpreter internals with no Python-visible
-        // constructor to rebuild them from. A `HostClass` is the clearest of
-        // those: its identity belongs to the host, so a rebuilt one would
-        // answer lazy attribute reads through the very object it was supposed
-        // to be detached from. See `limitations/copy.md` for the cases where
-        // CPython manages to copy one of these and Monty does not.
-        HeapReadOutput::HostClass(_)
-        | HeapReadOutput::DictKeysView(_)
+        // iterators are positions into something else; the rest are
+        // interpreter internals with no Python-visible constructor to rebuild
+        // them from. See `limitations/copy.md` for the cases where CPython
+        // manages to copy one of these and Monty does not.
+        HeapReadOutput::DictKeysView(_)
         | HeapReadOutput::DictItemsView(_)
         | HeapReadOutput::DictValuesView(_)
         | HeapReadOutput::ListIterator(_)
@@ -362,17 +408,10 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         | HeapReadOutput::SetIterator(_)
         | HeapReadOutput::CallableIterator(_)
         | HeapReadOutput::Itertools(_)
-        | HeapReadOutput::Module(_)
         | HeapReadOutput::Generator(_)
         | HeapReadOutput::GatherFuture(_)
         | HeapReadOutput::ExternalFuture(_)
         | HeapReadOutput::OpenFile(_)
-        | HeapReadOutput::ExtFunction(_)
-        | HeapReadOutput::Cell(_)
-        | HeapReadOutput::DataclassField(_)
-        | HeapReadOutput::DataclassParams(_)
-        | HeapReadOutput::EventLoop(_)
-        | HeapReadOutput::ContextVar(_)
         | HeapReadOutput::ContextVarToken(_) => Err(cannot_copy(source, vm)),
     }?;
     // CPython only memoizes a copy that is a new object ("if y is not x").
@@ -482,6 +521,271 @@ pub(crate) fn deep_copy_pair(key: Value, value: Value, memo: &mut Memo, vm: &mut
 }
 
 // ===========================================================================
+// Made again under another namespace
+// ===========================================================================
+
+/// The one rule `monty.rebound` adds to a deep copy: what was made under the
+/// globals dict `source` is made again under `target`. Both are borrowed for
+/// the pass; the caller holds them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Rebinding {
+    /// The `exec()` / `eval()` globals dict the originals were made under.
+    pub(crate) source: HeapId,
+    /// The dict the copies are made under.
+    pub(crate) target: HeapId,
+}
+
+/// `monty.rebound(x, source, target, memo)`: a deep copy of `x` in which what
+/// was made under `source` is made again under `target`.
+pub(crate) fn rebound(x: &Value, source: HeapId, target: HeapId, memo: Value, vm: &mut VM<'_>) -> RunResult<Value> {
+    let mut memo = Memo::new(memo, vm)?;
+    memo.under = Some(Rebinding { source, target });
+    let mut guard = DropGuard::new(memo, vm);
+    let (memo, vm) = guard.as_parts_mut();
+    deep_copy(x, memo, vm)
+}
+
+/// Takes the heap id out of an owned reference and leaves nothing in its
+/// place: the holder of the id owns the reference from now on, and what is
+/// left drops as nothing.
+pub(crate) fn owned_id(value: &mut Value) -> HeapId {
+    let id = value.ref_id().expect("an owned reference to a heap object");
+    #[cfg(feature = "memory-model-checks")]
+    value.dec_ref_forget();
+    #[cfg(not(feature = "memory-model-checks"))]
+    {
+        *value = Value::Undefined;
+    }
+    id
+}
+
+/// An owned reference to a heap object, for a walk that starts from an id.
+pub(crate) fn held(id: HeapId, vm: &VM<'_>) -> Value {
+    vm.heap.inc_ref(id);
+    Value::Ref(id)
+}
+
+/// A function made under the source dict, made again under the target: the
+/// same definition over deep copies of its defaults.
+fn function_rebound(id: HeapId, target: HeapId, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<Value> {
+    let (func_id, len) = {
+        let HeapReadOutput::FunctionDefaults(function) = vm.heap.read(id) else {
+            unreachable!("caller checked the type")
+        };
+        let function = function.get(vm.heap);
+        (function.func_id, function.defaults.len())
+    };
+    let defaults = deep_copy_slots(len, memo, vm, |index, vm| {
+        let HeapReadOutput::FunctionDefaults(function) = vm.heap.read(id) else {
+            unreachable!("caller checked the type")
+        };
+        function.get(vm.heap).defaults[index].clone_with_heap(vm.heap)
+    })?;
+    vm.heap.inc_ref(target);
+    let copy = FunctionDefaults {
+        func_id,
+        defaults,
+        globals: Some(target),
+    };
+    Ok(Value::Ref(vm.heap.allocate(HeapData::FunctionDefaults(copy))))
+}
+
+/// A closure made under the source dict, made again under the target: the
+/// same definition over cells of its own and deep copies of its defaults.
+///
+/// The copy is memoized before its new cells are filled, so a cell that holds
+/// the closure, which a function that names itself has, resolves to the copy;
+/// a cell this pass copied already, one two closures share, is shared by their
+/// copies the same way.
+fn closure_rebound(id: HeapId, source: &Value, target: HeapId, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<Value> {
+    let (func_id, originals, len) = {
+        let HeapReadOutput::Closure(closure) = vm.heap.read(id) else {
+            unreachable!("caller checked the type")
+        };
+        let closure = closure.get(vm.heap);
+        (closure.func_id, closure.cells.to_vec(), closure.defaults.len())
+    };
+    let mut cells = DropGuard::new(Vec::with_capacity(originals.len()), vm);
+    let mut fresh = Vec::new();
+    for original in &originals {
+        let (held, vm) = cells.as_parts_mut();
+        let (shell, made) = cell_shell(*original, memo, vm)?;
+        held.push(Value::Ref(shell));
+        if made {
+            fresh.push((*original, shell));
+        }
+    }
+    let (cells, vm) = cells.into_parts();
+    let mut cells = DropGuard::new(cells, vm);
+    let defaults = {
+        let (_, vm) = cells.as_parts_mut();
+        deep_copy_slots(len, memo, vm, |index, vm| {
+            let HeapReadOutput::Closure(closure) = vm.heap.read(id) else {
+                unreachable!("caller checked the type")
+            };
+            closure.get(vm.heap).defaults[index].clone_with_heap(vm.heap)
+        })?
+    };
+    let (cells, vm) = cells.into_parts();
+    vm.heap.inc_ref(target);
+    let copy = Closure {
+        func_id,
+        cells: cells.into_iter().map(|mut one| owned_id(&mut one)).collect(),
+        defaults: defaults.into_boxed_slice(),
+        globals: Some(target),
+    };
+    let copy = Value::Ref(vm.heap.allocate(HeapData::Closure(copy)));
+    let mut guard = DropGuard::new(copy, vm);
+    let (copy, vm) = guard.as_parts_mut();
+    memo.insert(source, copy, vm)?;
+    for (original, shell) in fresh {
+        let (_, vm) = guard.as_parts_mut();
+        cell_fill(original, shell, memo, vm)?;
+    }
+    Ok(guard.into_inner())
+}
+
+/// The copy this pass has of a cell, or a new empty one memoized for it, as an
+/// owned reference, and whether it is new and so the caller's to fill.
+fn cell_shell(cell: HeapId, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<(HeapId, bool)> {
+    let original = held(cell, vm);
+    let mut guard = DropGuard::new(original, vm);
+    let (original, vm) = guard.as_parts_mut();
+    if let Some(mut hit) = memo.get(original, vm)? {
+        return Ok((owned_id(&mut hit), false));
+    }
+    let shell = vm.heap.allocate(HeapData::Cell(CellValue(Value::Undefined)));
+    let mut copy = DropGuard::new(Value::Ref(shell), vm);
+    let (held_copy, vm) = copy.as_parts_mut();
+    memo.insert(original, held_copy, vm)?;
+    // The reference the allocation gave is the caller's from here: the memo
+    // took one of its own.
+    let mut copy = copy.into_inner();
+    Ok((owned_id(&mut copy), true))
+}
+
+/// Fills the empty copy of a cell with a deep copy of what the original holds.
+fn cell_fill(original: HeapId, shell: HeapId, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<()> {
+    let value = {
+        let HeapReadOutput::Cell(cell) = vm.heap.read(original) else {
+            unreachable!("caller checked the type")
+        };
+        cell.get(vm.heap).0.clone_with_heap(vm.heap)
+    };
+    let copied = deep_copy(&value, memo, vm);
+    value.drop_with(vm);
+    let copied = copied?;
+    let HeapReadOutput::Cell(mut cell) = vm.heap.read(shell) else {
+        unreachable!("the shell was allocated as a cell")
+    };
+    // The shell held `Undefined`, which owns nothing.
+    cell.get_mut(vm.heap).0 = copied;
+    Ok(())
+}
+
+/// A cell reached on its own, made again: a new cell over a deep copy of what
+/// it holds, memoized before the copy so a cell that reaches itself resolves
+/// to the copy.
+fn cell_rebound(id: HeapId, source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<Value> {
+    let shell = vm.heap.allocate(HeapData::Cell(CellValue(Value::Undefined)));
+    let mut guard = DropGuard::new(Value::Ref(shell), vm);
+    let (copy, vm) = guard.as_parts_mut();
+    memo.insert(source, copy, vm)?;
+    cell_fill(id, shell, memo, vm)?;
+    Ok(guard.into_inner())
+}
+
+/// A class made under the source dict, made again under the target: the same
+/// name, builtin base and options over a namespace copied deep, over bases
+/// copied the same way, so that a class of the source which another inherits
+/// is made again with it. The shell is memoized before its namespace is
+/// copied, so a member that holds the class resolves to the copy.
+fn class_rebound(id: HeapId, source: &Value, target: HeapId, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<Value> {
+    let originals = {
+        let HeapReadOutput::Class(class) = vm.heap.read(id) else {
+            unreachable!("caller checked the type")
+        };
+        class.get(vm.heap).bases().to_vec()
+    };
+    let mut bases = DropGuard::new(Vec::with_capacity(originals.len()), vm);
+    for original in originals {
+        let (held_bases, vm) = bases.as_parts_mut();
+        let base = held(original, vm);
+        let copied = deep_copy(&base, memo, vm);
+        base.drop_with(vm);
+        held_bases.push(copied?);
+    }
+    let (bases, vm) = bases.into_parts();
+    vm.heap.inc_ref(target);
+    let shell = {
+        let HeapReadOutput::Class(class) = vm.heap.read(id) else {
+            unreachable!("caller checked the type")
+        };
+        class.get(vm.heap).made_again(
+            Dict::new(),
+            bases.into_iter().map(|mut one| owned_id(&mut one)).collect(),
+            Some(target),
+        )
+    };
+    let copy_id = vm.heap.allocate(HeapData::Class(Box::new(shell)));
+    let mut guard = DropGuard::new(Value::Ref(copy_id), vm);
+    let (copy, vm) = guard.as_parts_mut();
+    memo.insert(source, copy, vm)?;
+    let expected_len = class_namespace(id, vm).len();
+    vm.heap
+        .tracker
+        .check_allocation(expected_len.saturating_mul(2 * VALUE_SIZE))?;
+    for index in 0.. {
+        let (_, vm) = guard.as_parts_mut();
+        vm.heap.tracker.check_time_every(index)?;
+        // The namespace is a dict, copied by iterating it, and a hook a member
+        // runs may have changed it under the walk.
+        if class_namespace(id, vm).len() != expected_len {
+            return Err(ExcType::runtime_error_dict_changed_size());
+        }
+        let Some((key, value)) = clone_pair(class_namespace(id, vm), index, vm) else {
+            break;
+        };
+        let (key_copy, value_copy) = deep_copy_pair(key, value, memo, vm)?;
+        let HeapReadOutput::Class(mut class) = vm.heap.read(copy_id) else {
+            unreachable!("the shell was allocated as a class")
+        };
+        if let Some(replaced) = class.set_attr(key_copy, value_copy, vm)? {
+            replaced.drop_with(vm);
+        }
+    }
+    Ok(guard.into_inner())
+}
+
+/// Borrows a class's member namespace.
+fn class_namespace<'a>(id: HeapId, vm: &'a VM<'_>) -> &'a Dict {
+    match vm.heap.get(id) {
+        HeapData::Class(class) => class.namespace(),
+        _ => unreachable!("caller checked the type"),
+    }
+}
+
+/// A property made again over a getter made again, and shared over a shared
+/// one.
+fn property_rebound(id: HeapId, source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> RunResult<Value> {
+    let fget = {
+        let HeapReadOutput::ClassProperty(property) = vm.heap.read(id) else {
+            unreachable!("caller checked the type")
+        };
+        property.get(vm.heap).fget().clone_with_heap(vm.heap)
+    };
+    let copied = deep_copy(&fget, memo, vm);
+    let shared = copied.as_ref().is_ok_and(|copied| same_object(copied, &fget));
+    fget.drop_with(vm);
+    let copied = copied?;
+    if shared {
+        copied.drop_with(vm);
+        return Ok(source.clone_with_heap(vm.heap));
+    }
+    Ok(vm.heap.allocate_as(ClassProperty::new(copied)).into_value())
+}
+
+// ===========================================================================
 // The memo
 // ===========================================================================
 
@@ -495,6 +799,9 @@ pub(crate) struct Memo {
     dict: Value,
     /// Every source visited this pass, keeping their ids unique.
     keep_alive: Vec<Value>,
+    /// What this pass makes again under another namespace, for a pass
+    /// `monty.rebound` runs; `None` for `copy.deepcopy`.
+    under: Option<Rebinding>,
 }
 
 impl Memo {
@@ -515,7 +822,14 @@ impl Memo {
         Ok(Self {
             dict,
             keep_alive: Vec::new(),
+            under: None,
         })
+    }
+
+    /// What this pass makes again under another namespace, if it is one that
+    /// does.
+    pub(crate) fn rebinding(&self) -> Option<Rebinding> {
+        self.under
     }
 
     /// Returns the copy this pass already made for `source`, if any.

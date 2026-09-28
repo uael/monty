@@ -733,9 +733,9 @@ fn repl_rejected_snippet_admission_keeps_no_products() {
 
 /// A snippet rejected at compile time, after prepare has allocated its
 /// global slots and the compiler has emitted its functions, must not consume
-/// those `u16` ids. One successful snippet takes the session to within a few
-/// ids of both caps, so a handful of rejected snippets would overflow them
-/// if their ids leaked — cheaper than 65k feeds, and just as conclusive.
+/// either. One successful snippet takes the session to within a few slots of
+/// the `u16` slot cap, so a handful of rejected snippets would overflow it if
+/// their slots leaked, and the session's function table must not grow.
 #[test]
 fn repl_rejected_snippets_do_not_consume_slots_or_function_ids() {
     const HEADROOM: usize = 8;
@@ -744,9 +744,13 @@ fn repl_rejected_snippets_do_not_consume_slots_or_function_ids() {
         write!(prefill, "def g_{i}():\n    pass\n").unwrap();
     }
     let (mut repl, _) = init_repl(&prefill);
+    let functions = to_value(&repl).unwrap()["interns"]["functions"]
+        .as_array()
+        .unwrap()
+        .len();
 
     // Each would take four slots (input, function, global, `__name__`) and
-    // two function ids; repeated rejections would overflow if either leaked.
+    // two function ids; repeated rejections would overflow the slots if they leaked.
     for i in 0..4 * HEADROOM {
         let code = format!(
             "def bad_{i}():\n    def inner():\n        return 1\n    return inner\nname_{i} = 1\n__name__ = 'x'"
@@ -760,9 +764,78 @@ fn repl_rejected_snippets_do_not_consume_slots_or_function_ids() {
             .unwrap_err();
         assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     }
+    assert_eq!(
+        to_value(&repl).unwrap()["interns"]["functions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        functions
+    );
     let mut repl = round_trip_repl(&repl);
     feed_run_print(&mut repl, "def h():\n    return g_0() is None\nok = h()").unwrap();
     assert_eq!(feed_run_print(&mut repl, "ok").unwrap(), MontyObject::bool(true));
+}
+
+/// A session keeps every name and literal it ever compiled, so a long one
+/// interns more strings than a `u16` can count. Each operand indexes the
+/// names of its own code object, so a snippet still compiles a name the
+/// session has never seen: an import, an attribute, a keyword and a method,
+/// fed directly and through `exec`, and after a dump round trip.
+#[test]
+fn repl_session_past_u16_interned_strings_compiles_new_names() {
+    let (mut repl, _) = init_repl("class Box:\n    pass\nbox = Box()\ndef kw(**named):\n    return sorted(named)");
+    for snippet in 0..70 {
+        let mut code = format!("def fill_{snippet}():\n");
+        for i in 0..500 {
+            writeln!(code, "    box.attr_{snippet}_{i} = 'text_{snippet}_{i}'").unwrap();
+        }
+        feed_run_print(&mut repl, &code).unwrap();
+    }
+    let interned = to_value(&repl).unwrap()["interns"]["strings"].as_array().unwrap().len();
+    assert!(
+        interned > usize::from(u16::MAX) + 1,
+        "the session interned only {interned} strings"
+    );
+
+    let mut repl = round_trip_repl(&repl);
+    let code = "import math\nbox.fresh = math.floor(2.5)\nexec('box.fresher = 3', {'box': box})\n\
+                repr((box.fresh, box.fresher, kw(fresh_key=1), [].copy()))";
+    assert_eq!(
+        feed_run_print(&mut repl, code).unwrap(),
+        MontyObject::string("(2, 3, ['fresh_key'], [])")
+    );
+}
+
+/// A session keeps every function it ever compiled, so a long one holds more
+/// functions than a `u16` can count. Each `MakeFunction` operand indexes the
+/// functions of its own code object, so a snippet still defines and calls a
+/// new function, fed directly and through `exec`, after a dump round trip.
+#[test]
+fn repl_session_past_u16_functions_makes_new_functions() {
+    let (mut repl, _) = init_repl("");
+    for snippet in 0..66 {
+        let mut code = format!("def fill_{snippet}():\n");
+        for _ in 0..1000 {
+            code.push_str("    def g():\n        pass\n");
+        }
+        feed_run_print(&mut repl, &code).unwrap();
+    }
+    let functions = to_value(&repl).unwrap()["interns"]["functions"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(
+        functions > usize::from(u16::MAX) + 1,
+        "the session holds only {functions} functions"
+    );
+
+    let mut repl = round_trip_repl(&repl);
+    let code = "def fresh():\n    return 7\nns = {}\nexec('def made():\\n    return 8\\nr = made()', ns)\n\
+                (fresh(), ns['r'], (lambda: 9)())";
+    assert_eq!(
+        feed_run_print(&mut repl, code).unwrap(),
+        MontyObject::tuple([MontyObject::int(7), MontyObject::int(8), MontyObject::int(9)])
+    );
 }
 
 #[test]

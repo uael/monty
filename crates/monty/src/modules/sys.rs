@@ -67,6 +67,7 @@ const BUILTIN_MODULE_NAMES: &[StaticStrings] = &[
     StaticStrings::Itertools,
     StaticStrings::Json,
     StaticStrings::Math,
+    StaticStrings::Monty,
     StaticStrings::Os,
     StaticStrings::Pathlib,
     StaticStrings::Random,

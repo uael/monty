@@ -50,15 +50,6 @@ impl StringId {
     /// Executor-independent ID for the empty string, immediately after ASCII.
     pub const EMPTY: Self = Self(128);
 
-    /// Creates a StringId from a raw index value.
-    ///
-    /// Used by the bytecode VM to reconstruct StringIds from operands stored
-    /// in bytecode. The caller is responsible for ensuring the index is valid.
-    #[inline]
-    pub fn from_index(index: u16) -> Self {
-        Self(u32::from(index))
-    }
-
     /// Returns the raw index value.
     #[inline]
     pub fn index(self) -> usize {
@@ -1176,6 +1167,8 @@ pub enum StaticStrings {
     Initial,
     /// `list.insert()` method.
     Insert,
+    /// `monty.instance()` function.
+    Instance,
     /// `sys.flags.inspect` field.
     Inspect,
     /// `sys.flags.int_max_str_digits` field.
@@ -1424,7 +1417,8 @@ pub enum StaticStrings {
     Modules,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
-    /// Value of `sys.platform`.
+    /// Value of `sys.platform`, and the `monty` module: what this interpreter
+    /// does that CPython does not.
     Monty,
     /// The value of `sys.copyright`.
     #[strum(serialize = "Copyright (c) Pydantic Services Inc. 2026 to present")]
@@ -1619,6 +1613,8 @@ pub enum StaticStrings {
     Readline,
     /// `file.readlines()` method.
     Readlines,
+    /// `monty.rebound()` function.
+    Rebound,
     /// `functools.reduce()` function.
     Reduce,
     /// Kwarg name `rel_tol` — `math.isclose(rel_tol=...)`.
@@ -1857,6 +1853,8 @@ pub enum StaticStrings {
     Tan,
     /// `math.tanh()` function.
     Tanh,
+    /// Parameter name `target` of `monty.rebound()`.
+    Target,
     /// `math.tau` constant
     Tau,
     /// `itertools.tee()` function.
@@ -2152,15 +2150,6 @@ impl LongIntId {
 pub struct FunctionId(u32);
 
 impl FunctionId {
-    /// Creates a FunctionId from a raw index value.
-    ///
-    /// Used by the bytecode VM to reconstruct FunctionIds from operands stored
-    /// in bytecode. The caller is responsible for ensuring the index is valid.
-    #[inline]
-    pub fn from_index(index: u16) -> Self {
-        Self(u32::from(index))
-    }
-
     /// Returns the raw index value.
     #[inline]
     pub fn index(self) -> usize {
