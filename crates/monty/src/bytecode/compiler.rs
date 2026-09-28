@@ -201,27 +201,6 @@ fn collection_too_large(count: usize, position: CodeRange) -> CompileError {
     )
 }
 
-/// Converts the index of a newly-defined function into the `u16` operand used
-/// by `MakeFunction`/`MakeClosure`. The cap is the total number of
-/// `def`/`lambda`/comprehension function objects in the *whole module*, since
-/// `FunctionId`s are allocated linearly across nested scopes.
-fn check_function_count_u16(func_id: usize, position: CodeRange) -> Result<u16, CompileError> {
-    u16::try_from(func_id).map_err(|_| too_many_functions(func_id, position))
-}
-
-#[cold]
-#[inline(never)]
-fn too_many_functions(func_id: usize, position: CodeRange) -> CompileError {
-    CompileError::new(
-        format!(
-            "module defines too many functions/lambdas ({}); maximum is {}",
-            func_id + 1,
-            u16::MAX
-        ),
-        position,
-    )
-}
-
 /// Converts a call-related count (positional args, keyword args, defaults,
 /// closure cells) into the `u8` operand used by the corresponding opcodes.
 /// `kind` (e.g. "default parameter values") is interpolated into the error
@@ -244,7 +223,7 @@ fn too_many_call_args(count: usize, kind: &'static str, position: CodeRange) -> 
 ///
 /// Functions are compiled recursively through [`CompileInterns`].
 /// Each function's body is compiled before registering it, so nested functions
-/// receive lower IDs. Those IDs become MakeFunction/MakeClosure operands.
+/// receive lower IDs. Each body indexes the IDs it makes in its own function table.
 pub struct Compiler<'a, 'i> {
     /// Current code being built.
     code: CodeBuilder,
@@ -1272,13 +1251,12 @@ impl<'a, 'i> Compiler<'a, 'i> {
         for default_expr in &func_def.default_exprs {
             self.compile_expr(default_expr)?;
         }
-        let func_id_u16 = check_function_count_u16(func_id, func_pos)?;
+        let function = self.code.function(func_id, func_pos)?;
 
         // 4. Emit MakeFunction or MakeClosure (if has free vars)
         if func_def.free_var_enclosing_slots.is_empty() {
-            // MakeFunction: func_id (u16) + defaults_count (u8)
-            self.code
-                .emit_u16_u8(Opcode::MakeFunction, func_id_u16, defaults_count)?;
+            // MakeFunction: function (u16) + defaults_count (u8)
+            self.code.emit_u16_u8(Opcode::MakeFunction, function, defaults_count)?;
         } else {
             // Push captured cells from enclosing scope.
             for source in &func_def.free_var_enclosing_slots {
@@ -1293,9 +1271,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 };
                 self.code.emit_load_local(slot)?;
             }
-            // MakeClosure: func_id (u16) + defaults_count (u8) + cell_count (u8)
+            // MakeClosure: function (u16) + defaults_count (u8) + cell_count (u8)
             self.code
-                .emit_u16_u8_u8(Opcode::MakeClosure, func_id_u16, defaults_count, cell_count)?;
+                .emit_u16_u8_u8(Opcode::MakeClosure, function, defaults_count, cell_count)?;
         }
 
         Ok(())

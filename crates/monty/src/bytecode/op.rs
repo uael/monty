@@ -12,8 +12,9 @@
 //!   `LoadName` (u16 + u16 + u8)
 //!
 //! A `name` operand is a u16 index into the name table of the code object that holds the
-//! instruction (`Code::name`), never a session `StringId`: a session interns strings for its
-//! whole life, so only the names of one body bound the operand.
+//! instruction (`Code::name`), never a session `StringId`, and a `function` operand is a u16
+//! index into its function table (`Code::function`), never a session `FunctionId`: a session
+//! keeps every string and function it compiles, so only what one body uses bounds the operand.
 
 #[cfg(test)]
 use strum::IntoEnumIterator;
@@ -383,9 +384,9 @@ pub enum Opcode {
     ForIter = 94,
 
     // === Function Definition ===
-    /// Create function object. Operand: u16 func_id.
+    /// Create function object. Operands: u16 function, u8 defaults_count.
     MakeFunction = 95,
-    /// Create closure. Operands: u16 func_id, u8 cell_count.
+    /// Create closure. Operands: u16 function, u8 defaults_count, u8 cell_count.
     MakeClosure = 96,
 
     // === Exception Handling ===

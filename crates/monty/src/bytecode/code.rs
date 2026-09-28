@@ -4,7 +4,11 @@
 //! bytecode instructions, a constant pool, source location information for tracebacks,
 //! and an exception handler table.
 
-use crate::{intern::StringId, parse::CodeRange, value::Value};
+use crate::{
+    intern::{FunctionId, StringId},
+    parse::CodeRange,
+    value::Value,
+};
 
 /// Compiled bytecode for a function or module.
 ///
@@ -23,6 +27,12 @@ pub struct Code {
     /// A session interns strings for its whole life, so its IDs outgrow `u16`;
     /// this table bounds an operand by the names one body uses, as CPython's `co_names`.
     names: Vec<StringId>,
+
+    /// Session function IDs indexed by the `u16` operands of `MakeFunction` and `MakeClosure` in this body.
+    ///
+    /// A session keeps every function it compiles, so its IDs outgrow `u16`; this table bounds an operand by the
+    /// functions one body defines.
+    functions: Vec<FunctionId>,
 
     /// Source location table for tracebacks.
     ///
@@ -67,6 +77,7 @@ impl Code {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             false,
             false,
         )
@@ -81,6 +92,7 @@ impl Code {
         bytecode: Vec<u8>,
         constants: Vec<Value>,
         names: Vec<StringId>,
+        functions: Vec<FunctionId>,
         location_table: Vec<LocationEntry>,
         exception_table: Vec<ExceptionEntry>,
         local_names: Vec<StringId>,
@@ -91,6 +103,7 @@ impl Code {
             bytecode,
             constants,
             names,
+            functions,
             location_table,
             exception_table,
             local_names,
@@ -131,6 +144,13 @@ impl Code {
     #[must_use]
     pub fn name(&self, index: u16) -> StringId {
         self.names[usize::from(index)]
+    }
+
+    /// Returns the function a `MakeFunction` or `MakeClosure` operand indexes.
+    /// Panics for an index not produced by this code's compiler.
+    #[must_use]
+    pub fn function(&self, index: u16) -> FunctionId {
+        self.functions[usize::from(index)]
     }
 
     /// Returns the local variable name for a given slot index.
@@ -181,6 +201,7 @@ impl Clone for Code {
             bytecode: self.bytecode.clone(),
             constants: self.constants.iter().map(Value::copy_immediate).collect(),
             names: self.names.clone(),
+            functions: self.functions.clone(),
             location_table: self.location_table.clone(),
             exception_table: self.exception_table.clone(),
             local_names: self.local_names.clone(),

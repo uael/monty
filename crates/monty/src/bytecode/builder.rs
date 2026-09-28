@@ -10,7 +10,11 @@ use super::{
     compiler::CompileError,
     op::{Opcode, Operand},
 };
-use crate::{intern::StringId, parse::CodeRange, value::Value};
+use crate::{
+    intern::{FunctionId, StringId},
+    parse::CodeRange,
+    value::Value,
+};
 
 /// Builder for emitting bytecode during compilation.
 ///
@@ -32,6 +36,9 @@ pub struct CodeBuilder {
 
     /// Operand of each name in `names`, so a name used twice takes one entry.
     name_operands: AHashMap<StringId, u16>,
+
+    /// Session function IDs that this body's `MakeFunction` and `MakeClosure` operands index.
+    functions: Vec<FunctionId>,
 
     /// Source location entries for traceback generation.
     location_table: Vec<LocationEntry>,
@@ -436,6 +443,17 @@ impl CodeBuilder {
         }
     }
 
+    /// Returns the operand that makes the session function `id` in this body.
+    ///
+    /// `MakeFunction` and `MakeClosure` carry this operand rather than the
+    /// session ID, so the functions one body defines bound it and the number
+    /// of functions in the session never does.
+    pub fn function(&mut self, id: FunctionId, position: CodeRange) -> Result<u16, CompileError> {
+        let operand = u16::try_from(self.functions.len()).map_err(|_| function_table_full(position))?;
+        self.functions.push(id);
+        Ok(operand)
+    }
+
     /// Adds an exception handler entry built from the given region bounds.
     ///
     /// Entries should be added in innermost-first order for nested try blocks.
@@ -483,6 +501,7 @@ impl CodeBuilder {
             self.bytecode,
             self.constants,
             self.names,
+            self.functions,
             self.location_table,
             self.exception_table,
             local_names,
@@ -720,6 +739,20 @@ fn name_table_full(position: CodeRange) -> CompileError {
         format!(
             "function has too many distinct names; maximum is {} per function",
             u16::MAX
+        ),
+        position,
+    )
+}
+
+/// Builds the `CompileError` for a body whose function table is full,
+/// reported at the first definition that did not fit.
+#[cold]
+#[inline(never)]
+fn function_table_full(position: CodeRange) -> CompileError {
+    CompileError::new(
+        format!(
+            "function defines too many functions; maximum is {} per function",
+            usize::from(u16::MAX) + 1
         ),
         position,
     )

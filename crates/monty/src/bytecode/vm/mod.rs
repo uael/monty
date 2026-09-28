@@ -1894,7 +1894,7 @@ impl<'h> VM<'h> {
                 // Function Definition
                 Opcode::MakeFunction => {
                     let (func_idx, defaults_count) = self.current_frame.fetch_u16_u8();
-                    let func_id = FunctionId::from_index(func_idx);
+                    let func_id = self.current_frame.code.function(func_idx);
                     let defaults_count = defaults_count as usize;
 
                     // A function defined under an explicit globals dict carries it.
@@ -1920,7 +1920,7 @@ impl<'h> VM<'h> {
                 }
                 Opcode::MakeClosure => {
                     let (func_idx, defaults_count, cell_count) = self.current_frame.fetch_u16_u8_u8();
-                    let func_id = FunctionId::from_index(func_idx);
+                    let func_id = self.current_frame.code.function(func_idx);
                     let (defaults_count, cell_count) = (defaults_count as usize, cell_count as usize);
 
                     // Pop cells from stack (pushed after defaults, so on top)

@@ -2146,15 +2146,6 @@ impl LongIntId {
 pub struct FunctionId(u32);
 
 impl FunctionId {
-    /// Creates a FunctionId from a raw index value.
-    ///
-    /// Used by the bytecode VM to reconstruct FunctionIds from operands stored
-    /// in bytecode. The caller is responsible for ensuring the index is valid.
-    #[inline]
-    pub fn from_index(index: u16) -> Self {
-        Self(u32::from(index))
-    }
-
     /// Returns the raw index value.
     #[inline]
     pub fn index(self) -> usize {
