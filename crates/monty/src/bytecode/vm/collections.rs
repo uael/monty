@@ -180,7 +180,7 @@ impl VM<'_> {
     ///
     /// Uses `defer_drop!` for `mapping` (always dropped) and `DropGuard` for
     /// `dict_ref` (pushed back on success, dropped on error).
-    pub(super) fn dict_merge(&mut self, func_name_id: u16) -> Result<(), RunError> {
+    pub(super) fn dict_merge(&mut self, func_name_id: Option<StringId>) -> Result<(), RunError> {
         let func_name = func_name_for_dict_merge(func_name_id, self);
         self.dict_merge_inner(&func_name)
     }
@@ -191,13 +191,13 @@ impl VM<'_> {
     /// kwargs_dict, mapping]`), since the call body hasn't issued any pops
     /// yet. Produces e.g. `list.sort() got multiple values for keyword
     /// argument 'key'` to match CPython.
-    pub(super) fn method_dict_merge(&mut self, func_name_id: u16) -> Result<(), RunError> {
-        let func_name = if func_name_id == 0xFFFF {
-            "<unknown>".to_string()
-        } else {
-            let method = self.interns.get_str(StringId::from_index(func_name_id)).to_string();
+    pub(super) fn method_dict_merge(&mut self, func_name_id: Option<StringId>) -> Result<(), RunError> {
+        let func_name = if let Some(func_name_id) = func_name_id {
+            let method = self.interns.get_str(func_name_id).to_string();
             let recv_type = self.stack[self.stack.len() - 4].py_type_name(self);
             format!("{recv_type}.{method}")
+        } else {
+            "<unknown>".to_string()
         };
         self.dict_merge_inner(&func_name)
     }
@@ -552,14 +552,10 @@ impl VM<'_> {
     }
 }
 
-/// Resolves the function-name string used by `DictMerge` error wording.
-/// `0xFFFF` is the compiler sentinel for "unknown caller".
-fn func_name_for_dict_merge(func_name_id: u16, vm: &VM<'_>) -> String {
-    if func_name_id == 0xFFFF {
-        "<unknown>".to_string()
-    } else {
-        vm.interns.get_str(StringId::from_index(func_name_id)).to_string()
-    }
+/// Resolves the function-name string used by `DictMerge` error wording,
+/// `<unknown>` when the compiler knew no callee.
+fn func_name_for_dict_merge(func_name_id: Option<StringId>, vm: &VM<'_>) -> String {
+    func_name_id.map_or_else(|| "<unknown>".to_string(), |id| vm.interns.get_str(id).to_string())
 }
 
 /// Creates the ValueError for star unpacking when there are too few values.

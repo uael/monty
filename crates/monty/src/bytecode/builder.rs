@@ -3,6 +3,8 @@
 //! `CodeBuilder` provides methods for emitting opcodes and operands, handling
 //! forward jumps with patching, and tracking source locations for tracebacks.
 
+use ahash::AHashMap;
+
 use super::{
     code::{Code, ExceptionEntry, HandlerKind, LocationEntry},
     compiler::CompileError,
@@ -24,6 +26,12 @@ pub struct CodeBuilder {
 
     /// Constants collected during compilation.
     constants: Vec<Value>,
+
+    /// Session string IDs that this body's name operands index, in first-use order.
+    names: Vec<StringId>,
+
+    /// Operand of each name in `names`, so a name used twice takes one entry.
+    name_operands: AHashMap<StringId, u16>,
 
     /// Source location entries for traceback generation.
     location_table: Vec<LocationEntry>,
@@ -145,20 +153,20 @@ impl CodeBuilder {
 
     /// Emits CallFunctionKw with inline keyword names.
     ///
-    /// Operands: pos_count (u8) + kw_count (u8) + kw_count * name_id (u16 each)
+    /// Operands: pos_count (u8) + kw_count (u8) + kw_count * name (u16 each)
     ///
-    /// The kwname_ids slice contains StringId indices for each keyword argument
-    /// name, in order matching how the values were pushed to the stack.
+    /// The kwname_ids slice holds the name operand of each keyword argument, see
+    /// [`name`](Self::name), in order matching how the values were pushed to the stack.
     pub fn emit_call_function_kw(&mut self, pos_count: u8, kwname_ids: &[u16]) -> Result<(), CompileError> {
         self.emit_with_operand(Opcode::CallFunctionKw, Operand::CallKw { pos_count, kwname_ids })
     }
 
     /// Emits CallAttrKw with inline keyword names.
     ///
-    /// Operands: attr_name_id (u16) + pos_count (u8) + kw_count (u8) + kw_count * name_id (u16 each)
+    /// Operands: attr_name_id (u16) + pos_count (u8) + kw_count (u8) + kw_count * name (u16 each)
     ///
-    /// The kwname_ids slice contains StringId indices for each keyword argument
-    /// name, in order matching how the values were pushed to the stack.
+    /// The kwname_ids slice holds the name operand of each keyword argument, see
+    /// [`name`](Self::name), in order matching how the values were pushed to the stack.
     pub fn emit_call_attr_kw(
         &mut self,
         attr_name_id: u16,
@@ -347,8 +355,8 @@ impl CodeBuilder {
     /// Used by the comprehension compiler at sites where static analysis
     /// proves the target is read before its `for` clause assigns it.
     pub fn emit_raise_unbound_local(&mut self, name_id: StringId) -> Result<(), CompileError> {
-        let name_idx = u16::try_from(name_id.index()).map_err(|_| self.name_id_too_large())?;
-        self.emit_with_operand(Opcode::RaiseUnboundLocal, Operand::U16(name_idx))
+        let name = self.name(name_id, self.current_position())?;
+        self.emit_with_operand(Opcode::RaiseUnboundLocal, Operand::U16(name))
     }
 
     /// Emits a `LoadLocal` instruction, using specialized variants for common slots.
@@ -370,20 +378,20 @@ impl CodeBuilder {
 
     /// Emits a `LoadGlobalCallable` instruction for call-context loads.
     ///
-    /// The `name_id` is encoded directly in the operand to avoid the ambiguity
-    /// of looking up global names from a function's local_names array (global slots
-    /// and local slots use different namespaces).
+    /// The name is an operand of its own to avoid the ambiguity of looking up
+    /// global names from a function's local_names array (global slots and local
+    /// slots use different namespaces).
     pub fn emit_load_global_callable(&mut self, slot: u16, name_id: StringId) -> Result<(), CompileError> {
-        let name_id_u16 = u16::try_from(name_id.index()).map_err(|_| self.name_id_too_large())?;
-        self.emit_with_operand(Opcode::LoadGlobalCallable, Operand::U16U16(slot, name_id_u16))
+        let name = self.name(name_id, self.current_position())?;
+        self.emit_with_operand(Opcode::LoadGlobalCallable, Operand::U16U16(slot, name))
     }
 
-    /// Emits a `LoadName` / `StoreName` / `DeleteName` with its slot, interned
-    /// name and `NAME_*` flags; the name is encoded for the same reason as in
+    /// Emits a `LoadName` / `StoreName` / `DeleteName` with its slot, name
+    /// operand and `NAME_*` flags; the name is encoded for the same reason as in
     /// [`emit_load_global_callable`](Self::emit_load_global_callable).
     pub fn emit_name_op(&mut self, op: Opcode, slot: u16, name_id: StringId, flags: u8) -> Result<(), CompileError> {
-        let name_id_u16 = u16::try_from(name_id.index()).map_err(|_| self.name_id_too_large())?;
-        self.emit_with_operand(op, Operand::U16U16U8(slot, name_id_u16, flags))
+        let name = self.name(name_id, self.current_position())?;
+        self.emit_with_operand(op, Operand::U16U16U8(slot, name, flags))
     }
 
     /// Emits `StoreLocal`, using wide variant for slots > 255.
@@ -405,6 +413,27 @@ impl CodeBuilder {
         let idx_u16 = u16::try_from(self.constants.len()).map_err(|_| self.constant_pool_full())?;
         self.constants.push(value);
         Ok(idx_u16)
+    }
+
+    /// Returns the operand that names `name_id` in this body, adding it to the
+    /// name table on first use.
+    ///
+    /// Every name-bearing opcode carries this operand rather than the session
+    /// ID, so the names of one body bound it and the size of the session never
+    /// does. The table holds at most `u16::MAX` names: the operand `u16::MAX`
+    /// stays free for `DictMerge`'s unknown callee.
+    pub fn name(&mut self, name_id: StringId, position: CodeRange) -> Result<u16, CompileError> {
+        if let Some(&operand) = self.name_operands.get(&name_id) {
+            Ok(operand)
+        } else {
+            let operand = u16::try_from(self.names.len())
+                .ok()
+                .filter(|&operand| operand < u16::MAX)
+                .ok_or_else(|| name_table_full(position))?;
+            self.names.push(name_id);
+            self.name_operands.insert(name_id, operand);
+            Ok(operand)
+        }
     }
 
     /// Adds an exception handler entry built from the given region bounds.
@@ -453,6 +482,7 @@ impl CodeBuilder {
         Code::new(
             self.bytecode,
             self.constants,
+            self.names,
             self.location_table,
             self.exception_table,
             local_names,
@@ -609,25 +639,6 @@ impl CodeBuilder {
         jump_too_large_at(self.current_location.unwrap_or_default())
     }
 
-    /// Builds the `CompileError` for a `StringId` that doesn't fit in the
-    /// `u16` operand of a name-bearing opcode. Used by emit helpers that
-    /// inline the name id directly (e.g. `LoadGlobalCallable`).
-    ///
-    /// The count is `u16::MAX + 1` (`65 536`) because a `u16` operand can
-    /// address indices `0..=u16::MAX`, so the format can name that many
-    /// distinct interned strings before overflowing.
-    #[cold]
-    #[inline(never)]
-    fn name_id_too_large(&self) -> CompileError {
-        CompileError::new(
-            format!(
-                "module has too many distinct names; the bytecode format supports up to {} interned strings",
-                usize::from(u16::MAX) + 1,
-            ),
-            self.current_location.unwrap_or_default(),
-        )
-    }
-
     /// Builds the `CompileError` for a `CallFunctionKw`/`CallAttrKw` keyword
     /// count that doesn't fit in `u8`. Anchored to the builder's current
     /// location (the call expression).
@@ -698,6 +709,20 @@ impl CodeBuilder {
 #[inline(never)]
 fn jump_too_large_at(position: CodeRange) -> CompileError {
     CompileError::new("function too large: jump offset exceeds i16 range", position)
+}
+
+/// Builds the `CompileError` for a body whose name table is full, reported at
+/// the first name that did not fit.
+#[cold]
+#[inline(never)]
+fn name_table_full(position: CodeRange) -> CompileError {
+    CompileError::new(
+        format!(
+            "function has too many distinct names; maximum is {} per function",
+            u16::MAX
+        ),
+        position,
+    )
 }
 
 /// Label for a forward jump that needs patching.

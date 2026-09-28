@@ -18,6 +18,12 @@ pub struct Code {
     /// Immediate constants indexed by `LoadConst`; heap literals live in `Interns`.
     constants: Vec<Value>,
 
+    /// Session string IDs indexed by the `u16` name operands of this body.
+    ///
+    /// A session interns strings for its whole life, so its IDs outgrow `u16`;
+    /// this table bounds an operand by the names one body uses, as CPython's `co_names`.
+    names: Vec<StringId>,
+
     /// Source location table for tracebacks.
     ///
     /// Maps bytecode offsets to source locations. Used to generate Python-style
@@ -54,16 +60,27 @@ impl Code {
     /// Creates an empty code object for tests that only need VM context.
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
-        Self::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), false, false)
+        Self::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        )
     }
 
     /// Creates a new Code object with all components.
     ///
     /// This is typically called by `CodeBuilder::build()` after compilation.
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         bytecode: Vec<u8>,
         constants: Vec<Value>,
+        names: Vec<StringId>,
         location_table: Vec<LocationEntry>,
         exception_table: Vec<ExceptionEntry>,
         local_names: Vec<StringId>,
@@ -73,6 +90,7 @@ impl Code {
         Self {
             bytecode,
             constants,
+            names,
             location_table,
             exception_table,
             local_names,
@@ -106,6 +124,13 @@ impl Code {
     #[must_use]
     pub fn constant(&self, index: u16) -> &Value {
         &self.constants[usize::from(index)]
+    }
+
+    /// Returns the name a name operand indexes.
+    /// Panics for an index not produced by this code's compiler.
+    #[must_use]
+    pub fn name(&self, index: u16) -> StringId {
+        self.names[usize::from(index)]
     }
 
     /// Returns the local variable name for a given slot index.
@@ -155,6 +180,7 @@ impl Clone for Code {
         Self {
             bytecode: self.bytecode.clone(),
             constants: self.constants.iter().map(Value::copy_immediate).collect(),
+            names: self.names.clone(),
             location_table: self.location_table.clone(),
             exception_table: self.exception_table.clone(),
             local_names: self.local_names.clone(),

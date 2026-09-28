@@ -218,7 +218,9 @@ discriminating operand would cost measurable dispatch time.
 
 ### Code owns its instruction and constant buffers
 
-Each `Code` (`crates/monty/src/bytecode/code.rs`) owns its bytecode, constants and metadata.
+Each `Code` (`crates/monty/src/bytecode/code.rs`) owns its bytecode, constants, names and metadata.
+A name operand indexes the names of its own `Code`, never a session `StringId`: a session interns strings for its whole
+life, so only the names one body uses bound the operand.
 A `CallFrame` borrows the `Code` and caches its bytecode slice so instruction fetches avoid an extra dereference.
 Its `usize` instruction pointer, source locations and exception handlers all use body-relative offsets.
 

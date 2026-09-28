@@ -765,6 +765,36 @@ fn repl_rejected_snippets_do_not_consume_slots_or_function_ids() {
     assert_eq!(feed_run_print(&mut repl, "ok").unwrap(), MontyObject::bool(true));
 }
 
+/// A session keeps every name and literal it ever compiled, so a long one
+/// interns more strings than a `u16` can count. Each operand indexes the
+/// names of its own code object, so a snippet still compiles a name the
+/// session has never seen: an import, an attribute, a keyword and a method,
+/// fed directly and through `exec`, and after a dump round trip.
+#[test]
+fn repl_session_past_u16_interned_strings_compiles_new_names() {
+    let (mut repl, _) = init_repl("class Box:\n    pass\nbox = Box()\ndef kw(**named):\n    return sorted(named)");
+    for snippet in 0..70 {
+        let mut code = format!("def fill_{snippet}():\n");
+        for i in 0..500 {
+            writeln!(code, "    box.attr_{snippet}_{i} = 'text_{snippet}_{i}'").unwrap();
+        }
+        feed_run_print(&mut repl, &code).unwrap();
+    }
+    let interned = to_value(&repl).unwrap()["interns"]["strings"].as_array().unwrap().len();
+    assert!(
+        interned > usize::from(u16::MAX) + 1,
+        "the session interned only {interned} strings"
+    );
+
+    let mut repl = round_trip_repl(&repl);
+    let code = "import math\nbox.fresh = math.floor(2.5)\nexec('box.fresher = 3', {'box': box})\n\
+                repr((box.fresh, box.fresher, kw(fresh_key=1), [].copy()))";
+    assert_eq!(
+        feed_run_print(&mut repl, code).unwrap(),
+        MontyObject::string("(2, 3, ['fresh_key'], [])")
+    );
+}
+
 #[test]
 fn repl_progress_dump_load_roundtrip() {
     let (repl, _) = init_repl("");

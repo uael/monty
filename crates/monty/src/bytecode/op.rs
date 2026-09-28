@@ -10,6 +10,10 @@
 //! - `W` suffix, 2 bytes (u16/i16): `LoadLocalW`, `Jump`, `LoadConst`
 //! - Compound (multiple operands): `CallFunctionKw` (u8 + u8), `MakeClosure` (u16 + u8 + u8),
 //!   `LoadName` (u16 + u16 + u8)
+//!
+//! A `name` operand is a u16 index into the name table of the code object that holds the
+//! instruction (`Code::name`), never a session `StringId`: a session interns strings for its
+//! whole life, so only the names of one body bound the operand.
 
 #[cfg(test)]
 use strum::IntoEnumIterator;
@@ -120,13 +124,13 @@ pub enum Opcode {
     /// Delete local variable. Operand: u8 slot.
     DeleteLocal = 21,
     /// Load global in call context: pushes an external function for undefined names
-    /// instead of yielding `NameLookup`. Operands: u16 slot, u16 name_id.
+    /// instead of yielding `NameLookup`. Operands: u16 slot, u16 name.
     ///
     /// Used when compiling function calls like `foo()` where `foo` is a global.
     /// If the variable is defined, behaves identically to `LoadGlobal`.
     /// If undefined, pushes an `ExtFunction` value so execution continues to `CallFunction`,
     /// which naturally yields `FunctionCall` instead of `NameLookup`.
-    /// The name_id is encoded in the operand because global and local slot indices
+    /// The name is encoded in the operand because global and local slot indices
     /// belong to different namespaces — using the current frame's local_names would
     /// return the wrong name when called from inside a function.
     LoadGlobalCallable = 22,
@@ -256,9 +260,10 @@ pub enum Opcode {
     /// Used after building the args list to create the final args tuple
     /// for `CallFunctionEx`.
     ListToTuple = 70,
-    /// Pop mapping, pop dict, update dict with mapping. Operand: u16 func_name_id.
+    /// Pop mapping, pop dict, update dict with mapping. Operand: u16 name of the
+    /// callee, or `u16::MAX` when the compiler knows no callee.
     ///
-    /// Used for `**kwargs` unpacking. The func_name_id is used for error messages
+    /// Used for `**kwargs` unpacking. The callee name is used for error messages
     /// when the mapping contains non-string keys.
     DictMerge = 71,
 
@@ -288,14 +293,14 @@ pub enum Opcode {
     BinarySubscr = 75,
     /// a[b] = c: pop value, pop index, pop obj.
     StoreSubscr = 76,
-    /// Pop obj, push obj.attr. Operand: u16 name_id.
+    /// Pop obj, push obj.attr. Operand: u16 name.
     LoadAttr = 77,
-    /// Pop module, push module.attr for `from ... import`. Operand: u16 name_id.
+    /// Pop module, push module.attr for `from ... import`. Operand: u16 name.
     ///
     /// Like `LoadAttr` but raises `ImportError` instead of `AttributeError`
     /// when the attribute is not found. Used for `from module import name`.
     LoadAttrImport = 78,
-    /// Pop value, pop obj, set obj.attr. Operand: u16 name_id.
+    /// Pop value, pop obj, set obj.attr. Operand: u16 name.
     StoreAttr = 79,
 
     // === Function Calls ===
@@ -320,19 +325,19 @@ pub enum Opcode {
     ///
     /// Stack: [callable, pos_args..., kw_values...]
     /// After the two count bytes, there are kw_count little-endian u16 values,
-    /// each being a StringId index for the corresponding keyword argument name.
+    /// each being the name of the corresponding keyword argument.
     CallFunctionKw = 83,
-    /// Call attribute on object. Operands: u16 name_id, u8 arg_count.
+    /// Call attribute on object. Operands: u16 name, u8 arg_count.
     ///
     /// This is used for both method calls (`obj.method(args)`) and module
     /// attribute calls (`module.func(args)`). The attribute is looked up
     /// on the object and called with the given arguments.
     CallAttr = 84,
-    /// Call attribute with keyword args. Operands: u16 name_id, u8 pos_count, u8 kw_count, then kw_count u16 name indices.
+    /// Call attribute with keyword args. Operands: u16 name, u8 pos_count, u8 kw_count, then kw_count u16 name indices.
     ///
     /// Stack: [obj, pos_args..., kw_values...]
     /// After the operands, there are kw_count little-endian u16 values,
-    /// each being a StringId index for the corresponding keyword argument name.
+    /// each being the name of the corresponding keyword argument.
     CallAttrKw = 85,
     /// Call a defined function with *args tuple and **kwargs dict. Operand: u8 flags.
     ///
@@ -346,7 +351,7 @@ pub enum Opcode {
     ///
     /// Used for calls with `*args` and/or `**kwargs` unpacking.
     CallFunctionExtended = 86,
-    /// Call attribute with *args tuple and **kwargs dict. Operands: u16 name_id, u8 flags.
+    /// Call attribute with *args tuple and **kwargs dict. Operands: u16 name, u8 flags.
     ///
     /// Flags:
     /// - bit 0: has kwargs dict on stack
@@ -525,7 +530,7 @@ pub enum Opcode {
     /// comprehension's nesting depth (almost always tiny).
     LiftToTop = 115,
     /// Raise `UnboundLocalError: cannot access local variable 'NAME' where
-    /// it is not associated with a value`. Operand: u16 name_id.
+    /// it is not associated with a value`. Operand: u16 name.
     ///
     /// Emitted by the comprehension compiler at sites where static analysis
     /// proves a comp-target read happens before the corresponding `for`
@@ -569,8 +574,8 @@ pub enum Opcode {
     /// Push a name resolved at runtime through the frame's namespace: locals
     /// dict → globals (slot array or dict) → builtins → module dunders and
     /// host lookup (slot globals only) → `NameError`. Operands: u16 slot,
-    /// u16 name_id, u8 flags (`NAME_*`). The slot is the session global slot
-    /// for `name_id`, so with slot globals the tail is exactly `LoadGlobal` /
+    /// u16 name, u8 flags (`NAME_*`). The slot is the session global slot
+    /// for that name, so with slot globals the tail is exactly `LoadGlobal` /
     /// `LoadGlobalCallable`; unused with dict globals.
     LoadName = 122,
     /// Pop and bind a name through the frame's namespace. Operands as `LoadName`.
@@ -592,13 +597,13 @@ pub enum Opcode {
     MatchClass = 126,
 
     /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
-    /// `__value__` read. Operand: u16 name_id (the alias's `__name__`).
+    /// `__value__` read. Operand: u16 name (the alias's `__name__`).
     MakeTypeAlias = 127,
 
     // === `del` on containers ===
     /// `del a[b]`: pop index, pop obj, remove the item.
     DeleteSubscr = 128,
-    /// `del a.b`: pop obj, remove the attribute. Operand: u16 name_id.
+    /// `del a.b`: pop obj, remove the attribute. Operand: u16 name.
     DeleteAttr = 129,
 
     // === PEP 750 template construction ===
@@ -836,13 +841,13 @@ pub enum Operand<'a> {
     U16U8(u16, u8),
     /// Two u16 little-endian (e.g. `LoadGlobalCallable`).
     U16U16(u16, u16),
-    /// Two u16 little-endian then a u8 (the `*Name` opcodes: slot, name_id, flags).
+    /// Two u16 little-endian then a u8 (the `*Name` opcodes: slot, name, flags).
     U16U16U8(u16, u16, u8),
     /// u16 then two u8s (e.g. `MakeClosure`).
     U16U8U8(u16, u8, u8),
-    /// `CallFunctionKw` shape: pos_count (u8), kw_count (u8), kw_count * name_id (u16 each).
+    /// `CallFunctionKw` shape: pos_count (u8), kw_count (u8), kw_count * name (u16 each).
     CallKw { pos_count: u8, kwname_ids: &'a [u16] },
-    /// `CallAttrKw` shape: attr_name_id (u16), pos_count (u8), kw_count (u8), kw_count * name_id (u16 each).
+    /// `CallAttrKw` shape: attr_name_id (u16), pos_count (u8), kw_count (u8), kw_count * name (u16 each).
     CallAttrKw {
         attr_name_id: u16,
         pos_count: u8,
@@ -1054,12 +1059,12 @@ impl Opcode {
             // Pops the keyword names and the class, plus the subject copy the
             // pattern duplicated for it; pushes the attribute tuple or `None`.
             (MatchClass, Operand::U16(_)) => -2,
-            // `DictMerge` takes a u16 operand carrying the func_name_id for
+            // `DictMerge` takes a u16 operand carrying the callee name for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under
             // the popped operands to qualify the error wording.
             (DictMerge | MethodDictMerge, Operand::U16(_)) => -1,
-            // `RaiseUnboundLocal(name_id)` always raises — fall-through is dead
+            // `RaiseUnboundLocal(name)` always raises — fall-through is dead
             // code, but the tracker absorbs the bytes with effect 0 before the
             // following region starts.
             (RaiseUnboundLocal, Operand::U16(_)) => 0,

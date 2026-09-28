@@ -6,6 +6,7 @@
 //! - Local variable slots: Use wide instructions (u16), so up to 65535 locals work
 //! - Function call arguments: Limited to 255 (u8 operand) - returns SyntaxError if exceeded
 //! - Keyword argument counts: Limited to 255 (u8 operand) - returns SyntaxError if exceeded
+//! - Distinct names per code object: Limited to 65535 (u16 operand) - returns SyntaxError if exceeded
 
 use std::fmt::Write;
 
@@ -377,6 +378,52 @@ mod stack_effect_limits {
             .expect("20000-entry dict literal should compile");
         let result = run.run_no_limits(vec![]);
         assert!(result.is_ok(), "20000-entry dict literal should run: {result:?}");
+    }
+}
+
+/// Generates `count` functions, each reading `names` distinct attributes of its
+/// argument, which the function's own name table holds.
+fn generate_attribute_readers(count: usize, names: usize) -> String {
+    let mut code = String::new();
+    for f in 0..count {
+        writeln!(code, "def f{f}(x):").unwrap();
+        for i in 0..names {
+            writeln!(code, "    x.a{f}_{i}").unwrap();
+        }
+    }
+    code
+}
+
+// A name operand is a `u16` index into the names of its own code object, and
+// `u16::MAX` stays free for `DictMerge`'s unknown callee, so one code object
+// holds at most 65 535 distinct names, while a module or a session holds any
+// number across its code objects.
+mod name_table_limits {
+    use super::*;
+
+    #[test]
+    fn code_object_at_name_table_limit_compiles() {
+        let code = generate_attribute_readers(1, usize::from(u16::MAX));
+        MontyRun::new(code, "test.py", vec![], CompileOptions::default())
+            .expect("65535 distinct names in one function should compile");
+    }
+
+    #[test]
+    fn code_object_past_name_table_limit_returns_syntax_error() {
+        let code = generate_attribute_readers(1, usize::from(u16::MAX) + 1);
+        let result = MontyRun::new(code, "test.py", vec![], CompileOptions::default());
+        assert_syntax_error(
+            result,
+            "function has too many distinct names; maximum is 65535 per function",
+        );
+    }
+
+    /// Two functions of 40 000 names each hold 80 000 names in one module.
+    #[test]
+    fn module_past_u16_names_across_code_objects_compiles() {
+        let code = generate_attribute_readers(2, 40_000);
+        MontyRun::new(code, "test.py", vec![], CompileOptions::default())
+            .expect("80000 distinct names across two functions should compile");
     }
 }
 

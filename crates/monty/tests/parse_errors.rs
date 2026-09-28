@@ -999,8 +999,8 @@ fn module_with_too_many_names_returns_syntax_error() {
 
 #[test]
 fn module_with_too_many_interned_strings_returns_syntax_error() {
-    // 66 000 distinct attribute references push the executor-local interner
-    // beyond the bytecode format's `u16` ID range.
+    // 66 000 distinct attribute references in one module body overflow the
+    // `u16` name operands of that code object.
     let mut code = "x = None\n".to_owned();
     for i in 0..66_000 {
         writeln!(code, "x.a{i}").unwrap();
@@ -1010,7 +1010,7 @@ fn module_with_too_many_interned_strings_returns_syntax_error() {
     assert_eq!(err.exc_type(), ExcType::SyntaxError);
     assert_eq!(
         err.message(),
-        Some("module has too many distinct names; the bytecode format supports up to 65536 interned strings"),
+        Some("function has too many distinct names; maximum is 65535 per function"),
     );
 }
 
