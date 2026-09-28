@@ -263,7 +263,7 @@ ExcType = Literal[
     'NotImplementedError',
     'RecursionError',
     'AttributeError',
-    'FrozenInstanceError',
+    'dataclasses.FrozenInstanceError',
     'NameError',
     'UnboundLocalError',
     'ValueError',
