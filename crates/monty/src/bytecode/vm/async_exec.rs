@@ -116,6 +116,16 @@ impl<'h> VM<'h> {
         receiver_id: HeapId,
         done_ip: usize,
     ) -> RunResult<Option<AwaitResult>> {
+        // The frames under a call of the host stand at a call the host has not
+        // answered, so no other task may run and no future may settle until
+        // that call returns: the call is synchronous.
+        if self.in_host_call() {
+            return Err(SimpleException::new_msg(
+                ExcType::RuntimeError,
+                "a call that the host makes before it answers cannot await a future",
+            )
+            .into());
+        }
         let awaiter = Awaiter::Task(
             self.scheduler
                 .current_task_id()

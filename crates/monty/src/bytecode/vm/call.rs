@@ -495,6 +495,34 @@ impl<'h> VM<'h> {
         }
     }
 
+    /// Calls `callable` for the host while the VM stands at a call the host
+    /// has not answered, for `ReplFunctionCall::call_first`.
+    ///
+    /// The callee's frame ends the run as the frame of
+    /// [`evaluate_function`](Self::evaluate_function) does, so its return or
+    /// its raise leaves the frames beneath it where they stood. Unlike that
+    /// frame, it is driven by the host's own loop rather than a nested
+    /// `run()`, so it may suspend to the host and travel in the snapshot.
+    pub(crate) fn call_from_host(&mut self, callable: Value, args: ArgValues) -> Result<FrameExit, RunError> {
+        let called = self.call_function(&callable, args);
+        callable.drop_with(self);
+        match called? {
+            CallResult::Value(value) => Ok(FrameExit::Return(value)),
+            // No lookup is open on the host, so it is answered as a nested
+            // call answers one: `Undefined`.
+            CallResult::AttrLookup {
+                effect: Some(effect), ..
+            } => Ok(FrameExit::Return(effect.apply(None, self))),
+            CallResult::FramePushed => {
+                self.current_frame_mut().should_return = true;
+                self.run_external()
+            }
+            // A callable of the host is the host's to call; the sandbox answers
+            // only for its own.
+            unsupported => Err(self.unsupported_call_result("call_first", unsupported)),
+        }
+    }
+
     /// Runs a generator to its next `yield` from Rust, for everything that
     /// walks an iterator itself: `list()`, `sorted()`, a comprehension, `for`
     /// and the `next()` builtin.
