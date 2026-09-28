@@ -1,13 +1,14 @@
-//! Handles: the callables and classes of the sandbox that a session holds for
-//! its host.
+//! Handles: the values of the sandbox with no data form, and its classes, that
+//! a session holds for its host.
 //!
-//! A value crosses to the host as data, but a callable carries no data the
-//! host could call: it crosses as a handle, and the session holds the value
-//! under that handle until the host releases it, so a callable the sandbox
-//! made and let go of still answers when the host hands it back. A class
-//! crosses as its type node under its own boundary uuid, and a session that
-//! holds handles holds it the same way. Only a session that asked for handles
-//! holds them; every other session keeps a callable's `repr()`.
+//! A value crosses to the host as data, but a function, a generator or a
+//! template carries no data the host could hand back as itself: it crosses as
+//! a handle, and the session holds the value under that handle until the host
+//! releases it, so a value the sandbox made and let go of is still there when
+//! the host hands it back, or calls it. A class crosses as its type node under
+//! its own boundary uuid, and a session that holds handles holds it the same
+//! way. Only a session that asked for handles holds them; every other session
+//! keeps such a value's `repr()`.
 
 use std::collections::BTreeMap;
 
@@ -41,8 +42,8 @@ impl Held {
 }
 
 impl Heap {
-    /// From now on, every callable and class that crosses to the host is held
-    /// under a handle until the host releases it.
+    /// From now on, every value with no data form and every class that crosses
+    /// to the host is held under a handle until the host releases it.
     pub(crate) fn hold_handles(&mut self) {
         self.handles.get_or_insert_default();
     }

@@ -240,7 +240,7 @@ impl Serialize for JsonEncoded<'_> {
             MontyNode::NotImplemented => s.serialize_str("NotImplemented"),
             MontyNode::BuiltinFunction(func) => s.collect_str(&format_args!("<built-in function {func}>")),
             MontyNode::Function { name, .. } => s.collect_str(&format_args!("<function '{name}' external>")),
-            MontyNode::Callable { name, .. } => s.collect_str(&format_args!("<function {name}>")),
+            MontyNode::Handle { type_name, .. } => s.collect_str(&format_args!("<{type_name} handle>")),
             MontyNode::FileHandle(handle) => s.collect_str(handle),
             MontyNode::TimeZone(tz) => s.collect_str(&TimeZoneRepr(tz)),
         }

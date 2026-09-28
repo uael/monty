@@ -143,16 +143,17 @@ impl MontyRepl {
         self
     }
 
-    /// Holds each callable and class of the sandbox that crosses to the host
+    /// Holds each value of the sandbox with no data form, such as a function,
+    /// a generator or a template, and each class, that crosses to the host
     /// under a handle, until the host releases it with
-    /// [`release`](Self::release): a callable crosses as a
-    /// [`MontyObject::callable`], a class as its type object, and either one
+    /// [`release`](Self::release): such a value crosses as a
+    /// [`MontyObject::handle`], a class as its type object, and either one
     /// handed back is the same object again, which the host may call with
     /// [`ReplFunctionCall::call_first`]. An instance of a class of the session
     /// whose object is gone is made again from its class and its attrs, with
     /// no `__init__` run, when the host hands it in, so the host may hold one
-    /// by its fields. A session without handles gives a callable as its
-    /// `repr()`, and refuses an instance whose object is gone.
+    /// by its fields. A session without handles gives a value with no data
+    /// form as its `repr()`, and refuses an instance whose object is gone.
     #[must_use]
     pub fn with_handles(mut self) -> Self {
         self.heap.hold_handles();
