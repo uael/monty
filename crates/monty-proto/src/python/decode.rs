@@ -173,7 +173,7 @@ impl Decoder<'_, '_> {
             MontyNode::FileHandle(handle) => Ok(Py::new(py, PyMontyFileHandle::from_inner(handle.clone()))?.into_any()),
             // output-only nodes become their text
             MontyNode::Repr(s) | MontyNode::Cycle(s) => Ok(PyString::new(py, s).into_any().unbind()),
-            MontyNode::Callable { .. } => unreachable!("a worker opens no session with handles"),
+            MontyNode::Handle { .. } => unreachable!("a worker opens no session with handles"),
             // function nodes belong to the name-lookup protocol; one reaching
             // an output value decodes to its name
             MontyNode::Function { name, .. } => Ok(PyString::new(py, name).into_any().unbind()),

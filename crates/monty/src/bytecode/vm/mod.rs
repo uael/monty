@@ -2401,6 +2401,24 @@ impl<'h> VM<'h> {
         self.run_external()
     }
 
+    /// Raises `exception`, which the host handed in, at the call the VM stands
+    /// at, as a `raise` statement there would: an exception object keeps its
+    /// identity, and anything else raises `TypeError`.
+    pub(crate) fn raise_from_host(&mut self, exception: Value) -> Result<FrameExit, RunError> {
+        let error = self.make_exception(&exception, true);
+        let raised = if self.keeps_identity(&exception) {
+            Some(exception)
+        } else {
+            exception.drop_with(self);
+            None
+        };
+        if let Some(uncaught_error) = self.handle_exception_with_value(error, raised) {
+            return Err(uncaught_error);
+        }
+        yield_if_parked!(self);
+        self.run_external()
+    }
+
     // ========================================================================
     // Stack Operations
     // ========================================================================

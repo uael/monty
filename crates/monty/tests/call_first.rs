@@ -4,8 +4,8 @@
 
 use monty::{Dump, MontyRepl, ReplFunctionCall, ReplProgress, Session, SessionRef, dump};
 use monty_types::{
-    CallArgs, CompileOptions, ExcType, MontyException, MontyObject, NamedValues, PrintWriter, ResourceLimits,
-    ResourceTracker,
+    CallArgs, CompileOptions, ExcType, MontyException, MontyObject, MontyUuid, NamedValues, PrintWriter,
+    ResourceLimits, ResourceTracker,
     unstable::{self, MontyNode},
 };
 
@@ -88,10 +88,10 @@ fn completes(call: ReplFunctionCall, answer: i64) {
 fn a_callable_crosses_as_the_handle_its_session_holds_it_under() {
     let mut repl = session(ResourceLimits::default());
     let echo = value(&mut repl, "echo");
-    let MontyNode::Callable { id, name } = unstable::node(echo.as_ref()).clone() else {
+    let MontyNode::Handle { id, type_name } = unstable::node(echo.as_ref()).clone() else {
         panic!("expected a handle, got {echo:?}")
     };
-    assert_eq!(name, "echo");
+    assert_eq!(type_name, "function");
     assert_eq!(value(&mut repl, "echo"), echo, "the same callable keeps its handle");
     let back = repl
         .feed_run("f is echo", named("f", echo), PrintWriter::Disabled)
@@ -102,7 +102,7 @@ fn a_callable_crosses_as_the_handle_its_session_holds_it_under() {
 }
 
 #[test]
-fn a_session_without_handles_gives_a_callable_as_its_repr() {
+fn a_session_without_handles_gives_a_value_with_no_data_form_as_its_repr() {
     let mut repl = MontyRepl::new("call_first.py", ResourceTracker::default(), CompileOptions::default());
     repl.feed_run(CODE, vec![], PrintWriter::Disabled).unwrap();
     let echo = value(&mut repl, "echo");
@@ -116,10 +116,9 @@ fn a_session_without_handles_gives_a_callable_as_its_repr() {
 fn a_held_callable_outlives_the_code_that_made_it_until_it_is_released() {
     let mut repl = session(ResourceLimits::default());
     let add = value(&mut repl, "adder(10)");
-    let MontyNode::Callable { id, name } = unstable::node(add.as_ref()).clone() else {
+    let MontyNode::Handle { id, .. } = unstable::node(add.as_ref()).clone() else {
         panic!("expected a handle, got {add:?}")
     };
-    assert_eq!(name, "add");
     let got = repl
         .feed_run("f(5)", named("f", add.clone()), PrintWriter::Disabled)
         .unwrap();
@@ -343,7 +342,7 @@ fn a_session_with_a_call_of_the_host_running_dumps_and_loads() {
 fn a_waiting_call_releases_a_handle() {
     let mut repl = session(ResourceLimits::default());
     let echo = value(&mut repl, "echo");
-    let MontyNode::Callable { id, .. } = unstable::node(echo.as_ref()).clone() else {
+    let MontyNode::Handle { id, .. } = unstable::node(echo.as_ref()).clone() else {
         panic!("expected a handle, got {echo:?}")
     };
     let mut call = outer(repl);
@@ -357,4 +356,156 @@ fn a_waiting_call_releases_a_handle() {
         "a released handle calls nothing"
     );
     completes(call, 10);
+}
+
+const RAISES: &str = "\
+class Refused(Exception):
+    pass
+
+class Never:
+    def __init__(self):
+        raise RuntimeError('never')
+";
+
+fn raising() -> MontyRepl {
+    let mut repl = session(ResourceLimits::default());
+    repl.feed_run(RAISES, vec![], PrintWriter::Disabled).unwrap();
+    repl
+}
+
+fn id(of: u8) -> MontyUuid {
+    MontyUuid::try_from_slice(&[of; 16]).unwrap()
+}
+
+#[test]
+fn an_instance_whose_object_is_gone_is_made_again_from_its_class_and_attrs() {
+    let mut repl = raising();
+    let never = value(&mut repl, "Never");
+    let made = MontyObject::class_instance(never, id(7), [(MontyObject::string("x"), MontyObject::int(1))]);
+    let mut both = NamedValues::new();
+    both.push("i", made.clone());
+    both.push("j", made);
+    let got = repl
+        .feed_run("(i.x, type(i) is Never, i is j)", both, PrintWriter::Disabled)
+        .unwrap();
+    assert_eq!(
+        got,
+        MontyObject::tuple([MontyObject::int(1), MontyObject::bool(true), MontyObject::bool(true)]),
+        "made with no __init__ run, and once under its id"
+    );
+}
+
+#[test]
+fn a_host_raises_an_exception_of_the_sandbox_at_the_call() {
+    let mut repl = raising();
+    let refused = value(&mut repl, "Refused");
+    let progress = repl
+        .feed_start(
+            "try:\n    got = outer()\nexcept Refused as no:\n    got = ('caught', no.args)\ngot",
+            vec![],
+            PrintWriter::Disabled,
+        )
+        .unwrap();
+    let call = called(progress, "outer");
+    let no = MontyObject::class_instance(
+        refused,
+        id(8),
+        [(
+            MontyObject::string("args"),
+            MontyObject::tuple([MontyObject::string("no")]),
+        )],
+    );
+    let (_, got) = call.raise(no, PrintWriter::Disabled).unwrap().into_complete().unwrap();
+    assert_eq!(
+        got,
+        MontyObject::tuple([
+            MontyObject::string("caught"),
+            MontyObject::tuple([MontyObject::string("no")])
+        ])
+    );
+}
+
+#[test]
+fn an_exception_the_host_raises_that_nothing_catches_ends_the_snippet_under_its_class() {
+    let mut repl = raising();
+    let refused = value(&mut repl, "Refused");
+    let call = outer(repl);
+    let no = MontyObject::class_instance(
+        refused,
+        id(9),
+        [(
+            MontyObject::string("args"),
+            MontyObject::tuple([MontyObject::string("no")]),
+        )],
+    );
+    let error = call.raise(no, PrintWriter::Disabled).expect_err("nothing catches it");
+    assert_eq!(error.error.type_name(), "Refused");
+    assert_eq!(error.error.message(), Some("no"));
+}
+
+#[test]
+fn a_host_that_raises_no_exception_raises_a_type_error() {
+    let repl = raising();
+    let progress = repl
+        .feed_start(
+            "try:\n    got = outer()\nexcept TypeError as no:\n    got = str(no)\ngot",
+            vec![],
+            PrintWriter::Disabled,
+        )
+        .unwrap();
+    let call = called(progress, "outer");
+    let (_, got) = call
+        .raise(MontyObject::int(3), PrintWriter::Disabled)
+        .unwrap()
+        .into_complete()
+        .unwrap();
+    assert_eq!(got, MontyObject::string("exceptions must derive from BaseException"));
+}
+
+#[test]
+fn a_value_with_no_data_form_crosses_as_a_handle_and_back_as_itself() {
+    let mut repl = session(ResourceLimits::default());
+    repl.feed_run(
+        "def counts():\n    yield 1\n    yield 2\ng = counts()",
+        vec![],
+        PrintWriter::Disabled,
+    )
+    .unwrap();
+    let generator = value(&mut repl, "g");
+    assert_eq!(generator.as_ref().type_name(), "generator");
+    assert!(generator.as_ref().handle().is_some());
+    let got = repl
+        .feed_run("(next(h), h is g)", named("h", generator), PrintWriter::Disabled)
+        .unwrap();
+    assert_eq!(got, MontyObject::tuple([MontyObject::int(1), MontyObject::bool(true)]));
+}
+
+#[test]
+fn a_host_builds_a_template_from_its_parts_by_handles() {
+    let mut repl = session(ResourceLimits::default());
+    repl.feed_run(
+        "from string.templatelib import Interpolation, Template\ndef shown(t):\n    return [(i.value, i.expression) for i in t.interpolations]",
+        vec![],
+        PrintWriter::Disabled,
+    )
+    .unwrap();
+    let (interpolation, template, shown) = (
+        value(&mut repl, "Interpolation"),
+        value(&mut repl, "Template"),
+        value(&mut repl, "shown"),
+    );
+    let part = repl
+        .feed_run("i(42, 'x')", named("i", interpolation), PrintWriter::Disabled)
+        .unwrap();
+    assert_eq!(part.as_ref().type_name(), "string.templatelib.Interpolation");
+    let mut parts = named("t", template);
+    parts.push("p", part);
+    let built = repl.feed_run("t('a ', p)", parts, PrintWriter::Disabled).unwrap();
+    let mut given = named("s", shown);
+    given.push("b", built);
+    let got = repl.feed_run("s(b)", given, PrintWriter::Disabled).unwrap();
+    assert_eq!(
+        got,
+        MontyObject::list([MontyObject::tuple([MontyObject::int(42), MontyObject::string("x")])])
+    );
 }

@@ -446,7 +446,7 @@ fn encode_node(node: &MontyNode, buf: &mut impl BufMut) {
             encode_opt_str(2, docstring.as_deref(), buf);
         }
         MontyNode::Repr(r) => encoding::string::encode(tag::REPR, r, buf),
-        MontyNode::Callable { .. } => unreachable!("a worker opens no session with handles"),
+        MontyNode::Handle { .. } => unreachable!("a worker opens no session with handles"),
         MontyNode::Cycle(placeholder) => encoding::string::encode(tag::CYCLE, placeholder, buf),
     }
 }
@@ -500,7 +500,7 @@ fn node_len(node: &MontyNode) -> usize {
             submessage_len(tag::FUNCTION, str_len(1, name) + opt_str_len(2, docstring.as_deref()))
         }
         MontyNode::Repr(r) => encoding::string::encoded_len(tag::REPR, r),
-        MontyNode::Callable { .. } => unreachable!("a worker opens no session with handles"),
+        MontyNode::Handle { .. } => unreachable!("a worker opens no session with handles"),
         MontyNode::Cycle(placeholder) => encoding::string::encoded_len(tag::CYCLE, placeholder),
     }
 }

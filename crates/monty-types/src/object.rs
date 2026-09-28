@@ -172,11 +172,14 @@ impl MontyObject {
         })
     }
 
-    /// A callable of the sandbox, by the handle a session that holds handles
-    /// gave it under; see [`MontyNode::Callable`].
+    /// A value of the sandbox, by the handle a session that holds handles
+    /// gave it under; see [`MontyNode::Handle`].
     #[must_use]
-    pub fn callable(id: MontyUuid, name: impl Into<String>) -> Self {
-        Self::leaf(MontyNode::Callable { id, name: name.into() })
+    pub fn handle(id: MontyUuid, type_name: impl Into<String>) -> Self {
+        Self::leaf(MontyNode::Handle {
+            id,
+            type_name: type_name.into(),
+        })
     }
 
     /// A builtin function such as `len`.
@@ -484,12 +487,12 @@ impl<'a> ObjectRef<'a> {
     }
 
     /// The handle a session that holds handles gave the value under: that of
-    /// a callable of the sandbox, or the id of a class of the sandbox. The
+    /// a value with no data form, or the id of a class of the sandbox. The
     /// host releases the value by it.
     #[must_use]
     pub fn handle(&self) -> Option<MontyUuid> {
         match self.node() {
-            MontyNode::Callable { id, .. } => Some(*id),
+            MontyNode::Handle { id, .. } => Some(*id),
             MontyNode::ClassType(class) if !class.host_defined => Some(class.id),
             _ => None,
         }
@@ -753,7 +756,7 @@ impl<'a> ObjectRef<'a> {
             MontyNode::ClassType(class) => write!(f, "<class '{}'>", class.name),
             MontyNode::BuiltinFunction(func) => write!(f, "<built-in function {func}>"),
             MontyNode::Function { name, .. } => write!(f, "<function '{name}' external>"),
-            MontyNode::Callable { name, .. } => write!(f, "<function {name}>"),
+            MontyNode::Handle { type_name, .. } => write!(f, "<{type_name} handle>"),
             MontyNode::Repr(s) => write!(f, "Repr({})", StringRepr(s)),
             MontyNode::Cycle(placeholder) => f.write_str(placeholder),
             MontyNode::List(_)

@@ -143,13 +143,17 @@ impl MontyRepl {
         self
     }
 
-    /// Holds each callable and class of the sandbox that crosses to the host
+    /// Holds each value of the sandbox with no data form, such as a function,
+    /// a generator or a template, and each class, that crosses to the host
     /// under a handle, until the host releases it with
-    /// [`release`](Self::release): a callable crosses as a
-    /// [`MontyObject::callable`], a class as its type object, and either one
+    /// [`release`](Self::release): such a value crosses as a
+    /// [`MontyObject::handle`], a class as its type object, and either one
     /// handed back is the same object again, which the host may call with
-    /// [`ReplFunctionCall::call_first`]. A session without handles gives a
-    /// callable as its `repr()`.
+    /// [`ReplFunctionCall::call_first`]. An instance of a class of the session
+    /// whose object is gone is made again from its class and its attrs, with
+    /// no `__init__` run, when the host hands it in, so the host may hold one
+    /// by its fields. A session without handles gives a value with no data
+    /// form as its `repr()`, and refuses an instance whose object is gone.
     #[must_use]
     pub fn with_handles(mut self) -> Self {
         self.heap.hold_handles();
@@ -787,6 +791,18 @@ impl ReplFunctionCall {
     /// Aborts the snippet with an uncatchable exception; see [`ReplOsCall::abort`].
     pub fn abort(self, exc: MontyException, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
         self.snapshot.abort(exc, print)
+    }
+
+    /// Resumes by raising `exception`, an exception object of the sandbox, at
+    /// the call, as a `raise` statement there would: an instance of a class
+    /// of the session keeps its class, where [`resume`](Self::resume) with a
+    /// [`MontyException`] raises a builtin one. A value that is no exception
+    /// raises `TypeError` there.
+    pub fn raise(self, exception: MontyObject, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
+        self.snapshot.step(print, |vm| match exception.to_value(vm) {
+            Ok(exception) => vm.raise_from_host(exception),
+            Err(error) => vm.resume_with_exception(invalid_input(error, "exception")),
+        })
     }
 
     /// The host holds the handle `id` no more; see [`MontyRepl::release`].
