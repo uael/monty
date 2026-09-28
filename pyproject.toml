@@ -184,6 +184,9 @@ exclude = [
     # their TypeError messages
     "crates/monty/test_cases/functools__reduce.py",
     "crates/monty/test_cases/functools__partial.py",
+    # deliberately calls `Template`/`Interpolation` with wrong arguments to pin
+    # their TypeError and ValueError messages
+    "crates/monty/test_cases/tstring__construct.py",
     # deliberately subscripts types with the wrong arity and with non-type
     # arguments to pin `types.GenericAlias` behaviour
     "crates/monty/test_cases/generic_alias.py",

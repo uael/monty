@@ -21,7 +21,7 @@ use crate::{
         long_int::{INT_MAX_STR_DIGITS, bigint_to_f64_checked},
         path, property,
         str::StringRepr,
-        time,
+        template, time,
         timedelta::{self, DAY_MICROSECONDS, MAX_TIMEDELTA_DAYS, MIN_TIMEDELTA_DAYS},
         timezone::{self, MAX_TIMEZONE_CONSTANT_SECONDS},
     },
@@ -742,6 +742,8 @@ impl Type {
             Self::Path => Path::init(vm, args),
             Self::Partial => Partial::init(vm, args),
             Self::Random => Random::init(vm, args),
+            Self::Template => template::template_init(vm, args),
+            Self::Interpolation => template::interpolation_init(vm, args),
 
             // Every `itertools` name but `tee` is a type, as in CPython, so
             // `isinstance(x, itertools.count)` and `type(x) is count` hold.

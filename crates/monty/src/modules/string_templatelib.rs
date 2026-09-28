@@ -1,9 +1,9 @@
 //! Implementation of the `string.templatelib` module (PEP 750).
 //!
 //! The module is a namespace only: it exposes the `Template` and `Interpolation`
-//! type objects so `isinstance(t, Template)` and annotations resolve, and has no
-//! functions of its own. Neither type is constructible from Python; templates
-//! are produced by `t"..."` literals. See `limitations/string_templatelib.md`.
+//! type objects, which `isinstance(t, Template)` and annotations resolve, and
+//! which build a template as CPython does; it has no functions of its own. See
+//! `limitations/string_templatelib.md`.
 
 use crate::{
     builtins::Builtins,

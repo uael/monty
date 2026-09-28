@@ -29,14 +29,6 @@ is missing from the module namespace rather than stubbed, so it raises
 `ImportError` on `from string.templatelib import convert` and `AttributeError`
 on attribute access.
 
-## Not constructible from Python
-
-`Template` and `Interpolation` are exposed so `isinstance()` works, but calling
-them raises `TypeError: cannot create 'string.templatelib.Template' instances`
-(and the matching message for `Interpolation`). CPython builds both directly:
-`Template('a', Interpolation(42, 'x'), 'b')`. In Monty, a template can only come
-from a `t"..."` literal.
-
 ## Behavioural divergences
 
 - **No concatenation.** CPython supports `Template + Template` and
