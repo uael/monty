@@ -99,4 +99,4 @@ assert boom_dict_copy is None or boom_dict_copy == boom_dict
 # its name and by the three instances alive; `case` still holds the last case.
 # The marker must be the last line and one line: the fixture parser reads only
 # `lines.last()`, so a wrapped `ref-counts=` is silently not checked at all.
-# ref-counts={'inner': 4, 'holder': 1, 'source': 1, 'result': 1, 'copy': 2, 'armed': 1, 'Boom': 4, 'Holds': 4, 'boom_set': 10, 'cases': 1, 'case': 2, 'boom_dict': 1}
+# ref-counts={'inner': 4, 'holder': 1, 'source': 1, 'result': 1, 'copy': 3, 'armed': 1, 'Boom': 4, 'Holds': 4, 'boom_set': 10, 'cases': 1, 'case': 2, 'boom_dict': 1}

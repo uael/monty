@@ -83,4 +83,4 @@ assert sub_result == 'hello world'
 # m3: 1 (its shared reference to subject is counted under subject above)
 # re: 1
 r2
-# ref-counts={'p': 1, 'm': 1, 'group_str': 1, 'm2': 1, 'full_str': 1, 'results': 1, 'r0': 2, 'r1': 2, 'r2': 3, 'subject': 3, 'sub_result': 3, 'm3': 1, 're': 1}
+# ref-counts={'p': 1, 'm': 1, 'group_str': 1, 'm2': 1, 'full_str': 1, 'results': 1, 'r0': 2, 'r1': 2, 'r2': 3, 'subject': 3, 'sub_result': 3, 'm3': 1, 're': 2}

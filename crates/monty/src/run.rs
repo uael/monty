@@ -414,7 +414,10 @@ impl Executor {
     /// On success the tables move into the executor; on failure they remain unchanged.
     /// `script_name` identifies this feed's source; `session` supplies the user-facing
     /// filename and working directory.
-    #[expect(clippy::too_many_arguments, reason = "one snippet needs the session's whole compiler state")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one snippet needs the session's whole compiler state"
+    )]
     pub(crate) fn new_repl_snippet(
         code: Arc<str>,
         script_name: &str,
@@ -660,8 +663,10 @@ impl Executor {
             if let Ok(FrameExit::Return(Value::Ref(id))) = &frame_exit_result {
                 roots.push(*id);
             }
+            // `sys.modules` is a root too: the session owns it, and it holds each module the run imported.
+            roots.extend(vm.modules.existing());
             // Those are the only roots: locals are gone once the module frame exits, so
-            // anything still live must hang off a name or the result to not be a leak.
+            // anything still live must hang off a name, the result or `sys.modules` to not be a leak.
             let unreachable: Vec<String> = vm
                 .heap
                 .unreachable_entries(roots)

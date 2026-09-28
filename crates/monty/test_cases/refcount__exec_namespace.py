@@ -14,4 +14,4 @@ cyc = {}
 exec('def f():\n    return 1', cyc)
 cyc = None
 gc.collect()
-# ref-counts={'ns': 5, 'obj': 2, 'gc': 1}
+# ref-counts={'ns': 5, 'obj': 2, 'gc': 2}

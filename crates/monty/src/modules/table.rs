@@ -35,6 +35,12 @@ impl ModuleTable {
             .dict
             .get_or_insert_with(|| heap.heap().allocate(HeapData::Dict(Dict::new())))
     }
+
+    /// The `sys.modules` dict, if this session has made one.
+    #[cfg(feature = "ref-count-return")]
+    pub(crate) fn existing(&self) -> Option<HeapId> {
+        self.dict
+    }
 }
 
 impl VM<'_> {
