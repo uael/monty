@@ -201,49 +201,6 @@ fn collection_too_large(count: usize, position: CodeRange) -> CompileError {
     )
 }
 
-/// Converts the index of a newly-defined function into the `u16` operand used
-/// by `MakeFunction`/`MakeClosure`. The cap is the total number of
-/// `def`/`lambda`/comprehension function objects in the *whole module*, since
-/// `FunctionId`s are allocated linearly across nested scopes.
-fn check_function_count_u16(func_id: usize, position: CodeRange) -> Result<u16, CompileError> {
-    u16::try_from(func_id).map_err(|_| too_many_functions(func_id, position))
-}
-
-#[cold]
-#[inline(never)]
-fn too_many_functions(func_id: usize, position: CodeRange) -> CompileError {
-    CompileError::new(
-        format!(
-            "module defines too many functions/lambdas ({}); maximum is {}",
-            func_id + 1,
-            u16::MAX
-        ),
-        position,
-    )
-}
-
-/// Converts a `StringId` (intern pool index) into the `u16` operand used by
-/// every name-bearing opcode (`LoadAttr`, `StoreAttr`, `LoadGlobal`,
-/// `CallFunctionKw` keyword names, etc.). Called inline at every emission
-/// site — overflow only happens when the intern pool exceeded `u16::MAX`
-/// during parse/prepare, so the error construction is `#[cold]` and the
-/// success path inlines to a single `as u16`.
-fn check_name_index_u16(name_id: StringId, position: CodeRange) -> Result<u16, CompileError> {
-    u16::try_from(name_id.index()).map_err(|_| name_index_too_large(position))
-}
-
-#[cold]
-#[inline(never)]
-fn name_index_too_large(position: CodeRange) -> CompileError {
-    CompileError::new(
-        format!(
-            "module has too many distinct names; the bytecode format supports up to {} interned strings",
-            usize::from(u16::MAX) + 1,
-        ),
-        position,
-    )
-}
-
 /// Converts a call-related count (positional args, keyword args, defaults,
 /// closure cells) into the `u8` operand used by the corresponding opcodes.
 /// `kind` (e.g. "default parameter values") is interpolated into the error
@@ -266,7 +223,7 @@ fn too_many_call_args(count: usize, kind: &'static str, position: CodeRange) -> 
 ///
 /// Functions are compiled recursively through [`CompileInterns`].
 /// Each function's body is compiled before registering it, so nested functions
-/// receive lower IDs. Those IDs become MakeFunction/MakeClosure operands.
+/// receive lower IDs. Each body indexes the IDs it makes in its own function table.
 pub struct Compiler<'a, 'i> {
     /// Current code being built.
     code: CodeBuilder,
@@ -709,7 +666,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 // to the first `__value__` read, which is what lets an alias name
                 // itself.
                 self.emit_make_function(value, "type alias value")?;
-                let name_idx = check_name_index_u16(name.name_id, name.position)?;
+                let name_idx = self.code.name(name.name_id, name.position)?;
                 self.code.set_location(name.position, None);
                 self.code.emit_u16(Opcode::MakeTypeAlias, name_idx)?;
                 self.compile_store(name)?;
@@ -773,7 +730,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     ));
                 };
                 let name_id = attr.string_id().expect("LoadAttr requires interned attr name");
-                let name_idx = check_name_index_u16(name_id, *target_position)?;
+                let name_idx = self.code.name(name_id, *target_position)?;
                 // Stack: compile object, dup for later store, load attr, apply op, rotate, store
                 self.compile_expr(object)?; // [obj]
                 self.code.emit(Opcode::Dup)?; // [obj, obj]
@@ -1294,13 +1251,12 @@ impl<'a, 'i> Compiler<'a, 'i> {
         for default_expr in &func_def.default_exprs {
             self.compile_expr(default_expr)?;
         }
-        let func_id_u16 = check_function_count_u16(func_id, func_pos)?;
+        let function = self.code.function(func_id, func_pos)?;
 
         // 4. Emit MakeFunction or MakeClosure (if has free vars)
         if func_def.free_var_enclosing_slots.is_empty() {
-            // MakeFunction: func_id (u16) + defaults_count (u8)
-            self.code
-                .emit_u16_u8(Opcode::MakeFunction, func_id_u16, defaults_count)?;
+            // MakeFunction: function (u16) + defaults_count (u8)
+            self.code.emit_u16_u8(Opcode::MakeFunction, function, defaults_count)?;
         } else {
             // Push captured cells from enclosing scope.
             for source in &func_def.free_var_enclosing_slots {
@@ -1315,9 +1271,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 };
                 self.code.emit_load_local(slot)?;
             }
-            // MakeClosure: func_id (u16) + defaults_count (u8) + cell_count (u8)
+            // MakeClosure: function (u16) + defaults_count (u8) + cell_count (u8)
             self.code
-                .emit_u16_u8_u8(Opcode::MakeClosure, func_id_u16, defaults_count, cell_count)?;
+                .emit_u16_u8_u8(Opcode::MakeClosure, function, defaults_count, cell_count)?;
         }
 
         Ok(())
@@ -1461,8 +1417,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
             ));
         }
         self.code.set_location(position, None);
-        self.code
-            .emit_u16(Opcode::LoadModule, check_name_index_u16(module_name, position)?)?;
+        let module = self.code.name(module_name, position)?;
+        self.code.emit_u16(Opcode::LoadModule, module)?;
         self.compile_store(binding)
     }
 
@@ -1475,14 +1431,14 @@ impl<'a, 'i> Compiler<'a, 'i> {
         position: CodeRange,
     ) -> Result<(), CompileError> {
         self.code.set_location(position, None);
-        self.code
-            .emit_u16(Opcode::LoadModule, check_name_index_u16(module_name, position)?)?;
+        let module = self.code.name(module_name, position)?;
+        self.code.emit_u16(Opcode::LoadModule, module)?;
         for (i, (import_name, binding)) in names.iter().enumerate() {
             // Preserve the module for subsequent attributes; the last load consumes it.
             if i < names.len() - 1 {
                 self.code.emit(Opcode::Dup)?;
             }
-            let name_idx = check_name_index_u16(*import_name, position)?;
+            let name_idx = self.code.name(*import_name, position)?;
             self.code.emit_u16(Opcode::LoadAttrImport, name_idx)?;
             self.compile_store(binding)?;
         }
@@ -1694,7 +1650,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
                 let name_id = attr.string_id().expect("LoadAttr requires interned attr name");
-                let name_idx = check_name_index_u16(name_id, expr_loc.position)?;
+                let name_idx = self.code.name(name_id, expr_loc.position)?;
                 self.code.emit_u16(Opcode::LoadAttr, name_idx)?;
             }
 
@@ -2312,7 +2268,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let mut kwname_ids = Vec::with_capacity(kwargs.len());
                 for kwarg in kwargs {
                     self.compile_expr(&kwarg.value)?;
-                    kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                    kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                 }
                 self.code.set_location(call_pos, None);
                 self.code.emit_call_function_kw(0, &kwname_ids)?;
@@ -2366,7 +2322,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     if let Some(kwargs) = kwargs {
                         for kwarg in kwargs {
                             self.compile_expr(&kwarg.value)?;
-                            kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                            kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                         }
                     }
 
@@ -2380,7 +2336,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             ArgExprs::GeneralizedCall { args, kwargs } => {
                 // PEP 448: generalized unpacking — multiple *args or **kwargs.
                 // Callable was already pushed above this match; delegate to the helper.
-                let func_name_id = self.get_callable_name_id(callable)?;
+                let func_name_id = self.get_callable_name_id(callable, call_pos)?;
                 self.compile_generalized_call_body(args, kwargs, func_name_id, call_pos)?;
             }
         }
@@ -2432,7 +2388,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let mut kwname_ids = Vec::with_capacity(kwargs.len());
                 for kwarg in kwargs {
                     self.compile_expr(&kwarg.value)?;
-                    kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                    kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                 }
                 self.code.set_location(call_pos, None);
                 self.code.emit_call_function_kw(0, &kwname_ids)?;
@@ -2485,7 +2441,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     let mut kwname_ids = Vec::with_capacity(kw_count);
                     for kwarg in kw_args {
                         self.compile_expr(&kwarg.value)?;
-                        kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                        kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                     }
 
                     self.code.set_location(call_pos, None);
@@ -2625,7 +2581,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
     ) -> Result<(), CompileError> {
         // Get function name for error messages. Builtins use their real interned name
         // so duplicate-kwargs errors from **unpacking match CPython.
-        let func_name_id = self.get_callable_name_id(callable)?;
+        let func_name_id = self.get_callable_name_id(callable, call_pos)?;
 
         // 1. Build args tuple
         // Push regular positional args and build list
@@ -2678,17 +2634,20 @@ impl<'a, 'i> Compiler<'a, 'i> {
         Ok(())
     }
 
-    /// Returns the best available function name id for call-site error messages.
+    /// Returns the best available function name operand for call-site error messages.
     ///
     /// This is primarily used by `DictMerge` during `**kwargs` unpacking so
     /// duplicate-key and non-mapping errors can mention the actual callee name.
     /// When the callable is not a named local/global, we still try to resolve
     /// builtin functions, builtin exception constructors, and builtin types to
     /// their interned public names.
-    fn get_callable_name_id(&self, callable: &Callable) -> Result<u16, CompileError> {
+    fn get_callable_name_id(&mut self, callable: &Callable, position: CodeRange) -> Result<u16, CompileError> {
         match callable {
-            Callable::Name(ident) => check_name_index_u16(ident.name_id, ident.position),
-            Callable::Builtin(builtin) => Ok(self.get_builtin_name_id(*builtin).unwrap_or(0xFFFF)),
+            Callable::Name(ident) => self.code.name(ident.name_id, ident.position),
+            Callable::Builtin(builtin) => match self.get_builtin_name_id(*builtin) {
+                Some(name_id) => self.code.name(name_id, position),
+                None => Ok(0xFFFF),
+            },
         }
     }
 
@@ -2697,7 +2656,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// Returning `None` falls back to `<unknown>` in the VM, which is still
     /// correct but less helpful. In practice these names should already be
     /// interned during preparation because builtin names are resolved from source.
-    fn get_builtin_name_id(&self, builtin: Builtins) -> Option<u16> {
+    fn get_builtin_name_id(&self, builtin: Builtins) -> Option<StringId> {
         let name_id = match builtin {
             Builtins::Function(function) => {
                 let name: &'static str = function.into();
@@ -2710,7 +2669,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             }
         };
 
-        u16::try_from(name_id.index()).ok()
+        Some(name_id)
     }
 
     /// Compiles an attribute call on an object.
@@ -2726,7 +2685,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // Get the interned attribute name, converted up-front so the limit check
         // happens once per method call rather than at every emit-site below.
         let name_id = attr.string_id().expect("CallAttr requires interned attr name");
-        let name_idx = check_name_index_u16(name_id, call_pos)?;
+        let name_idx = self.code.name(name_id, call_pos)?;
 
         // Compile arguments based on the argument type
         match args {
@@ -2772,7 +2731,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let mut kwname_ids = Vec::with_capacity(kwargs.len());
                 for kwarg in kwargs {
                     self.compile_expr(&kwarg.value)?;
-                    kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                    kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                 }
                 self.code.set_location(call_pos, None);
                 self.code.emit_call_attr_kw(name_idx, 0, &kwname_ids)?;
@@ -2824,7 +2783,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 if let Some(kwargs) = kwargs {
                     for kwarg in kwargs {
                         self.compile_expr(&kwarg.value)?;
-                        kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                        kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                     }
                 }
 
@@ -2903,7 +2862,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // Convert the attribute name id up front so the overflow check happens
         // once and both `DictMerge` (for error messages) and `CallAttrExtended`
         // can reuse the converted value.
-        let name_idx = check_name_index_u16(name_id, call_pos)?;
+        let name_idx = self.code.name(name_id, call_pos)?;
         // 1. Build args tuple
         // Push regular positional args and build list
         let pos_count = args.map_or(0, Vec::len);
@@ -3825,7 +3784,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         target_position: CodeRange,
     ) -> Result<(), CompileError> {
         let name_id = attr.string_id().expect("attribute name in AST must be interned");
-        let name_idx = check_name_index_u16(name_id, target_position)?;
+        let name_idx = self.code.name(name_id, target_position)?;
         self.compile_expr(object)?;
         self.code.set_location(target_position, None);
         self.code.emit_u16(Opcode::StoreAttr, name_idx)?;
@@ -4395,7 +4354,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                         *position,
                     ));
                 };
-                let name_idx = check_name_index_u16(name_id, *position)?;
+                let name_idx = self.code.name(name_id, *position)?;
                 self.compile_expr(object)?;
                 self.code.set_location(*position, None);
                 self.code.emit_u16(Opcode::DeleteAttr, name_idx)?;

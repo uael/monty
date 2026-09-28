@@ -17,7 +17,7 @@ use crate::{
     expressions::{Identifier, Node},
     function::Function,
     heap::{DropGuard, HeapData, HeapId},
-    intern::{CompileInterns, FunctionId, StaticStrings},
+    intern::{CompileInterns, StaticStrings},
     modules::ast::PY_CF_ALLOW_TOP_LEVEL_AWAIT,
     name_map::NameMap,
     parse::{CodeRange, parse_expression_with_interner, parse_module_with_filename_id},
@@ -227,15 +227,7 @@ fn compile_and_push(
         awaits,
         code,
     );
-    let index = overlay.functions_len();
-    let func_id = u16::try_from(index).map(FunctionId::from_index).map_err(|_| {
-        SimpleException::new_msg(
-            ExcType::SyntaxError,
-            format!("session defines too many functions; maximum is {}", u16::MAX),
-        )
-    })?;
-
-    overlay.push_function(function);
+    let func_id = overlay.push_function(function);
     let (namespace, vm) = namespace_guard.into_parts();
     // CPython sets `CO_COROUTINE` on a body the flag let await, and only on
     // one that does: a snippet that awaits nothing runs where it stands, as it
