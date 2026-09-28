@@ -1,4 +1,4 @@
-# eval(), exec() and locals()
+# compile(), eval(), exec(), globals() and locals()
 
 `eval(source, /, globals=None, locals=None)` and `exec(source, /, globals=None, locals=None, *, closure=None)` compile
 `source` when called and run it in the namespace CPython would: the module globals for a call at module scope, a
@@ -6,12 +6,72 @@ snapshot of the function's locals (PEP 667) plus the module globals inside a fun
 arguments.
 Functions defined by a snippet under a `globals` dict resolve their globals through that dict at every call:
 `ns = {'x': 1}; exec('def f(): return x', ns); ns['x'] = 2; ns['f']()` returns `2`.
-The snippet can call host functions and raise into the caller; top-level `await`, including in class bodies, is rejected.
+The snippet can call host functions and raise into the caller.
+Top-level `await` is rejected unless the code object was compiled with `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`, and a class
+body may never await.
 
-## Arguments
+`compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)` parses `source` and answers a code object
+that `eval()` and `exec()` take in place of a string.
+The code object carries its own mode, so `eval()` of an `'exec'` one runs a module body and answers `None`, and
+`exec()` of an `'eval'` one evaluates the expression and throws the value away, as in CPython.
+
+## Code objects
+
+Monty compiles a snippet against the namespace it runs in, and that namespace is not known until `eval()` or `exec()`,
+so a code object carries the source rather than bytecode and the real compilation happens where it runs.
+A syntax error therefore still reaches the caller of `compile()`, which is what the two calls are usually split for.
+
+- **A code object exposes no attributes.**
+    `co_name`, `co_filename`, `co_code`, `co_consts`, `co_flags` and the rest raise `AttributeError`, and there is no
+    `types.CodeType` to build one with or to check against.
+- **The `filename` argument is validated but not used.**
+    Frames of the code read `File "<string>"` in a traceback, as they do for a snippet given as a string.
+- **The source is parsed again at every run**, so compiling once and running many times saves no work.
+    It also costs the source text twice: once in the code object and once in the session's snippet sources.
+- **`repr()` is `<code object <module>, file "f.py">`**, where CPython writes the qualified name, the address and the
+    first line number.
+- **Two code objects are equal when they run the same source in the same mode.**
+    CPython compares the compiled code, so it reads two spellings of one program as equal where Monty does not, and
+    `compile('1+1', 'f', 'eval') == compile('1 + 1', 'f', 'eval')` is `False` in Monty and `True` in CPython.
+- **`compile()` is not in the type-checking stubs**, so a session with type checking enabled rejects a call to it
+    with `unresolved-reference`; see [builtins.md](builtins.md).
+
+## compile() arguments
 
 - `source` must be a `str` or UTF-8 `bytes`.
-    There are no code objects and no `compile()`, so a code object cannot be passed.
+    CPython also takes an `ast` object; Monty's [`ast`](ast.md) module holds one flag and no node types.
+- `filename` must be a `str` or UTF-8 `bytes`.
+    CPython also takes an `os.PathLike`.
+- `mode` must be `'exec'` or `'eval'`.
+    `'single'` raises `NotImplementedError: compile() does not yet support the 'single' mode`, because it would have to
+    echo the value of an expression statement and Monty has no `sys.displayhook`.
+    Any other string raises CPython's `ValueError: compile() mode must be 'exec', 'eval' or 'single'`.
+- `flags` must be `0` or `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`.
+    Every other flag CPython takes selects a `__future__` feature or an AST form Monty does not have, so any other
+    value raises `ValueError: compile(): unrecognised flags`, where CPython accepts the `__future__` bits.
+    Flags cannot be combined: the two values are the only ones accepted, where CPython takes their `|`.
+- `dont_inherit` is accepted and ignored: it only governs which `__future__` features the caller passes down, and
+    Monty has none.
+- `optimize` must be `-1`.
+    `0`, `1` and `2` raise `NotImplementedError: compile() does not yet support the optimize argument`; any other
+    value raises CPython's `ValueError: compile(): invalid optimize value`.
+
+## Top-level await
+
+`compile(source, filename, mode, flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` lets the body `await` at its top level, and
+`eval()` or `exec()` of a body that does hands back a coroutine to drive instead of running it where it stands, as in
+CPython.
+A body that awaits nothing runs where it stands and answers as it would without the flag.
+The coroutine binds names in the `globals` dict the call was given, so what the body assigns is there once it is over.
+
+- **The coroutine is Monty's, so it carries Monty's divergences**: `send()`, `throw()` and `close()` drive it, and one
+    that has run refuses all three but `close()`; see [asyncio.md](asyncio.md).
+- **`asyncio.run()` will not take it**, since it takes only what drives its own wait; drive it by hand, or `await` it
+    from another coroutine.
+
+## eval() and exec() arguments
+
+- `source` must be a `str`, UTF-8 `bytes`, or a code object from `compile()`.
     `closure` must be `None` (the default); non-`None` values raise `TypeError`.
 - `globals` defaults to `None`, using the caller's globals; non-`None` values must be a `dict`.
 - `locals` defaults to `None`, using `globals` when an explicit globals dict is passed, or the caller's locals otherwise.
@@ -40,10 +100,19 @@ The snippet can call host functions and raise into the caller; top-level `await`
 - Frames of snippet code appear in tracebacks as `File "<string>", line N, in <module>` with no source line, as in
     CPython.
 
+## globals()
+
+- Outside an `exec()` / `eval()` globals dict, `globals()` returns a fresh `dict` of the bound module globals, not the
+    module namespace itself: writes to it are not reflected, a name bound after the call is absent,
+    `globals() is globals()` is `False`, and the module-level dunders are absent.
+    Module globals are slots rather than a dict, so there is no namespace object to hand back.
+- At module scope `globals() is locals()` is `False`, where CPython returns the one module namespace for both.
+- Inside a snippet, and in a function a snippet defines, `globals()` is the snippet's `globals` dict itself, as in
+    CPython: writes through it are seen by everything that shares it.
+
 ## locals()
 
-- At module scope `locals()` returns a fresh `dict` of the bound module globals, not the module namespace itself:
-    writes to it are not reflected, `locals() is locals()` is `False`, and the module-level dunders are absent.
+- At module scope `locals()` returns the same snapshot `globals()` does, not the module namespace itself.
 - Inside a function it is a snapshot of the named locals, with captured variables read through their cells, as in
     CPython 3.13 and later.
     A function with both `*args` and keyword-only parameters lists `*args` before the keyword-only parameters; CPython

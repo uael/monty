@@ -62,4 +62,4 @@ assert result == 'hello'
 # interned_result: not heap-allocated, absent from the map
 # input_str and result reference the same heap string: 2 vars + final expr = 3
 result
-# ref-counts={'repl_list': 1, 'input_list': 1, 'count_list': 1, 'maxsplit_list': 1, 'compiled': 1, 're': 1, 'input_str': 3, 'result': 3}
+# ref-counts={'repl_list': 1, 'input_list': 1, 'count_list': 1, 'maxsplit_list': 1, 'compiled': 1, 're': 2, 'input_str': 3, 'result': 3}

@@ -16,7 +16,10 @@ use crate::{
     heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapReadOutput},
     intern::{CompileInterns, FunctionId, StringId},
     prepare::SnippetNames,
-    types::Dict,
+    types::{
+        Dict,
+        generator::{Generator, GeneratorKind},
+    },
     value::Value,
 };
 
@@ -71,6 +74,37 @@ impl FrameNamespace {
             } => Some(*globals),
         }
     }
+
+    /// Every `HeapId` this namespace owns, for an owner that must release them
+    /// or walk them as children.
+    pub(crate) fn owned_ids(&self) -> impl Iterator<Item = HeapId> {
+        let (globals, locals) = match self {
+            Self::Function { globals } => (Some(*globals), None),
+            Self::Snippet { globals, locals } => (
+                match globals {
+                    FrameGlobals::Slots => None,
+                    FrameGlobals::Dict(id) => Some(*id),
+                },
+                *locals,
+            ),
+        };
+        globals.into_iter().chain(locals)
+    }
+
+    /// A second owner of the same namespace, taking its own reference on every
+    /// id it holds.
+    pub(crate) fn clone_owned(&self, heap: &impl ContainsHeap) -> Self {
+        for id in self.owned_ids() {
+            heap.heap().inc_ref(id);
+        }
+        match self {
+            Self::Function { globals } => Self::Function { globals: *globals },
+            Self::Snippet { globals, locals } => Self::Snippet {
+                globals: *globals,
+                locals: *locals,
+            },
+        }
+    }
 }
 
 /// The namespace for a frame of a function that carries `globals`: an owned
@@ -100,6 +134,16 @@ impl<C: ContainsHeap> DropWithContext<C> for Box<FrameNamespace> {
 }
 
 impl VM<'_> {
+    /// The `exec()` / `eval()` globals dict the current frame resolves its
+    /// globals through, borrowed, or `None` for slot globals: what a function
+    /// or a class made in this frame carries.
+    pub(crate) fn dict_globals(&self) -> Option<HeapId> {
+        self.current_frame
+            .namespace
+            .as_deref()
+            .and_then(FrameNamespace::dict_globals)
+    }
+
     /// The namespace an `eval()` / `exec()` snippet runs in, from the call's
     /// `globals` / `locals` dicts (owned references, or `None`), and the mode
     /// its top level compiles in.
@@ -192,6 +236,28 @@ impl VM<'_> {
         Ok(())
     }
 
+    /// Makes a coroutine over an admitted snippet, for a body compiled with
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`.
+    ///
+    /// The mirror of [`push_snippet_frame`](Self::push_snippet_frame): the
+    /// snippet is published the same way, but nothing runs until something
+    /// resumes what comes back, so the recursion level is taken when its frame
+    /// is spliced in rather than here.
+    pub(crate) fn snippet_coroutine(
+        &mut self,
+        func_id: FunctionId,
+        overlay: CompileInterns<'_>,
+        namespace: Box<FrameNamespace>,
+    ) -> Value {
+        // Publication makes the code borrowable. Nothing fallible or re-entrant
+        // may intervene between admission and holding the body somewhere.
+        overlay.commit();
+        let mut locals = Vec::new();
+        locals.resize_with(self.interns.get_function(func_id).namespace_size, || Value::Undefined);
+        let coroutine = Generator::new(GeneratorKind::Coroutine, func_id, locals, Some(namespace));
+        self.heap.allocate_as(coroutine).into_value()
+    }
+
     /// The dict `locals()` returns in the current frame.
     ///
     /// A snippet with a locals dict returns that dict itself; one that runs
@@ -221,7 +287,25 @@ impl VM<'_> {
         Ok(Value::Ref(dict_id))
     }
 
-    /// A fresh dict of the bound module globals, for `locals()` at module scope.
+    /// The dict `globals()` returns in the current frame.
+    ///
+    /// A frame running under an `exec()` / `eval()` globals dict returns that
+    /// dict itself, so a write through it is seen by the code that shares it.
+    /// Module globals are slots, not a dict, so every other frame gets a fresh
+    /// snapshot of the bound ones.
+    pub(crate) fn globals_dict(&mut self) -> RunResult<Value> {
+        let dict_id = match self.frame_namespace().0 {
+            FrameGlobals::Slots => self.snapshot_globals()?,
+            FrameGlobals::Dict(dict) => {
+                self.heap.inc_ref(dict);
+                dict
+            }
+        };
+        Ok(Value::Ref(dict_id))
+    }
+
+    /// A fresh dict of the bound module globals, for `globals()` and for
+    /// `locals()` at module scope.
     fn snapshot_globals(&mut self) -> RunResult<HeapId> {
         let dict_id = self.heap.allocate(HeapData::Dict(Dict::new()));
         // Owned by the guard until every entry is in, so a failed insert frees it.

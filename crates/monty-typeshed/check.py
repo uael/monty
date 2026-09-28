@@ -61,13 +61,18 @@ def expected_files() -> set[str]:
         'stdlib/VERSIONS',
         GENERATED_FROM_UPSTREAM,
         *(f'stdlib/{name}' for name in update.COPY_FILES),
-        *(f'stdlib/{stub.name}' for stub in custom_stubs()),
+        *(f'stdlib/{custom_path(stub)}' for stub in custom_stubs()),
     }
 
 
 def custom_stubs() -> list[Path]:
-    """The `custom/*.pyi` overrides, in a stable order."""
-    return sorted(update.CUSTOM_DIR.glob('*.pyi'))
+    """The `custom/**/*.pyi` overrides, in a stable order, as `update.py` copies them: inside their package."""
+    return sorted(update.CUSTOM_DIR.rglob('*.pyi'))
+
+
+def custom_path(stub: Path) -> str:
+    """Where an override lands under `stdlib/`, package directories included."""
+    return stub.relative_to(update.CUSTOM_DIR).as_posix()
 
 
 def check_custom_stubs() -> list[str]:
@@ -76,9 +81,9 @@ def check_custom_stubs() -> list[str]:
     Absent copies are left to `check_tree_contents` so they report once.
     """
     return [
-        f'custom/{stub.name} differs from stdlib/{stub.name}'
+        f'custom/{custom_path(stub)} differs from stdlib/{custom_path(stub)}'
         for stub in custom_stubs()
-        if (vendored := read_vendored(f'stdlib/{stub.name}')) is not None and vendored != stub.read_bytes()
+        if (vendored := read_vendored(f'stdlib/{custom_path(stub)}')) is not None and vendored != stub.read_bytes()
     ]
 
 
@@ -114,11 +119,23 @@ def check_versions() -> list[str]:
             if not resolves(module)
         ),
         *(
-            f'custom/{stub.name} is missing from VERSIONS, so the type checker ignores it'
+            f'custom/{custom_path(stub)} is missing from VERSIONS, so the type checker ignores it'
             for stub in custom_stubs()
-            if stub.stem not in listed
+            if not any(parent in listed for parent in lineage(custom_module(stub)))
         ),
     ]
+
+
+def custom_module(stub: Path) -> str:
+    """The module an override describes: its path as a dotted name, a package by its `__init__`."""
+    return custom_path(stub).removesuffix('.pyi').removesuffix('/__init__').replace('/', '.')
+
+
+def lineage(module: str) -> list[str]:
+    """The module and every package above it, since the type checker takes a listed package as word for
+    the modules inside it."""
+    parts = module.split('.')
+    return ['.'.join(parts[:n]) for n in range(len(parts), 0, -1)]
 
 
 def parse_versions(versions: str) -> set[str]:

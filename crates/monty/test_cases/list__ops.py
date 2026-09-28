@@ -605,3 +605,75 @@ assert 1.0 in [1, 2]
 assert (2, 3) in [1, (2, 3)]
 assert None in [None]
 assert 1 not in []
+
+# === Slice assignment ===
+# A contiguous slice splices: the replacement may be any length.
+xs = [0, 1, 2, 3, 4]
+xs[1:3] = [9, 9, 9]
+assert xs == [0, 9, 9, 9, 3, 4]
+
+xs = [0, 1, 2, 3, 4]
+xs[:] = ['a', 'b']
+assert xs == ['a', 'b']
+
+xs = [1, 2, 3]
+xs[1:1] = [7, 8]
+assert xs == [1, 7, 8, 2, 3]
+
+xs = [0, 1, 2]
+xs[3:] = [3]
+assert xs == [0, 1, 2, 3]
+
+# An extended slice replaces position by position, so the lengths must agree.
+xs = [0, 1, 2, 3, 4]
+xs[::2] = ['a', 'b', 'c']
+assert xs == ['a', 1, 'b', 3, 'c']
+
+xs = [1, 2, 3, 4, 5]
+xs[4:1:-1] = ['a', 'b', 'c']
+assert xs == [1, 2, 'c', 'b', 'a']
+
+try:
+    xs = [0, 1, 2, 3, 4]
+    xs[::2] = ['a']
+    assert False, 'expected a length mismatch to be refused'
+except ValueError as exc:
+    assert str(exc) == 'attempt to assign sequence of size 1 to extended slice of size 3'
+
+try:
+    xs = [0, 1, 2]
+    xs[0:1] = 5
+    assert False, 'expected a non-iterable to be refused'
+except TypeError as exc:
+    assert str(exc) == 'must assign iterable to extended slice'
+
+# The right-hand side is read before the list changes.
+xs = [1, 2, 3]
+xs[:] = xs
+assert xs == [1, 2, 3]
+
+xs = [1, 2, 3]
+xs[0:1] = (x for x in [7, 8])
+assert xs == [7, 8, 2, 3]
+
+# Any iterable assigns, as in CPython.
+xs = [1, 2, 3]
+xs[0:1] = 'ab'
+assert xs == ['a', 'b', 2, 3]
+
+xs = [1, 2, 3]
+xs[0:1] = {5: 'a'}
+assert xs == [5, 2, 3]
+
+# === Slice deletion ===
+xs = [0, 1, 2, 3, 4]
+del xs[:2]
+assert xs == [2, 3, 4]
+
+xs = [0, 1, 2, 3, 4]
+del xs[::2]
+assert xs == [1, 3]
+
+xs = [0, 1, 2, 3, 4]
+del xs[3:1]
+assert xs == [0, 1, 2, 3, 4]

@@ -94,6 +94,14 @@ are all incompatible.
   don't. Only meaningful for the C-parser families (`clinic`/`c`/`c_named`)
   on signatures with a fixed maximum — rejected under `style = def` /
   `style = unpack` and with `varargs`/`varkwargs`.
+- `at_most_positional` — word a positional overflow `takes at most N
+  positional argument(s)` even where every positional slot is required.
+  `PyArg_ParseTupleAndKeywords` picks that wording from whether the format
+  string holds a `|` at all, so a function whose only optional parameter is
+  keyword-only (`contextvars.ContextVar`, format `"O|$O:ContextVar"`) says
+  `at most` where `_PyArg_UnpackKeywords` would say `exactly` (`os.stat`).
+  Only meaningful for `style = c` / `style = c_named`; it changes the
+  too-many-positional wording alone, not the too-few one.
 - `vectorcall` — kwarg-free calls check positional arity first with
   `_PyArg_CheckPositional` wording (`{name} expected at most N arguments,
   got M`), modeling `tp_vectorcall` fast paths (`int`, `str`) that only

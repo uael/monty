@@ -381,6 +381,7 @@ fn abort_feed_round_trip() {
             message: Some("suspension limit 3 exceeded".to_owned()),
             traceback: BudgetVec::new(),
             data: None,
+            user_type: None,
         }),
     }));
     let (_, event) = child.recv_turn();
@@ -492,6 +493,7 @@ fn name_lookup_error_raises_in_sandbox() {
         message: Some("secret is off limits".to_owned()),
         traceback: BudgetVec::new(),
         data: None,
+        user_type: None,
     };
     child.send(pb::parent_request::Kind::ResumeNameLookup(pb::ResumeNameLookup {
         values: None,
@@ -835,6 +837,7 @@ fn os_call_error_resume_carries_exception() {
         message: Some("No such file or directory: '/nope.txt'".to_owned()),
         traceback: BudgetVec::new(),
         data: None,
+        user_type: None,
     };
     let (_, event) = child.resume_call(call.call_id, pb::ext_function_result::Kind::Error(exc));
     let error = expect_error(event);

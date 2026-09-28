@@ -104,6 +104,15 @@ pub enum MontyNode {
         /// Optional docstring.
         docstring: Option<String>,
     },
+    /// A callable of the sandbox (a function, a closure, a bound method),
+    /// held by a session that holds handles until the host releases `id`;
+    /// handed back, it is the same object.
+    Callable {
+        /// The handle the session holds the callable under.
+        id: MontyUuid,
+        /// The callable's `__name__`.
+        name: String,
+    },
     /// Output-only fallback: the `repr()` of a value with no other representation.
     Repr(String),
     /// Output-only: a reference back to a container that encloses this node,
@@ -241,6 +250,7 @@ impl MontyNode {
             Self::Exception { arg, .. } => name_len(arg),
             Self::FileHandle(fh) => fh.path.len(),
             Self::Function { name, docstring } => name.len().saturating_add(name_len(docstring)),
+            Self::Callable { name, .. } => name.len(),
             Self::DateTime(dt) => name_len(&dt.timezone_name),
             Self::Time(t) => name_len(&t.timezone_name),
             Self::TimeZone(tz) => name_len(&tz.name),
@@ -328,6 +338,8 @@ impl PartialEq for MontyNode {
                     docstring: b_doc,
                 },
             ) => a_name == b_name && a_doc == b_doc,
+            // A handle is the identity of the callable it holds.
+            (Self::Callable { id: a, .. }, Self::Callable { id: b, .. }) => a == b,
             (Self::List(a), Self::List(b))
             | (Self::Tuple(a), Self::Tuple(b))
             | (Self::Set(a), Self::Set(b))
@@ -525,7 +537,7 @@ impl MontyGraph {
             },
             MontyNode::Type(_) | MontyNode::ClassType(_) => "type",
             MontyNode::BuiltinFunction(_) => "builtin_function_or_method",
-            MontyNode::Function { .. } => "function",
+            MontyNode::Function { .. } | MontyNode::Callable { .. } => "function",
             MontyNode::Repr(_) => "repr",
             MontyNode::Cycle(_) => "cycle",
         }

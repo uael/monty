@@ -41,10 +41,10 @@ pub enum BuiltinsFunctions {
     // Breakpoint,
     // bytearray - handled by Type enum
     // bytes - handled by Type enum
-    // Callable,
+    // Callable - appended at the end, see below
     Chr,
     // Classmethod,
-    // Compile,
+    // compile - appended below, out of alphabetical order
     // complex - handled by Type enum
     // Delattr,
     // dict - handled by Type enum
@@ -56,7 +56,7 @@ pub enum BuiltinsFunctions {
     // Format - appended below
     // frozenset - handled by Type enum
     Getattr,
-    // Globals,
+    // Globals - appended at the end, see below
     Hasattr,
     Hash,
     // Help,
@@ -65,7 +65,7 @@ pub enum BuiltinsFunctions {
     // Input,
     // int - handled by Type enum
     Isinstance,
-    // Issubclass,
+    // Issubclass - appended at the end, see below
     // Iter - handled by Type enum
     Len,
     // list - handled by Type enum
@@ -95,7 +95,7 @@ pub enum BuiltinsFunctions {
     // Super,
     // tuple - handled by Type enum
     Type,
-    // Vars,
+    // Vars - appended at the end, see below
     Zip,
     // __import__ - not planned
     // Appended out of alphabetical order: the discriminant is emitted as a
@@ -118,4 +118,15 @@ pub enum BuiltinsFunctions {
     Exec,
     /// `locals()`, appended after [`Self::Exec`].
     Locals,
+    /// `issubclass(cls, classinfo)`, appended after [`Self::Locals`].
+    Issubclass,
+    /// `callable(object)`, appended after [`Self::Issubclass`].
+    Callable,
+    /// `globals()`, appended after [`Self::Callable`].
+    Globals,
+    /// `compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)`,
+    /// appended after [`Self::Globals`].
+    Compile,
+    /// `vars(object=...)`, appended after [`Self::Compile`].
+    Vars,
 }

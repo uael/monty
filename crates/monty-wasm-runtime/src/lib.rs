@@ -428,6 +428,7 @@ fn raised_exception_from_component(error: RaisedError) -> pb::RaisedException {
         message: Some(error.message),
         traceback: BudgetVec::new(),
         data: None,
+        user_type: None,
     }
 }
 

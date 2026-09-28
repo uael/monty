@@ -5,7 +5,9 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use num_bigint::BigInt;
 
-use super::{BytesId, InternedString, Interns, LongIntId, SOURCE_ID_BASE, StaticStrings, StringId, next_string_id};
+use super::{
+    BytesId, FunctionId, InternedString, Interns, LongIntId, SOURCE_ID_BASE, StaticStrings, StringId, next_string_id,
+};
 use crate::{function::Function, hash::WithHash};
 
 /// Compilation tables with final IDs assigned before execution.
@@ -187,18 +189,18 @@ impl<'i> CompileInterns<'i> {
     }
 
     /// Appends a compiled function under its final session ID.
-    pub(crate) fn push_function(&mut self, function: Function) -> usize {
-        let index = self.functions_len();
+    pub(crate) fn push_function(&mut self, function: Function) -> FunctionId {
+        let id = FunctionId(self.functions_len().try_into().expect("FunctionId overflow"));
         if let Some(pending) = &mut self.pending {
             pending.functions.push(function);
         } else {
             self.base.functions.push(Box::new(function));
         }
-        index
+        id
     }
 
     /// Returns the next function ID, including unpublished functions.
-    pub(crate) fn functions_len(&self) -> usize {
+    fn functions_len(&self) -> usize {
         self.base.functions.len() + self.pending.as_ref().map_or(0, |pending| pending.functions.len())
     }
 

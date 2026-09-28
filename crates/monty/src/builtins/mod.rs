@@ -7,6 +7,7 @@ mod abs;
 mod all;
 mod any;
 mod bin;
+mod callable;
 mod chr;
 mod divmod;
 mod enumerate;
@@ -14,11 +15,13 @@ mod eval_exec;
 mod filter;
 mod format;
 mod getattr;
+mod globals;
 mod hasattr;
 mod hash;
 mod hex;
 mod id;
-mod isinstance;
+pub(crate) mod isinstance;
+mod issubclass;
 mod len;
 mod locals;
 mod map;
@@ -37,6 +40,7 @@ mod setattr;
 mod sorted;
 mod sum;
 mod type_;
+mod vars;
 mod zip;
 
 use std::{fmt, fmt::Write, str::FromStr};
@@ -139,6 +143,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::All => all::builtin_all(vm, args),
             Self::Any => any::builtin_any(vm, args),
             Self::Bin => bin::builtin_bin(vm, args),
+            Self::Callable => callable::builtin_callable(vm, args),
             Self::Chr => chr::builtin_chr(vm, args),
             Self::Divmod => divmod::builtin_divmod(vm, args),
             Self::Enumerate => enumerate::builtin_enumerate(vm, args),
@@ -147,10 +152,14 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             // `getattr()` / `hasattr()` may suspend a lazy host attribute lookup.
             Self::Getattr => return getattr::builtin_getattr(vm, args),
             Self::Hasattr => return hasattr::builtin_hasattr(vm, args),
+            Self::Globals => globals::builtin_globals(vm, args),
+            Self::Vars => vars::builtin_vars(vm, args),
             Self::Hash => hash::builtin_hash(vm, args),
             Self::Hex => hex::builtin_hex(vm, args),
             Self::Id => id::builtin_id(vm, args),
             Self::Isinstance => isinstance::builtin_isinstance(vm, args),
+            Self::Issubclass => issubclass::builtin_issubclass(vm, args),
+            Self::Compile => eval_exec::builtin_compile(vm, args),
             Self::Len => len::builtin_len(vm, args),
             Self::Map => map::builtin_map(vm, args),
             Self::Max => min_max::builtin_max(vm, args),

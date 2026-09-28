@@ -7,7 +7,8 @@ use crate::{
     fstring::FStringPart,
     intern::{BytesId, LongIntId, StringId},
     namespace::NamespaceId,
-    parse::{CodeRange, ParsedSignature, Try},
+    parse::{CodeRange, ParseNode, ParsedSignature, Try},
+    tstring::ParsedTemplate,
     value::{EitherStr, Marker, Value},
 };
 
@@ -279,10 +280,23 @@ pub enum Expr {
     UnaryInvert(Box<ExprLoc>),
     /// Await expression - suspends execution until the awaited value resolves.
     ///
-    /// Can await `ExternalFuture`, `Coroutine`, or `GatherFuture` values.
+    /// Can await a coroutine, an `ExternalFuture` or a `GatherFuture`.
     /// Raises `TypeError` for non-awaitable values.
     /// Unlike standard Python, `await` is allowed at module level (like Jupyter notebooks).
     Await(Box<ExprLoc>),
+    /// `yield` / `yield value`: suspends the enclosing generator, handing the
+    /// value to whoever resumed it.
+    ///
+    /// It is an expression, not a statement: it evaluates to the value the
+    /// next `send()` passes in, or `None` for a plain `next()`. `yield` with
+    /// no value yields `None`.
+    Yield(Option<Box<ExprLoc>>),
+    /// `yield from iterable`: hands the enclosing generator's turn to another
+    /// iterator until that one is done, then evaluates to what it returned.
+    ///
+    /// Every value the inner one yields passes straight out, and every value
+    /// sent in passes straight back, so the two generators read as one.
+    YieldFrom(Box<ExprLoc>),
     /// F-string expression containing literal and interpolated parts.
     ///
     /// At evaluation time, each part is processed in sequence:
@@ -291,6 +305,12 @@ pub enum Expr {
     ///
     /// The results are concatenated to produce the final string.
     FString(Vec<FStringPart>),
+    /// PEP 750 template string (`t"a{x!r:>5}b"`).
+    ///
+    /// Unlike an f-string nothing is joined: the literal segments and the
+    /// replacement fields stay separate, because a `Template` hands both to its
+    /// consumer rather than rendering them.
+    TString(Box<ParsedTemplate>),
     /// Conditional expression (ternary operator): `body if test else orelse`
     ///
     /// Only one of body/orelse is evaluated based on the truthiness of test.
@@ -344,6 +364,27 @@ pub enum Expr {
         signature: ParsedSignature,
         /// The lambda body expression (not yet prepared).
         body: Box<ExprLoc>,
+    },
+    /// Raw generator expression from the parser, before preparation.
+    ///
+    /// A generator expression is an implicit generator function that the
+    /// parser writes out: the loops and filters become `for` and `if`
+    /// statements around a `yield` of the element, and the outermost
+    /// iterable becomes the one parameter. The call that makes the
+    /// generator is an [`Self::IndirectCall`] the parser wraps this in, so
+    /// the outermost iterable is read where the expression is written and
+    /// everything after it is read one element at a time.
+    ///
+    /// The prepare phase turns this into [`Self::Lambda`], because a prepared
+    /// generator expression is a prepared anonymous function and nothing
+    /// after prepare needs to tell the two apart.
+    GenExprRaw {
+        /// The interned `<genexpr>` name ID.
+        name_id: StringId,
+        /// The one parameter, `.0`, which no Python name can collide with.
+        signature: ParsedSignature,
+        /// The nested `for` and `if` statements, innermost a `yield`.
+        body: Vec<ParseNode>,
     },
     /// Lambda expression: `lambda args: body` (prepared form).
     ///
@@ -456,6 +497,35 @@ pub enum AssignTarget {
         targets: Vec<UnpackTarget>,
         /// Source position covering all targets (for error caret placement).
         targets_position: CodeRange,
+    },
+}
+
+/// One target of a `del` statement.
+///
+/// `del` accepts the same shapes as an assignment except a starred name, and a
+/// parenthesized list is equivalent to listing the targets (`del (a, b)` is
+/// `del a, b`), so the parser flattens those away and this enum stays flat.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DeleteTarget {
+    /// `del a` — unbinds the name, raising if it was never bound.
+    Name(Identifier),
+    /// `del obj.attr`
+    Attr {
+        /// Expression evaluating to the object whose attribute is removed.
+        object: ExprLoc,
+        /// The attribute name.
+        attr: EitherStr,
+        /// Position of the full attribute expression (for traceback carets).
+        position: CodeRange,
+    },
+    /// `del container[index]`
+    Subscript {
+        /// Expression evaluating to the container.
+        object: ExprLoc,
+        /// Expression evaluating to the index, key or slice.
+        index: ExprLoc,
+        /// Position of the full subscript expression (for traceback carets).
+        position: CodeRange,
     },
 }
 
@@ -714,18 +784,58 @@ pub enum Node<F> {
         name: Identifier,
         /// The synthetic class-body function: its body is the class statements
         /// in source order. Prepared and compiled exactly like a function; its
-        /// emitted code ends by building the namespace `Dict` and returning the
-        /// `Class` object.
+        /// emitted code ends by building the namespace `Dict` and returning it.
         body: F,
         /// Top-level member names (methods + class vars) in source order.
         /// Each is resolved to a class-body-local slot during prepare; the
         /// compiler uses them to assemble the namespace dict.
         members: Vec<Identifier>,
+        /// Base classes in source order, evaluated in the enclosing scope as
+        /// CPython evaluates them: a base naming something the class body also
+        /// binds must resolve to the enclosing binding, not to the member.
+        bases: Vec<ExprLoc>,
         /// In source order; evaluated in the enclosing scope and applied
         /// bottom-up (`cls = deco(cls)`), like CPython.
         decorators: Vec<ExprLoc>,
         /// Source position of the `class` statement (for error reporting).
         position: CodeRange,
+    },
+    /// PEP 634 `match` statement.
+    ///
+    /// The subject is evaluated once into a hidden local, which every case's
+    /// test reads back: keeping it on the operand stack instead would leave the
+    /// stack unbalanced on a `return`/`break` out of a case body.
+    Match {
+        /// Evaluated once, before any pattern is tried.
+        subject: ExprLoc,
+        /// The hidden local the subject lives in for the duration. Its name is
+        /// not writable from source, so nothing can collide with it; one per
+        /// scope is enough, because a nested `match` can only appear in a case
+        /// *body*, by which point the outer subject has done its work.
+        slot: Identifier,
+        /// In source order; the first whose pattern matches (and whose guard
+        /// passes) runs, and the rest are skipped.
+        cases: Vec<MatchCase<F>>,
+        /// Source position of the `match` statement (for error reporting).
+        position: CodeRange,
+    },
+    /// `del a, b.c, d[k]` — the targets are unbound left to right.
+    Delete(Vec<DeleteTarget>),
+    /// PEP 695 `type X = <value>`.
+    ///
+    /// The value is *not* evaluated here: PEP 695 defers it until `__value__`
+    /// is read, which is what lets an alias mention itself
+    /// (`type Wire = ... | list[Wire] | ...`). It is therefore carried as a
+    /// synthetic zero-argument function riding the same `F` = Raw to Prepared
+    /// pipeline as [`Node::ClassDef`]'s body, and the alias object holds that
+    /// function. Type parameters are parsed and dropped; see
+    /// `limitations/typing.md`.
+    TypeAlias {
+        /// The alias name, bound in the enclosing scope and also the object's
+        /// `__name__`.
+        name: Identifier,
+        /// Thunk whose body is `return <value>`.
+        value: F,
     },
     /// Global variable declaration. Only present in parsed form, consumed during prepare.
     ///
@@ -847,13 +957,77 @@ pub struct PreparedFunctionDef {
     pub default_exprs: Vec<ExprLoc>,
     /// Whether this is an async function (`async def`).
     ///
-    /// When true, calling this function creates a `Coroutine` object instead of
+    /// When true, calling this function hands back a coroutine instead of
     /// immediately pushing a frame.
     pub is_async: bool,
 }
 
 /// Type alias for prepared AST nodes (output of prepare phase).
 pub type PreparedNode = Node<PreparedFunctionDef>;
+
+/// One `case` of a [`Node::Match`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatchCase<F> {
+    /// What the subject is tested against.
+    pub pattern: Pattern,
+    /// `case p if cond:` — evaluated only after the pattern matched, so it can
+    /// read the names the pattern bound.
+    pub guard: Option<ExprLoc>,
+    /// Runs when the pattern matched and the guard (if any) passed.
+    pub body: Vec<Node<F>>,
+}
+
+/// A PEP 634 pattern.
+///
+/// Every variant either *tests* the subject, *binds* a name, or both. Only
+/// [`Wildcard`](Self::Wildcard), [`Capture`](Self::Capture) and an
+/// [`As`](Self::As) over one of them are irrefutable, which is what the
+/// unreachable-case check in the parser turns on.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum Pattern {
+    /// `_`: matches anything and binds nothing.
+    Wildcard,
+    /// `x`: matches anything and binds it.
+    Capture(Identifier),
+    /// A literal or a dotted name (`1`, `'a'`, `Color.RED`), compared with `==`.
+    Value(ExprLoc),
+    /// `None`, `True`, `False`, compared with `is` as CPython does.
+    Singleton(Literal),
+    /// `[a, b]` / `(a, *rest)`: matches a sequence that is not a `str` or
+    /// `bytes`. At most one element is a [`Star`](Self::Star).
+    Sequence(Vec<Self>),
+    /// `*rest` inside a sequence pattern; `None` for `*_`.
+    Star(Option<Identifier>),
+    /// `{k: p, **rest}`: matches a mapping that has every key.
+    Mapping {
+        /// Key expressions, in source order; each is a literal or a dotted name.
+        keys: Vec<ExprLoc>,
+        /// The pattern each key's value must match, parallel to `keys`.
+        patterns: Vec<Self>,
+        /// `**rest`, bound to a new dict of the keys the pattern did not name.
+        rest: Option<Identifier>,
+    },
+    /// `C(p, attr=q)`: matches an instance of `C` whose attributes match.
+    Class {
+        /// The class to test against; anything else is a `TypeError`.
+        cls: ExprLoc,
+        /// Positional sub-patterns, matched against the attributes
+        /// `C.__match_args__` names.
+        positional: Vec<Self>,
+        /// `attr=pattern` pairs, in source order.
+        keywords: Vec<(Identifier, Self)>,
+    },
+    /// `p | q`: the first alternative that matches wins, and every alternative
+    /// binds the same names.
+    Or(Vec<Self>),
+    /// `p as name`: matches `p`, then binds the subject to `name`.
+    As {
+        /// The pattern that must match first.
+        pattern: Box<Self>,
+        /// The name the whole subject binds to.
+        name: Identifier,
+    },
+}
 
 /// Binary operators for arithmetic, bitwise, and boolean operations.
 ///

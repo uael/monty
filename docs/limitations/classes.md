@@ -48,21 +48,77 @@ and function-attributes-become-methods), bound methods, class variables
 The 3-arg `type()` form creates classes at runtime with CPython's validation
 order and error wording, but with these divergences:
 
-- **`bases` must be the empty tuple `()`.** Any non-empty bases tuple, even
-    `(object,)`, raises `TypeError: type() bases are not supported`, the
-    runtime counterpart of the parse-time `class Foo(Bar)` rejection.
+- **`bases` holds at most one class.** Two or more raise
+    `NotImplementedError: ... a class with more than one base ...`, because
+    Monty resolves a member by walking one chain and has no linearization to
+    resolve a second base against. The one base is a class defined in the
+    sandbox, a builtin exception, or `str`; any other builtin type, `object`
+    included, raises
+    `TypeError: a class can only inherit from a class defined in the sandbox, a builtin exception or str`.
 - **Keywords are always rejected.** CPython forwards extra keywords to
     `__init_subclass__`; Monty has no `__init_subclass__`, but the error
     message matches what `object.__init_subclass__` produces
     (`A.__init_subclass__() takes no keyword arguments`).
 - Only `__doc__` is synthesized into the namespace when absent (as `None`,
-    matching CPython). CPython also sets `__module__`, `__qualname__`,
-    `__dict__`, `__weakref__`, etc.; those attributes raise `AttributeError`
-    in Monty, as for compiled classes.
+    matching CPython). CPython also sets `__qualname__`, `__dict__`,
+    `__weakref__`, etc.; those attributes raise `AttributeError` in Monty, as
+    for compiled classes. `__module__` is answered, but it is not in the
+    namespace: it is read after it, so a class that binds the name itself
+    shadows the answer.
 - **Non-string namespace keys raise `TypeError`**
     (`non-string key (int) in the namespace of class 'A'`). CPython accepts
     them with only a `RuntimeWarning`; Monty has no warnings machinery, so it
     raises rather than silently accepting.
+
+## Inheriting `str`
+
+A class may name `str` as its one base.
+An instance of it *is* a string: it carries the characters and the class, so
+every string operation reads it as the string it is, and the class adds methods,
+class variables and type identity on top.
+`isinstance(x, str)`, `issubclass(Act, str)`, `type(x) is Act`, equality,
+hashing, ordering, slicing, `in`, iteration and every `str` method behave as in
+CPython, and a method of the class wins over the `str` method of the same name.
+A `str` method returns a plain `str`, as it does in CPython.
+
+```python test="skip"
+class Act(str):
+    def who(self) -> str:
+        return 'who:' + self
+
+
+a = Act('hello')
+assert a == 'hello' and a.startswith('he') and a.who() == 'who:hello'
+assert isinstance(a, str) and type(a) is Act
+```
+
+Divergences:
+
+- **The class may not define `__init__`.** An instance is a string and holds no
+    attributes of its own, so the body would have nothing to write to; Monty
+    raises
+    `TypeError: class 'Act' inherits str and defines __init__; an instance of it is a string, which holds no attributes of its own`
+    where CPython runs it. Attributes cannot be set on an instance either:
+    `a.x = 1` raises
+    `AttributeError: 'Act' object has no attribute 'x' and no __dict__ for setting new attributes`,
+    which is CPython's wording for a `__slots__ = ()` subclass, where CPython
+    itself accepts the assignment.
+- **The class may not define a dunder the string answers itself.** Monty runs
+    the string's own protocol and would never reach the class member, so the
+    class is refused rather than left to give the string's answer:
+    `TypeError: class 'Act' inherits str and defines __repr__, which the string answers itself`.
+    The refused names are `__new__`, `__repr__`, `__str__`, `__format__`,
+    `__bool__`, `__len__`, `__hash__`, `__eq__`, `__ne__`, `__lt__`, `__le__`,
+    `__gt__`, `__ge__`, `__iter__`, `__contains__`, `__getitem__`, `__add__`,
+    `__mul__`, `__rmul__`, `__mod__` and `__rmod__`. A dunder `str` does not
+    answer is untouched by the base and behaves as it does on any other class.
+- **An operation on the string names `str`, not the class.** `Act('x') + 1`
+    raises `can only concatenate str (not "int") to str`, matching CPython,
+    while a message about the object names the class:
+    `'Act' object has no attribute 'nope'`.
+- **The instance crosses the host boundary as a plain string**, losing the
+    class; a sandbox class instance otherwise crosses as a `ClassInstance` (see
+    below).
 
 ## Divergences from CPython
 
@@ -351,16 +407,36 @@ every construction request. Divergences:
 
 ## What does NOT exist for user code
 
-- `class Foo(Bar): ...` — no inheritance, no MRO, no `super()` (rejected at
-    parse time: "class inheritance and metaclasses"; the runtime equivalent
-    `type('Foo', (Bar,), {})` raises `TypeError`, see above).
+- Multiple inheritance and the C3 linearization behind it. One base works; two
+    raise, rather than being resolved in the order written (see above).
+- `super()`, in either form. A method reaches its base's version by naming the
+    base class: `Base.m(self)`.
+- `__mro__`, `__bases__` and `__base__`: a class reports no ancestry, so a
+    decorator cannot discover what a class inherits.
+- Inheriting from a builtin type other than an exception or `str`, `object`
+    included. A builtin exception *is* inheritable, see
+    [exceptions.md](exceptions.md); `str` is inheritable with the restrictions
+    described under "Inheriting `str`" above.
 - Metaclasses, `__init_subclass__`, `__set_name__`, and any other
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).
 - Abstract base classes (`abc.ABC`, `@abstractmethod`).
-- Method decorators — `@classmethod`, `@staticmethod`, `@property`, and any
-    decorator on a `def` inside a class body (rejected at parse time). Decorators
-    on classes and on non-method functions are supported.
+- `classmethod` and `staticmethod`. Decorating a method works, but neither name
+    is defined, so neither decorator can be written. Any other callable decorates
+    a method the way it decorates a function; `property` is described below.
+- **A `property` is read-only.** `property(fget)` takes the getter alone;
+    `fset`, `fdel` and `doc` raise
+    `NotImplementedError: property() does not yet support the {name} argument`,
+    and `property()` with no getter raises `TypeError: property() takes a getter`
+    where CPython builds a property that raises on read. `p.setter` /
+    `p.getter` / `p.deleter` raise `AttributeError`, so there is no way to add
+    a setter later either. Writing through one raises CPython's own
+    `AttributeError: property '<name>' of '<class>' object has no setter`.
+- **A `property` is looked up on the instance's own class only.** CPython
+    resolves a data descriptor before the instance `__dict__`; Monty reads the
+    instance `__dict__` first, so an attribute bound before the class gained the
+    property would shadow it. Nothing in the sandbox can produce that ordering
+    today, since a write to a name the class binds as a property is refused.
 - **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
     are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
     latter with stringized values, see [typing.md](typing.md)). A class decorator
@@ -435,11 +511,12 @@ every construction request. Divergences:
     `@dataclass(frozen=True)` instance, which it writes to and `obj.x = v`
     refuses — the same escape hatch CPython's generated `__init__` uses. On a
     class object it does not write at all, where `Foo.x = v` sets a class member.
-- Introspection attributes other than `__name__`, `__doc__`, `__annotations__`
-    and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`, `Foo.__bases__`,
-    `Foo.__mro__`, `Foo.__qualname__`, `Foo.__module__`, and explicit
+- Introspection attributes other than `__name__`, `__module__`, `__doc__`,
+    `__annotations__` and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`,
+    `Foo.__bases__`, `Foo.__mro__`, `Foo.__qualname__`, and explicit
     `obj.__repr__()` / `obj.__str__()` calls when the class defines none, all
-    raise `AttributeError`.
+    raise `AttributeError`. `Foo.__module__` reads `'__main__'` for every
+    class, because Monty runs one module, which is what `__name__` reads too.
 - Class-body statements other than a `def`, a simple `name [: T] = <expr>`
     variable assignment, `pass`, `...`, or a docstring, e.g. `if`/`for`/`while`
     in the class body, or tuple/multiple assignment targets (rejected at parse

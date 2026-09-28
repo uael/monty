@@ -313,6 +313,12 @@ pub struct RaisedException {
     /// absent for most exceptions. Mirrors monty's `ExcData`.
     #[prost(message, optional, tag = "4")]
     pub data: ::core::option::Option<ExcData>,
+    /// The sandbox class the exception was raised from, when it was raised from
+    /// one. `exc_type` stays that class's nearest builtin ancestor, so a host
+    /// that matches on the type keeps matching; this is what the traceback calls
+    /// it. Absent for a builtin exception.
+    #[prost(string, optional, tag = "5")]
+    pub user_type: ::core::option::Option<crate::budgeted_prost::alloc::string::String>,
 }
 /// Structured exception payload, mirroring monty's `ExcData` enum. Future
 /// exception types that carry more than a message (e.g. OSError's errno)

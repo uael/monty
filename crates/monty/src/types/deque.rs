@@ -431,6 +431,19 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Deque> {
         Ok(self.get(vm.heap).items[idx].clone_with_heap(vm))
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        let idx = self.resolve_index(key, vm)?;
+        // `contains_refs` stays set: it is a conservative "may contain" flag.
+        let removed = self
+            .get_mut(vm.heap)
+            .items
+            .remove(idx)
+            .expect("index resolved in bounds");
+        removed.drop_with(vm);
+        Ok(())
+    }
+
     fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         defer_drop!(key, vm);
         defer_drop_mut!(value, vm);

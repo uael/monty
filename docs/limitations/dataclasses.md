@@ -8,7 +8,9 @@ see [classes.md](classes.md)).
 Host-supplied instances and this module barely interact:
 `dataclasses.is_dataclass(x)` honours the flag the host sent, but `fields()`
 and `asdict()` do not work on host instances (they are not native
-dataclasses). Bare dataclasses are NOT accepted as inputs — the host must
+dataclasses): `fields()` raises
+`TypeError: must be called with a dataclass type or instance`, the same refusal
+a plain class gets. Bare dataclasses are NOT accepted as inputs — the host must
 wrap them in `ClassInstance` explicitly.
 
 ## Unsupported
@@ -42,8 +44,8 @@ around a decoration will not catch these.
     `default_factory`, and `default` only for a field that has none).
     `Field.metadata` and `Field._field_type` raise the same way, for
     `types.MappingProxyType` and `dataclasses._FIELD`.
-- **Module helpers** — `fields`, `asdict`, `astuple` and `replace` do not exist: accessing them raises
-    `AttributeError`, not `NotImplementedError`, since the module has no such attribute.
+- **Module helpers** — `asdict`, `astuple` and `replace` do not exist: accessing them raises
+    `AttributeError`, not `NotImplementedError`, since the module has no such attribute. `fields()` does exist.
 
 Mutable defaults are rejected as CPython rejects them
 (`ValueError: mutable default <class 'list'> for field xs is not allowed: use default_factory`), and so is a non-default
@@ -61,7 +63,8 @@ field after a defaulted one
 - **`__dataclass_fields__` holds only real fields.** CPython keeps `ClassVar`
     (and `InitVar`) entries in the mapping, marked `_FIELD_CLASSVAR`, and filters
     them in `fields()`. Monty has no field kinds, so the mapping *is* the field
-    list and class variables never appear in it.
+    list, class variables never appear in it, and `fields()` hands back its
+    values unfiltered.
 - **`Field` renders differently.** `repr(field)` follows CPython's layout but
     writes `MISSING` where CPython writes `<dataclasses._MISSING_TYPE object at 0x..>`, and the stringized `type`.
     `repr(type(field))` is `<class 'Field'>`,

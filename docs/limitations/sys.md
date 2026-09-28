@@ -65,13 +65,19 @@ access raises `AttributeError`.
     which routes output to that stream through the host print callback (see
     [print.md](print.md)).
 
+`sys.modules` is the session's table of imported modules, live: `import` reads
+it first and a write to it is what the next `import` of that name finds. It
+holds what this session imported and nothing else, where CPython's is seeded
+with every module the interpreter loaded at startup. See
+[modules.md](modules.md).
+
 Accessing an attribute the module does not define raises Monty's generic
 `AttributeError: 'module' object has no attribute '<name>'`, where CPython says
 `module 'sys' has no attribute '<name>'`.
 
 ## Not implemented
 
-`path`, `modules`, `exit`, `exc_info`, `getrecursionlimit`,
+`path`, `exit`, `exc_info`, `getrecursionlimit`,
 `getsizeof`, `getrefcount`, `intern`, `displayhook`, `excepthook`,
 `settrace`, `setprofile`, `stdin`, `__stdout__`, `_getframe`, `audit`.
 

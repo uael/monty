@@ -172,6 +172,13 @@ impl MontyObject {
         })
     }
 
+    /// A callable of the sandbox, by the handle a session that holds handles
+    /// gave it under; see [`MontyNode::Callable`].
+    #[must_use]
+    pub fn callable(id: MontyUuid, name: impl Into<String>) -> Self {
+        Self::leaf(MontyNode::Callable { id, name: name.into() })
+    }
+
     /// A builtin function such as `len`.
     #[must_use]
     pub fn builtin_function(function: BuiltinsFunctions) -> Self {
@@ -476,6 +483,18 @@ impl<'a> ObjectRef<'a> {
         }
     }
 
+    /// The handle a session that holds handles gave the value under: that of
+    /// a callable of the sandbox, or the id of a class of the sandbox. The
+    /// host releases the value by it.
+    #[must_use]
+    pub fn handle(&self) -> Option<MontyUuid> {
+        match self.node() {
+            MontyNode::Callable { id, .. } => Some(*id),
+            MontyNode::ClassType(class) if !class.host_defined => Some(class.id),
+            _ => None,
+        }
+    }
+
     /// The value as a `str`.
     #[must_use]
     pub fn as_str(&self) -> Option<&'a str> {
@@ -734,6 +753,7 @@ impl<'a> ObjectRef<'a> {
             MontyNode::ClassType(class) => write!(f, "<class '{}'>", class.name),
             MontyNode::BuiltinFunction(func) => write!(f, "<built-in function {func}>"),
             MontyNode::Function { name, .. } => write!(f, "<function '{name}' external>"),
+            MontyNode::Callable { name, .. } => write!(f, "<function {name}>"),
             MontyNode::Repr(s) => write!(f, "Repr({})", StringRepr(s)),
             MontyNode::Cycle(placeholder) => f.write_str(placeholder),
             MontyNode::List(_)
@@ -1339,6 +1359,25 @@ pub enum MontyType {
     ItertoolsTee,
     #[strum(serialize = "itertools._tee_dataobject")]
     ItertoolsTeeDataObject,
+    /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
+    /// Qualified like `re.Match` so the host-boundary name matches the runtime type.
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
+    /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
+    #[strum(serialize = "typing.TypeAliasType")]
+    TypeAliasType,
+    /// `contextvars.ContextVar`, named as CPython's C module names it.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// `contextvars.Token`, what `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
+    /// The running event loop `asyncio.get_running_loop()` hands back.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
 }
 
 impl fmt::Display for MontyType {

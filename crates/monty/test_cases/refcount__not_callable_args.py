@@ -21,4 +21,4 @@ def call_non_callable():
 
 for _ in range(3):
     assert call_non_callable() == 3
-# ref-counts={'lst': 1, 'math': 1}
+# ref-counts={'lst': 1, 'math': 2}

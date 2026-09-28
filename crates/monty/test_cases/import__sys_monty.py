@@ -61,6 +61,7 @@ assert tuple(name for name in sys.builtin_module_names if name != 'gc') == (
     'itertools',
     'json',
     'math',
+    'monty',
     'os',
     'pathlib',
     'random',
@@ -80,12 +81,13 @@ assert sys.flags == (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, False, 0, 0, False, 
 assert sys.argv == ['import__sys_monty.py']
 # argv[0] is what __file__ places under the working directory
 assert __file__ == '/import__sys_monty.py'
-# The list is mutable, but a fresh module per import means edits do not survive one
+# The list is mutable, and an import finds the module that sys.modules holds, so an edit survives it
 sys.argv.append('--flag')
 assert sys.argv == ['import__sys_monty.py', '--flag']
 import sys as reimported_sys
 
-assert reimported_sys.argv == ['import__sys_monty.py']
+assert reimported_sys is sys
+assert reimported_sys.argv == ['import__sys_monty.py', '--flag']
 
 # CPython 3.14 carries three more flags outside the sequence; they describe the
 # GIL and thread-context machinery Monty has no equivalent of

@@ -230,7 +230,7 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   'NotImplementedError',
   'RecursionError',
   'AttributeError',
-  'FrozenInstanceError',
+  'dataclasses.FrozenInstanceError',
   'NameError',
   'UnboundLocalError',
   'ValueError',
@@ -255,6 +255,8 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   're.PatternError',
   'binascii.Error',
   'binascii.Incomplete',
+  'GeneratorExit',
+  'asyncio.exceptions.CancelledError',
 ])
 
 /**

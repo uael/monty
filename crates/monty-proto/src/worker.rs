@@ -665,6 +665,7 @@ impl Child {
             ReplProgress::OsCall(call) => call.abort(exc, PrintWriter::Callback(&mut print)),
             ReplProgress::NameLookup(lookup) => lookup.abort(exc, PrintWriter::Callback(&mut print)),
             ReplProgress::ResolveFutures(state) => state.abort(exc, PrintWriter::Callback(&mut print)),
+            ReplProgress::Returned { call, .. } => call.abort(exc, PrintWriter::Callback(&mut print)),
             ReplProgress::Complete { .. } => unreachable!("checked above"),
         };
         let event = self.drive(outcome);
@@ -924,6 +925,7 @@ pub fn protocol_violation(message: &str) -> pb::ChildEvent {
             message: Some(format!("protocol violation: {message}")),
             traceback: BudgetVec::new(),
             data: None,
+            user_type: None,
         }),
     }))
 }
@@ -952,6 +954,7 @@ fn error_event(exc_type: ExcType, message: &str) -> pb::ChildEvent {
             message: Some(message.to_owned()),
             traceback: BudgetVec::new(),
             data: None,
+            user_type: None,
         }),
     }))
 }
@@ -1033,6 +1036,7 @@ fn suspension_event(progress: &mut ReplProgress) -> pb::ChildEvent {
             pending_call_ids: state.pending_call_ids().to_vec().into(),
         })),
         ReplProgress::Complete { .. } => unreachable!("Complete is handled before suspension_event"),
+        ReplProgress::Returned { .. } => unreachable!("the worker never makes a call of its own first"),
     }
 }
 

@@ -21,13 +21,14 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{RunError, SimpleException},
-    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput},
+    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, Held},
     modules::dataclasses,
     types::{
         HostClass, HostClassType, LongInt, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type, allocate_tuple,
         bytes::Bytes,
         date as date_type, datetime as datetime_type,
         dict::Dict,
+        generator::GeneratorKind,
         instance::class_name,
         list::List,
         set::{FrozenSet, Set},
@@ -189,7 +190,7 @@ impl GraphExporter {
             Value::Builtin(Builtins::Function(f)) => MontyNode::BuiltinFunction(*f),
             #[cfg(feature = "memory-model-checks")]
             Value::Dereferenced => panic!("Dereferenced found while exporting a value"),
-            _ => repr_node(value, vm),
+            _ => callable_node(value, vm),
         };
         self.push_node(node)
     }
@@ -205,6 +206,11 @@ impl GraphExporter {
         // A host class's type object *is* its shared class node.
         if matches!(vm.heap.get(id), HeapData::HostClassType(_)) {
             return self.host_class_node(id, vm);
+        }
+        // A session that holds handles gives a sandbox class as its type
+        // node, which it holds, so the host can call it.
+        if vm.heap.holds_handles() && matches!(vm.heap.get(id), HeapData::Class(_)) {
+            return self.sandbox_class_node(id, vm);
         }
         if self.in_progress.contains(&id) {
             let placeholder = match vm.heap.get(id) {
@@ -470,7 +476,10 @@ impl GraphExporter {
             HeapReadOutput::Module(m) => {
                 MontyNode::Repr(format!("<module '{}'>", vm.interns.get_str(m.get(vm.heap).name())))
             }
-            HeapReadOutput::Coroutine(coro) => {
+            // A coroutine crosses without the address its `repr()` carries, so
+            // the same call gives a host the same node twice. A generator has
+            // always crossed as its `repr()` and still does.
+            HeapReadOutput::Generator(coro) if coro.get(vm.heap).kind == GeneratorKind::Coroutine => {
                 let func_id = coro.get(vm.heap).func_id;
                 let func = vm.interns.get_function(func_id);
                 let name = vm.interns.get_str(func.name.name_id);
@@ -495,7 +504,7 @@ impl GraphExporter {
                 name: function.get(vm.heap).as_str().to_owned(),
                 docstring: None,
             },
-            _ => repr_node(value, vm),
+            _ => callable_node(value, vm),
         }
     }
 
@@ -511,9 +520,11 @@ impl GraphExporter {
         if let Some(node_id) = self.memo.get(&class_id) {
             return *node_id;
         }
+        let id = vm.heap.boundary_uuid(class_id);
+        vm.heap.hold(Held::Ref(class_id), Some(id));
         let node = MontyNode::ClassType(Box::new(ClassTypeNode {
             name: class_name(class_id, vm.heap, vm.interns).into_owned(),
-            id: vm.heap.boundary_uuid(class_id),
+            id,
             host_defined: false,
             is_dataclass: dataclasses::is_dataclass_class(class_id, vm),
             attrs: Vec::new(),
@@ -620,6 +631,12 @@ impl MontyTypeExt for MontyType {
     /// both matches are exhaustive so the compiler enforces totality.
     fn to_internal(&self) -> Type {
         match self {
+            Self::TypeAliasType => Type::TypeAliasType,
+            Self::Template => Type::Template,
+            Self::Interpolation => Type::Interpolation,
+            Self::ContextVar => Type::ContextVar,
+            Self::ContextVarToken => Type::ContextVarToken,
+            Self::EventLoop => Type::EventLoop,
             Self::Ellipsis => Type::Ellipsis,
             Self::NotImplementedType => Type::NotImplementedType,
             Self::Type => Type::Type,
@@ -712,6 +729,12 @@ impl MontyTypeExt for MontyType {
     /// routes a sandbox class to [`GraphExporter::sandbox_class_node`] first.
     fn from_internal_static(ty: Type) -> Option<Self> {
         Some(match ty {
+            Type::TypeAliasType => Self::TypeAliasType,
+            Type::Template => Self::Template,
+            Type::Interpolation => Self::Interpolation,
+            Type::ContextVar => Self::ContextVar,
+            Type::ContextVarToken => Self::ContextVarToken,
+            Type::EventLoop => Self::EventLoop,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,
@@ -770,6 +793,8 @@ impl MontyTypeExt for MontyType {
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
             Type::Random => return None,
+            // No host-side code type: a code object crosses as its repr.
+            Type::Code => return None,
             Type::Tuple => Self::Tuple,
             Type::NamedTuple => Self::NamedTuple,
             Type::Dict => Self::Dict,
@@ -792,7 +817,7 @@ impl MontyTypeExt for MontyType {
             Type::BuiltinFunction => Self::BuiltinFunction,
             Type::Cell => Self::Cell,
             Type::Iterator => Self::Iterator,
-            Type::Coroutine => Self::Coroutine,
+            Type::Coroutine | Type::Generator => Self::Coroutine,
             Type::Module => Self::Module,
             Type::TextIOWrapper => Self::TextIOWrapper,
             Type::BufferedReader => Self::BufferedReader,
@@ -956,6 +981,11 @@ fn import_node(
             let exc = SimpleException::new(exc_type, arg);
             Ok(Value::Ref(vm.heap.allocate(HeapData::Exception(exc))))
         }
+        // A callable the session holds for the host is the same object again.
+        MontyNode::Callable { id, name } => vm
+            .heap
+            .held(&id)
+            .ok_or_else(|| InvalidInputError::invalid_type(format!("callable '{name}' (id {id}) is no longer held"))),
         // A sandbox class the host hands back resolves to the class object
         // itself; a host class resolves to its single `HostClassType` entry,
         // and calling it (or a classmethod on it) suspends to the host, whose
@@ -1112,6 +1142,45 @@ fn snapshot_dict_pairs(dict: &Dict, heap: &Heap) -> Vec<(Value, Value)> {
 
 /// Converts a value to its repr node, falling back to a descriptive error
 /// message if `py_repr` fails (e.g. INT_MAX_STR_DIGITS).
+/// A callable of the sandbox as the handle its session holds it under, when
+/// the session holds handles; any other value, or any value of a session that
+/// holds none, as its `repr()`.
+fn callable_node(value: &Value, vm: &mut VM<'_>) -> MontyNode {
+    if value.is_callable(vm.heap)
+        && let Some(held) = Held::of(value)
+        && let Some(id) = vm.heap.hold(held, None)
+    {
+        return MontyNode::Callable {
+            id,
+            name: callable_name(value, vm),
+        };
+    }
+    repr_node(value, vm)
+}
+
+/// The name of a callable: that of the `def` it runs, that of a module
+/// function, or the name of its type for any other.
+fn callable_name(value: &Value, vm: &VM<'_>) -> String {
+    let function = match value {
+        Value::DefFunction(function) => Some(*function),
+        Value::ModuleFunction(function) => return function.to_string(),
+        Value::Ref(id) => match vm.heap.get(*id) {
+            HeapData::Closure(closure) => Some(closure.func_id),
+            HeapData::FunctionDefaults(function) => Some(function.func_id),
+            HeapData::BoundMethod(method) => return callable_name(&method.func, vm),
+            _ => None,
+        },
+        _ => None,
+    };
+    match function {
+        Some(function) => vm
+            .interns
+            .get_str(vm.interns.get_function(function).name.name_id)
+            .to_owned(),
+        None => value.py_type_name(vm).into_owned(),
+    }
+}
+
 fn repr_node(value: &Value, vm: &mut VM<'_>) -> MontyNode {
     match value.py_repr(vm) {
         Ok(s) => {
