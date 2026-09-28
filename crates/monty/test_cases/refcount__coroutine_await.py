@@ -21,4 +21,4 @@ async def main():
 
 
 held = asyncio.run(main())
-# ref-counts={'held': 1}
+# ref-counts={'held': 1, 'asyncio': 1}
