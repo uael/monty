@@ -230,7 +230,7 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   'NotImplementedError',
   'RecursionError',
   'AttributeError',
-  'FrozenInstanceError',
+  'dataclasses.FrozenInstanceError',
   'NameError',
   'UnboundLocalError',
   'ValueError',
