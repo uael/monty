@@ -29,7 +29,7 @@ use crate::{
         date as date_type, datetime as datetime_type,
         dict::Dict,
         generator::GeneratorKind,
-        instance::class_name,
+        instance::{Instance, class_name},
         list::List,
         set::{FrozenSet, Set},
         str::allocate_string,
@@ -1005,8 +1005,11 @@ fn import_node(
             ))),
         },
         // A sandbox instance the host hands back resolves to the original
-        // object by uuid (identity survives the round trip); anything else
-        // is host-backed, whatever its class id resolved to as a type object.
+        // object by uuid (identity survives the round trip); a session that
+        // holds handles makes it again from its class and its attrs, with no
+        // `__init__` run, once that object is gone, and any other session
+        // refuses it. Anything else is host-backed, whatever its class id
+        // resolved to as a type object.
         MontyNode::ClassInstance {
             class_type,
             instance_id,
@@ -1038,10 +1041,30 @@ fn import_node(
                 let Value::Ref(class_id) = built[class_type.index()] else {
                     unreachable!("class nodes always import as heap references");
                 };
-                Err(InvalidInputError::invalid_type(format!(
-                    "sandbox instance of '{}' (id {instance_id}) no longer exists",
-                    class_name(class_id, vm.heap, vm.interns)
-                )))
+                if !vm.heap.holds_handles() {
+                    return Err(InvalidInputError::invalid_type(format!(
+                        "sandbox instance of '{}' (id {instance_id}) no longer exists",
+                        class_name(class_id, vm.heap, vm.interns)
+                    )));
+                }
+                let pairs = clone_pairs(&attrs, built, vm);
+                if pairs.iter().any(|(key, _)| !key.is_str(vm.heap)) {
+                    pairs.drop_with(vm);
+                    return Err(InvalidInputError::invalid_type(format!(
+                        "an instance of '{}' is keyed by str",
+                        class_name(class_id, vm.heap, vm.interns)
+                    )));
+                }
+                let dict = Dict::from_pairs(pairs, vm)
+                    .map_err(|_| InvalidInputError::invalid_type("unhashable class instance attr keys"))?;
+                vm.heap.inc_ref(class_id);
+                let id = vm.heap.allocate(HeapData::Instance(Box::new(Instance::crossed(
+                    class_id,
+                    dict,
+                    instance_id,
+                ))));
+                vm.heap.boundary_uuid(id);
+                Ok(Value::Ref(id))
             }
         },
         MontyNode::Path(s) => Ok(Value::Ref(vm.heap.allocate(HeapData::Path(Path::new(s))))),

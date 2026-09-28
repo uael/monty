@@ -4,8 +4,8 @@
 
 use monty::{Dump, MontyRepl, ReplFunctionCall, ReplProgress, Session, SessionRef, dump};
 use monty_types::{
-    CallArgs, CompileOptions, ExcType, MontyException, MontyObject, NamedValues, PrintWriter, ResourceLimits,
-    ResourceTracker,
+    CallArgs, CompileOptions, ExcType, MontyException, MontyObject, MontyUuid, NamedValues, PrintWriter,
+    ResourceLimits, ResourceTracker,
     unstable::{self, MontyNode},
 };
 
@@ -357,4 +357,108 @@ fn a_waiting_call_releases_a_handle() {
         "a released handle calls nothing"
     );
     completes(call, 10);
+}
+
+const RAISES: &str = "\
+class Refused(Exception):
+    pass
+
+class Never:
+    def __init__(self):
+        raise RuntimeError('never')
+";
+
+fn raising() -> MontyRepl {
+    let mut repl = session(ResourceLimits::default());
+    repl.feed_run(RAISES, vec![], PrintWriter::Disabled).unwrap();
+    repl
+}
+
+fn id(of: u8) -> MontyUuid {
+    MontyUuid::try_from_slice(&[of; 16]).unwrap()
+}
+
+#[test]
+fn an_instance_whose_object_is_gone_is_made_again_from_its_class_and_attrs() {
+    let mut repl = raising();
+    let never = value(&mut repl, "Never");
+    let made = MontyObject::class_instance(never, id(7), [(MontyObject::string("x"), MontyObject::int(1))]);
+    let mut both = NamedValues::new();
+    both.push("i", made.clone());
+    both.push("j", made);
+    let got = repl
+        .feed_run("(i.x, type(i) is Never, i is j)", both, PrintWriter::Disabled)
+        .unwrap();
+    assert_eq!(
+        got,
+        MontyObject::tuple([MontyObject::int(1), MontyObject::bool(true), MontyObject::bool(true)]),
+        "made with no __init__ run, and once under its id"
+    );
+}
+
+#[test]
+fn a_host_raises_an_exception_of_the_sandbox_at_the_call() {
+    let mut repl = raising();
+    let refused = value(&mut repl, "Refused");
+    let progress = repl
+        .feed_start(
+            "try:\n    got = outer()\nexcept Refused as no:\n    got = ('caught', no.args)\ngot",
+            vec![],
+            PrintWriter::Disabled,
+        )
+        .unwrap();
+    let call = called(progress, "outer");
+    let no = MontyObject::class_instance(
+        refused,
+        id(8),
+        [(
+            MontyObject::string("args"),
+            MontyObject::tuple([MontyObject::string("no")]),
+        )],
+    );
+    let (_, got) = call.raise(no, PrintWriter::Disabled).unwrap().into_complete().unwrap();
+    assert_eq!(
+        got,
+        MontyObject::tuple([
+            MontyObject::string("caught"),
+            MontyObject::tuple([MontyObject::string("no")])
+        ])
+    );
+}
+
+#[test]
+fn an_exception_the_host_raises_that_nothing_catches_ends_the_snippet_under_its_class() {
+    let mut repl = raising();
+    let refused = value(&mut repl, "Refused");
+    let call = outer(repl);
+    let no = MontyObject::class_instance(
+        refused,
+        id(9),
+        [(
+            MontyObject::string("args"),
+            MontyObject::tuple([MontyObject::string("no")]),
+        )],
+    );
+    let error = call.raise(no, PrintWriter::Disabled).expect_err("nothing catches it");
+    assert_eq!(error.error.type_name(), "Refused");
+    assert_eq!(error.error.message(), Some("no"));
+}
+
+#[test]
+fn a_host_that_raises_no_exception_raises_a_type_error() {
+    let repl = raising();
+    let progress = repl
+        .feed_start(
+            "try:\n    got = outer()\nexcept TypeError as no:\n    got = str(no)\ngot",
+            vec![],
+            PrintWriter::Disabled,
+        )
+        .unwrap();
+    let call = called(progress, "outer");
+    let (_, got) = call
+        .raise(MontyObject::int(3), PrintWriter::Disabled)
+        .unwrap()
+        .into_complete()
+        .unwrap();
+    assert_eq!(got, MontyObject::string("exceptions must derive from BaseException"));
 }

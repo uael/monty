@@ -53,6 +53,17 @@ impl Instance {
         }
     }
 
+    /// An instance of `class` that crosses under `uuid`, the identity the
+    /// host handed it in by.
+    #[must_use]
+    pub(crate) fn crossed(class: HeapId, attrs: Dict, uuid: MontyUuid) -> Self {
+        Self {
+            class,
+            attrs,
+            uuid: Some(uuid),
+        }
+    }
+
     /// Boundary identity of the instance, generated and stored on first use
     /// so repeated crossings (and dump/restore) observe the same id. Only
     /// `Heap::boundary_uuid` may call this: it also indexes the new id.
