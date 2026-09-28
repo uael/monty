@@ -5,7 +5,7 @@
 //! Both types are also constructible, as in CPython: [`template_init`] and
 //! [`interpolation_init`].
 
-use std::fmt::Write;
+use std::{fmt::Write, mem};
 
 use crate::{
     args::{ArgValues, FromArgs},
@@ -116,14 +116,13 @@ pub(crate) fn template_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value
         if let Ok(part) = arg.to_str(vm) {
             text.push_str(part);
         } else if matches!(arg, Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Interpolation(_))) {
-            strings.push(allocate_string(std::mem::take(&mut text), vm.heap));
+            strings.push(allocate_string(mem::take(&mut text), vm.heap));
             interpolations.push(arg.clone_with_heap(vm.heap));
         } else {
             let got = arg.py_type_name(vm).into_owned();
-            strings
-                .into_iter()
-                .chain(interpolations)
-                .for_each(|built| built.drop_with(vm));
+            for built in strings.into_iter().chain(interpolations) {
+                built.drop_with(vm);
+            }
             return Err(ExcType::type_error(format!(
                 "Template.__new__ *args need to be of type 'str' or 'Interpolation', got {got}"
             )));
@@ -186,7 +185,9 @@ pub(crate) fn interpolation_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<
         None
     };
     if let Some(error) = error {
-        fields.into_iter().for_each(|field| field.drop_with(vm));
+        for field in fields {
+            field.drop_with(vm);
+        }
         return Err(error);
     }
     let [value, expression, conversion, format_spec] = fields;
