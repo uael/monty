@@ -677,12 +677,20 @@ pub struct SerializedFrame {
 
     /// Whether this frame is a class `__init__` (see `CallFrame.is_initializer`).
     ///
-    /// Unlike `should_return`, an initializer frame can legitimately be live
-    /// across a suspend (an `__init__` that calls an external/OS function), so it
-    /// must round-trip — otherwise the resumed frame would push `__init__`'s
-    /// `None` instead of leaving the instance on the stack.
+    /// An initializer frame can be live across a suspend (an `__init__` that
+    /// calls an external/OS function), so it must round-trip — otherwise the
+    /// resumed frame would push `__init__`'s `None` instead of leaving the
+    /// instance on the stack.
     #[serde(default)]
     is_initializer: bool,
+
+    /// Whether the run loop stops when this frame ends (see `CallFrame.should_return`).
+    ///
+    /// Only the frame of a call the host makes before it answers another one
+    /// is live across a suspend with it set; every other such frame belongs
+    /// to a nested `run()` that cannot suspend.
+    #[serde(default)]
+    should_return: bool,
 
     /// The generator this frame runs, if any (see `CallFrame.generator`).
     #[serde(default)]
@@ -707,10 +715,6 @@ impl CallFrame<'_> {
     /// namespace's owned references across so the live frame releases nothing.
     fn serialize(&mut self) -> SerializedFrame {
         assert!(!self.is_parked, "cannot serialize a parked frame");
-        assert!(
-            !self.should_return,
-            "cannot serialize frame marked for return - not yet supported"
-        );
         SerializedFrame {
             function_id: self.function_id,
             ip: self.ip,
@@ -719,6 +723,7 @@ impl CallFrame<'_> {
             exception_stack_base: self.exception_stack_base(),
             call_offset: self.call_offset,
             is_initializer: self.is_initializer,
+            should_return: self.should_return,
             generator: self.generator,
             delegated_return: self.delegated_return,
             delegating: self.delegating,
@@ -1054,7 +1059,7 @@ impl<'h> VM<'h> {
                     exception_stack_base: stack_index(sf.exception_stack_base),
                     function_id: sf.function_id,
                     call_offset: sf.call_offset,
-                    should_return: false,
+                    should_return: sf.should_return,
                     is_parked: false,
                     namespace: sf.namespace,
                     is_initializer: sf.is_initializer,
@@ -2514,6 +2519,16 @@ impl<'h> VM<'h> {
     fn push_admitted_frame(&mut self, frame: CallFrame<'h>) {
         let caller = mem::replace(&mut self.current_frame, frame);
         self.suspended_frames.push(caller);
+    }
+
+    /// Whether a call of the host runs, see [`call_from_host`](Self::call_from_host).
+    ///
+    /// Its frame is the one frame that ends the run while no nested native
+    /// `run()` is in progress: every other frame that ends the run belongs to
+    /// such a nested `run()`.
+    pub(super) fn in_host_call(&self) -> bool {
+        self.run_reentry_depth == recursion::MAX_RUN_REENTRY_DEPTH
+            && (self.current_frame.should_return || self.suspended_frames.iter().any(|frame| frame.should_return))
     }
 
     /// Pops the current frame from the call stack.

@@ -472,6 +472,7 @@ fn execute_repl_with_mounts(
                 ReplProgress::FunctionCall(call) => call.abort(exc, PrintWriter::Stdout),
                 ReplProgress::NameLookup(lookup) => lookup.abort(exc, PrintWriter::Stdout),
                 ReplProgress::ResolveFutures(state) => state.abort(exc, PrintWriter::Stdout),
+                ReplProgress::Returned { call, .. } => call.abort(exc, PrintWriter::Stdout),
                 ReplProgress::Complete { .. } => unreachable!("only suspensions are counted"),
             };
             match outcome {
@@ -505,6 +506,7 @@ fn execute_repl_with_mounts(
             ReplProgress::ResolveFutures(state) => {
                 return Err((state.into_repl(), "async futures not supported in CLI".to_owned()));
             }
+            ReplProgress::Returned { .. } => unreachable!("the CLI never makes a call of its own first"),
         }
     }
 }
