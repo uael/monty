@@ -577,6 +577,8 @@ impl Executor {
             populate_inputs(inputs, &mut vm)?;
             Program::run_to_completion(&mut vm)
         });
+        // `sys.modules` is a dict of this heap, which dies here.
+        self.tables.modules = ModuleTable::default();
 
         if heap.size() > heap_capacity {
             self.heap_capacity = heap.size();
@@ -614,7 +616,7 @@ impl Executor {
         let mut heap = Heap::new(self.namespace_size(), resource_tracker);
         let globals = self.empty_globals();
 
-        HeapReader::with(&mut heap, &mut &mut *self, |reader, executor| {
+        let output = HeapReader::with(&mut heap, &mut &mut *self, |reader, executor| {
             // Create VM, populate inputs, and run
             let mut vm = VM::new(
                 globals,
@@ -685,7 +687,10 @@ impl Executor {
                 heap_count,
                 allocations_since_gc,
             })
-        })
+        });
+        // `sys.modules` is a dict of this heap, which dies here.
+        self.tables.modules = ModuleTable::default();
+        output
     }
 
     /// Creates an empty globals vector with all slots set to `Undefined`.
