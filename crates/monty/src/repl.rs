@@ -1379,7 +1379,7 @@ impl ReplSnapshot {
                     call_id,
                     object_id,
                     allow_eager_await,
-                    snapshot: ReplSnapshot {
+                    snapshot: Self {
                         repl,
                         executor,
                         vm_state: vm_state.expect("a returned call leaves its snapshot"),
