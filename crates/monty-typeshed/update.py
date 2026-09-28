@@ -58,6 +58,7 @@ ALLOWED_FUNCTIONS = {
     'setattr',
     'sorted',
     'sum',
+    'vars',
 }
 
 # Whitelisted builtin classes (from crates/monty/src/types/ and exception_private.rs)

@@ -2,19 +2,20 @@
 //!
 //! A `t"..."` literal evaluates to a [`Template`] holding two tuples: the literal
 //! text around each replacement field, and one [`Interpolation`] per field.
-//! Neither type is constructible from Python (see `limitations/string_templatelib.md`);
-//! the VM builds them through [`allocate_template`] / [`allocate_interpolation`].
+//! Both types are also constructible, as in CPython: [`template_init`] and
+//! [`interpolation_init`].
 
-use std::fmt::Write;
+use std::{fmt::Write, mem};
 
 use crate::{
+    args::{ArgValues, FromArgs},
     bytecode::{CallResult, VM},
     defer_drop,
-    exception_private::RunResult,
+    exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::{HashValue, identity_hash},
     heap::{HeapData, HeapId, HeapItem, HeapObjectRead},
     intern::StaticStrings,
-    types::{LazyHeapSet, PyTrait, TupleIterator, Type, allocate_tuple, tuple::TupleVec},
+    types::{LazyHeapSet, PyTrait, TupleIterator, Type, allocate_tuple, str::allocate_string, tuple::TupleVec},
     value::{EitherStr, Value},
 };
 
@@ -92,6 +93,105 @@ pub(crate) fn allocate_interpolation(
             format_spec,
         })
         .into_value()
+}
+
+/// `Template(*args)`, as CPython builds one: each argument a `str` or an
+/// `Interpolation`, adjacent strings joined, and an empty string wherever an
+/// interpolation meets another one or an end.
+pub(crate) fn template_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    let (positional, keywords) = args.into_parts();
+    let positional = positional.collect::<Vec<_>>();
+    defer_drop!(positional, vm);
+    if !keywords.is_empty() {
+        for (key, value) in keywords {
+            key.drop_with(vm);
+            value.drop_with(vm);
+        }
+        return Err(ExcType::type_error("Template.__new__ only accepts *args arguments"));
+    }
+    let mut strings = TupleVec::new();
+    let mut interpolations = TupleVec::new();
+    let mut text = String::new();
+    for arg in positional {
+        if let Ok(part) = arg.to_str(vm) {
+            text.push_str(part);
+        } else if matches!(arg, Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Interpolation(_))) {
+            strings.push(allocate_string(mem::take(&mut text), vm.heap));
+            interpolations.push(arg.clone_with_heap(vm.heap));
+        } else {
+            let got = arg.py_type_name(vm).into_owned();
+            for built in strings.into_iter().chain(interpolations) {
+                built.drop_with(vm);
+            }
+            return Err(ExcType::type_error(format!(
+                "Template.__new__ *args need to be of type 'str' or 'Interpolation', got {got}"
+            )));
+        }
+    }
+    strings.push(allocate_string(text, vm.heap));
+    let strings = allocate_tuple(strings, vm.heap);
+    let interpolations = allocate_tuple(interpolations, vm.heap);
+    Ok(allocate_template(strings, interpolations, vm))
+}
+
+/// Arguments of `Interpolation(value, expression='', conversion=None, format_spec='')`.
+#[derive(FromArgs)]
+#[from_args(name = "Interpolation", style = c_named)]
+struct InterpolationArgs {
+    #[from_args(static_string = "ValueAttr")]
+    value: Value,
+    #[from_args(default)]
+    expression: Option<Value>,
+    #[from_args(default = Value::None)]
+    conversion: Value,
+    #[from_args(default)]
+    format_spec: Option<Value>,
+}
+
+/// `Interpolation(value, expression='', conversion=None, format_spec='')`, as
+/// CPython builds one: the expression and the format spec are `str`, and the
+/// conversion is `None`, `'s'`, `'r'` or `'a'`.
+pub(crate) fn interpolation_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    let InterpolationArgs {
+        value,
+        expression,
+        conversion,
+        format_spec,
+    } = InterpolationArgs::from_args(args, vm)?;
+    let empty = || Value::InternString(vm.interns.intern_static(StaticStrings::EmptyString));
+    let fields = [
+        value,
+        expression.unwrap_or_else(empty),
+        conversion,
+        format_spec.unwrap_or_else(empty),
+    ];
+    let refused = |name: &str, field: &Value, vm: &VM<'_>| {
+        ExcType::type_error(format!(
+            "Interpolation() argument '{name}' must be str, not {}",
+            field.py_type_name(vm)
+        ))
+    };
+    let error = if fields[1].to_str(vm).is_err() {
+        Some(refused("expression", &fields[1], vm))
+    } else if !matches!(fields[2], Value::None) && fields[2].to_str(vm).is_err() {
+        Some(refused("conversion", &fields[2], vm))
+    } else if !matches!(fields[2], Value::None) && !matches!(fields[2].to_str(vm), Ok("s" | "r" | "a")) {
+        Some(ExcType::value_error(
+            "Interpolation() argument 'conversion' must be one of 's', 'a' or 'r'",
+        ))
+    } else if fields[3].to_str(vm).is_err() {
+        Some(refused("format_spec", &fields[3], vm))
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        for field in fields {
+            field.drop_with(vm);
+        }
+        return Err(error);
+    }
+    let [value, expression, conversion, format_spec] = fields;
+    Ok(allocate_interpolation(value, expression, conversion, format_spec, vm))
 }
 
 impl Template {
