@@ -145,6 +145,11 @@ try:
 except SyntaxError as e:
     assert str(e) == "'await' outside function (<string>, line 4)"
 try:
+    exec('def value():\n    return 42\nreturn value()')
+    assert False, 'expected SyntaxError'
+except SyntaxError as e:
+    assert str(e) == "'return' outside function (<string>, line 3)"
+try:
     eval(b'\xff')
     assert False, 'expected SyntaxError'
 except SyntaxError as e:
