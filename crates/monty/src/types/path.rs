@@ -11,7 +11,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use monty_types::{MontyPath, OsFunctionCall};
+use monty_types::{MontyPath, OsFunctionCall, SandboxOs};
 use smallvec::SmallVec;
 
 use crate::{
@@ -327,6 +327,12 @@ pub(crate) fn class_cwd(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     Ok(Value::Ref(vm.heap.allocate(HeapData::Path(path))))
 }
 
+/// Whether the `Path` method only asks the operating system: each one that
+/// yields an OS call, and `open`, whose call is the host's too.
+fn asks_os(method: StaticStrings) -> bool {
+    is_path_os_method(method) || method == StaticStrings::Open
+}
+
 /// Extracts a string from a Value for use as a path.
 fn extract_path_string<'a>(val: &Value, vm: &'a VM<'_>) -> RunResult<&'a str> {
     value_as_path_str(val, vm.heap, vm.interns)
@@ -517,8 +523,14 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Path> {
     /// OS methods yield calls to the host; `iterdir` retains the receiver's spelling
     /// so the resume path can restore it on each returned entry.
     /// Pure methods (is_absolute, joinpath, etc.) are handled directly.
+    /// A session without an operating system lacks the OS methods, so they
+    /// raise `AttributeError` like any unknown attribute.
     fn py_call_attr(&mut self, vm: &mut VM<'h>, attr: &EitherStr, args: ArgValues) -> RunResult<CallResult> {
-        let Some(method) = attr.static_string(vm.interns) else {
+        let os = vm.env.options.os;
+        let method = attr
+            .static_string(vm.interns)
+            .filter(|&method| os == SandboxOs::Host || !asks_os(method));
+        let Some(method) = method else {
             args.drop_with(vm);
             return Err(ExcType::attribute_error(Type::Path, attr.as_str(vm.interns)));
         };

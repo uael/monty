@@ -888,8 +888,8 @@ fn compile_module_source(
     }
     let nodes =
         parse_with_interner(code, script_name, &mut interns).map_err(|e| e.into_python_exc(script_name, code))?;
-    let nodes =
-        prepare_with_existing_names(nodes, &interns, globals).map_err(|e| e.into_python_exc(script_name, code))?;
+    let nodes = prepare_with_existing_names(nodes, &interns, globals, options.os)
+        .map_err(|e| e.into_python_exc(script_name, code))?;
     let module_code = Compiler::compile_module(&nodes, &mut interns, globals, options)
         .map_err(|e| e.into_python_exc(script_name, code))?;
     interns.commit();

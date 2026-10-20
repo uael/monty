@@ -10,7 +10,7 @@
 
 use std::borrow::Cow;
 
-use monty_types::{MontyException, StackFrame};
+use monty_types::{MontyException, SandboxOs, StackFrame};
 
 use super::{
     RESERVED_MODULE_DUNDERS,
@@ -33,6 +33,7 @@ use crate::{
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
     intern::{CompileInterns, StringId},
+    modules::StandardLib,
     name_map::NameMap,
     namespace::NamespaceId,
     parse::{CodeRange, ExceptHandler, Try, syntax_error_in_snippet},
@@ -283,6 +284,9 @@ struct ScopeFlags {
     /// function it is CPython's own syntax error, while in an `async def` it is
     /// a body Monty does not compile yet.
     yield_refusal: Option<&'static str>,
+    /// The operating system of the session, which decides the modules an
+    /// import can find (see [`StandardLib::find`]).
+    os: SandboxOs,
 }
 
 /// CPython's message for a `yield` that is not inside a function.
@@ -556,6 +560,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             globals_by_name: snippet.unwrap_or(false),
             forbid_await: snippet.is_some() && !top_level_await,
             yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
+            os: options.os,
         };
         let mut compiler = Compiler::new(interns, true, 0, flags);
 
@@ -1405,9 +1410,15 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // A dotted module with no `as` alias would bind a name containing a dot,
         // which no expression can ever read, where CPython binds the top-level
         // package. Monty has no package objects, so reject it and point at the
-        // forms that do work. See `limitations/modules.md`.
-        if binding.name_id == module_name && self.interns.get_str(module_name).contains('.') {
-            let dotted = self.interns.get_str(module_name).to_owned();
+        // forms that do work. See `limitations/modules.md`. Under a package the
+        // session lacks, CPython fails the import itself, so the load is emitted
+        // to raise `ModuleNotFoundError` as it does.
+        let dotted = self.interns.get_str(module_name);
+        if binding.name_id == module_name
+            && dotted.contains('.')
+            && StandardLib::lacked_package(dotted, self.flags.os).is_none()
+        {
+            let dotted = dotted.to_owned();
             return Err(CompileError::not_implemented(
                 format!(
                     "importing a submodule without an alias; use `import {dotted} as <name>` \

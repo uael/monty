@@ -5,6 +5,8 @@
 
 use std::fmt::{self, Write};
 
+use monty_types::SandboxOs;
+
 use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
@@ -111,6 +113,32 @@ pub(crate) enum StandardLib {
 }
 
 impl StandardLib {
+    /// The module a session with the given `os` imports under `name`.
+    ///
+    /// A session without an operating system has no `os` module, so its
+    /// import raises `ModuleNotFoundError` as for a name Monty does not know.
+    pub fn find(name: StaticStrings, os: SandboxOs) -> Option<Self> {
+        Self::from_static(name).filter(|module| os == SandboxOs::Host || !module.asks_os())
+    }
+
+    /// The standard package a session with the given `os` lacks, when the
+    /// dotted `name` lies under one.
+    ///
+    /// As in CPython, an import of `os.path` fails on `os` when `os` itself
+    /// is absent, so the error names that package. Any other dotted name that
+    /// does not resolve is reported whole.
+    pub fn lacked_package(name: &str, os: SandboxOs) -> Option<&str> {
+        let (package, _) = name.split_once('.')?;
+        let module = package.parse::<StaticStrings>().ok()?;
+        (Self::from_static(module).is_some() && Self::find(module, os).is_none()).then_some(package)
+    }
+
+    /// Whether the module only asks the operating system, so that a session
+    /// without one lacks it.
+    fn asks_os(self) -> bool {
+        matches!(self, Self::Os)
+    }
+
     /// Resolves a module name without depending on enum discriminant order.
     pub fn from_static(name: StaticStrings) -> Option<Self> {
         match name {

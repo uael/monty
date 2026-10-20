@@ -256,6 +256,27 @@ Every pool session takes the same struct as `ReplConfig::auto_os_calls` (see [th
 `os.urandom()` is the one call with no in-process answer: under `run` it raises `NotImplementedError`, under `start`
 it pauses for the host (see [random](../limitations/random.md)).
 
+### A session with no operating system
+
+`CompileOptions::os` set to `SandboxOs::Absent` gives a session no operating system for files and the environment.
+`import os` raises `ModuleNotFoundError`, `open` is not a builtin, and the disk methods of `pathlib.Path` raise
+`AttributeError`.
+The code can catch each error, and the run does not pause with an `OsCall` for it.
+The clock, sleeps and random seeding still follow `AutoOsCalls`.
+`TypeChecker::new(SandboxOs::Absent)` from `monty-type-checking` checks code against the same surface
+(see [os](../limitations/os.md#a-session-with-no-operating-system)):
+
+```rust
+use monty::MontyRun;
+use monty_types::{CompileOptions, MontyObject, SandboxOs};
+
+let options = CompileOptions { os: SandboxOs::Absent, ..CompileOptions::default() };
+let code = "try:\n    import os\nexcept ModuleNotFoundError as error:\n    caught = str(error)\ncaught";
+let mut runner = MontyRun::new(code.to_owned(), "no_os.py", vec![], options).unwrap();
+let caught = runner.run_no_limits(vec![]).unwrap();
+assert_eq!(caught, MontyObject::string("No module named 'os'".to_owned()));
+```
+
 ### Host functions and pausing
 
 [`MontyRun::start`](../api/rust/monty.md#montyrun) returns a [`RunProgress`](../api/rust/monty.md#runprogress) that pauses whenever the sandboxed code calls a function the host provides.

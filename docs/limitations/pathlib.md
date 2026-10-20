@@ -6,6 +6,12 @@ even when the host is Windows. `PurePath`, `PurePosixPath`, `PureWindowsPath`,
 `PosixPath`, `WindowsPath` are not separately exposed; the printed `repr`
 of a `Path` is `PosixPath(...)` for compatibility.
 
+In a session with no operating system (see [os.md](os.md#a-session-with-no-operating-system)), each method that
+asks the host raises `AttributeError: 'PosixPath' object has no attribute '<name>'`: `exists`, `is_file`,
+`is_dir`, `is_symlink`, `read_text`, `read_bytes`, `stat`, `iterdir`, `resolve`, `absolute`, `unlink`, `rmdir`,
+`write_text`, `append_text`, `write_bytes`, `append_bytes`, `mkdir`, `rename` and `open`.
+The pure methods and properties stay, and so does `Path.cwd()`, which reads the working directory of the sandbox.
+
 Because the class object and its instances share one type, the class object
 answers to the instance name: `pathlib.Path.__name__` and `repr(pathlib.Path)`
 give `PosixPath` / `<class 'PosixPath'>`, and `pathlib.Path.nonexistent` raises

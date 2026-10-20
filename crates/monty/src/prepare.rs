@@ -2,6 +2,7 @@ use std::mem;
 
 use ahash::{AHashMap, AHashSet, RandomState};
 use indexmap::IndexMap;
+use monty_types::SandboxOs;
 
 use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Signature},
@@ -54,8 +55,9 @@ pub(crate) fn prepare_with_existing_names(
     nodes: Vec<ParseNode>,
     interner: &CompileInterns<'_>,
     globals: &mut NameMap,
+    os: SandboxOs,
 ) -> Result<Vec<PreparedNode>, ParseError> {
-    let mut prepared_nodes = Prepare::new_module(globals, interner).prepare_nodes(nodes)?;
+    let mut prepared_nodes = Prepare::new_module(globals, interner, os).prepare_nodes(nodes)?;
 
     // In the root frame, the last expression is implicitly returned if it
     // is not `None`. This matches Python REPL behavior where the last
@@ -97,8 +99,9 @@ pub(crate) fn prepare_snippet(
     interner: &CompileInterns<'_>,
     globals: &mut NameMap,
     names: SnippetNames,
+    os: SandboxOs,
 ) -> Result<Vec<PreparedNode>, ParseError> {
-    let mut prepare = Prepare::new_module(globals, interner);
+    let mut prepare = Prepare::new_module(globals, interner, os);
     if names != SnippetNames::Slots {
         prepare.top_level_by_name = true;
         // `global x` at the top level binds in the globals (CPython emits
@@ -130,6 +133,9 @@ pub(crate) fn prepare_snippet(
 struct Prepare<'i, 'g> {
     /// String interner for resolving names in error messages.
     interner: &'i CompileInterns<'i>,
+    /// The operating system of the session, which decides whether a name is a
+    /// builtin (see [`Builtins::find`]). Nested preparers carry the module's.
+    os: SandboxOs,
     /// Live mutable handle to the module's global [`NameMap`].
     ///
     /// At module scope this points to the same `NameMap` that PrepareState
@@ -504,9 +510,10 @@ impl<'i, 'g> Prepare<'i, 'g> {
 
     /// Borrows the caller's global slots so nested functions can assign new ones.
     /// The caller restores those provisional slots if compilation fails.
-    fn new_module(globals: &'g mut NameMap, interner: &'i CompileInterns<'i>) -> Self {
+    fn new_module(globals: &'g mut NameMap, interner: &'i CompileInterns<'i>, os: SandboxOs) -> Self {
         Self {
             interner,
+            os,
             globals: GlobalsRef { globals },
             state: PrepareState::Module,
             names_assigned_in_order: AHashSet::new(),
@@ -536,6 +543,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
     /// * `enclosing_locals` - Names bound in ANY enclosing function (transitive closure).
     /// * `cell_var_names` - Names that nested functions capture from this scope.
     /// * `interner` - String interner for looking up names in diagnostics.
+    /// * `os` - The operating system of the session, as the module's preparer holds it.
     #[expect(clippy::too_many_arguments)]
     fn new_function(
         params: &[StringId],
@@ -548,6 +556,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
         enclosing_locals: AHashSet<StringId>,
         cell_var_names: &AHashSet<StringId>,
         interner: &'i CompileInterns<'i>,
+        os: SandboxOs,
     ) -> Result<Self, ParseError> {
         // Reject duplicate parameter names while building `locals`.
         // Ruff's parser accepts `def f(x, x)` that CPython rejects at
@@ -613,6 +622,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
 
         Ok(Self {
             interner,
+            os,
             globals,
             state: PrepareState::Function(Box::new(FunctionState {
                 locals,
@@ -1358,7 +1368,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             let name_str = self.interner.get_str(name.name_id);
             let already_bound =
                 self.names_assigned_in_order.contains(&name.name_id) || self.globals.globals.contains(name.name_id);
-            if !already_bound && let Ok(builtin) = name_str.parse::<Builtins>() {
+            if !already_bound && let Some(builtin) = Builtins::find(name_str, self.os) {
                 return Ok(Expr::Builtin(builtin));
             }
         }
@@ -1749,6 +1759,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             enclosing_locals,
             &scope_info.cell_var_names,
             self.interner,
+            self.os,
         )?;
 
         // Prepare the function body
@@ -1988,6 +1999,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             enclosing_locals,
             &scope_info.cell_var_names,
             self.interner,
+            self.os,
         )?;
         inner_prepare.is_class_scope = true;
 
@@ -2170,6 +2182,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             enclosing_locals,
             &scope_info.cell_var_names,
             self.interner,
+            self.os,
         )?;
 
         // Prepare the body

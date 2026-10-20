@@ -505,11 +505,13 @@ impl Child {
             config: type_check_config,
         });
         // Missing field means an older parent; the feature defaults to on.
+        // The wire carries no `os` setting: a worker's session asks its parent.
         let options = CompileOptions {
             assert_message_annotations: assert_message_annotations.map_or_else(
                 AssertMessageAnnotations::default,
                 AssertMessageAnnotations::from_max_bytes,
             ),
+            ..CompileOptions::default()
         };
         let repl = MontyRepl::new(&self.script_name, ResourceTracker::new(limits), options)
             .with_auto_os_calls(self.auto_os_calls.clone());

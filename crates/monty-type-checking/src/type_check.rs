@@ -1,6 +1,6 @@
 use std::{fmt, io::ErrorKind, mem};
 
-use monty_types::{TypeCheckingConfig, TypeCheckingFormat};
+use monty_types::{SandboxOs, TypeCheckingConfig, TypeCheckingFormat};
 use ruff_db::{
     Db as _,
     diagnostic::{
@@ -33,6 +33,10 @@ impl<'a> SourceFile<'a> {
     }
 }
 
+/// Type checks code for a session, holding one database across checks.
+///
+/// `Default` checks against the stubs of a session whose host answers its OS
+/// calls; [`new`](Self::new) picks the stubs for a session's [`SandboxOs`].
 #[derive(Debug, Default)]
 pub struct TypeChecker {
     db: MemoryDb,
@@ -41,6 +45,25 @@ pub struct TypeChecker {
 }
 
 impl TypeChecker {
+    /// A checker for code that runs in a session with the given `os`.
+    ///
+    /// With [`SandboxOs::Absent`], the stubs lack what the session lacks: the
+    /// `os` module, the builtin `open` and the disk methods of `pathlib.Path`.
+    /// Code that names one fails with an unresolved import, reference or
+    /// attribute, as it would raise at runtime.
+    #[must_use]
+    pub fn new(os: SandboxOs) -> Self {
+        let typeshed = match os {
+            SandboxOs::Host => monty_typeshed::file_system(),
+            SandboxOs::Absent => monty_typeshed::file_system_without_os(),
+        };
+        Self {
+            db: MemoryDb::new(typeshed.clone()),
+            touched_files: Vec::new(),
+            next_revision: 0,
+        }
+    }
+
     /// Type check some python source code, checking if it's valid to run with monty.
     ///
     /// # Arguments

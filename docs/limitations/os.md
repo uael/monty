@@ -5,6 +5,27 @@ functions route through the same OS-call mechanism as `pathlib` and
 `open()` (see [pathlib.md](pathlib.md), [open.md](open.md)): the host's mount table (or `os` callback) decides
 whether each call is permitted.
 
+## A session with no operating system
+
+A host can give a session no operating system for files and the environment: `CompileOptions::os` set to
+`SandboxOs::Absent` in Rust.
+Such a session lacks every name that only asks the host:
+
+- `import os`, `from os import ...`, `import os.path` and `import os.path as p` raise
+    `ModuleNotFoundError: No module named 'os'`.
+    So `import os.path` with no alias fails as in CPython, not with the `NotImplementedError` of a dotted import
+    with no alias (see [string_templatelib.md](string_templatelib.md)).
+- `open` is not a builtin (see [open.md](open.md)).
+- The disk methods of `pathlib.Path` raise `AttributeError` (see [pathlib.md](pathlib.md)).
+
+Each error is raised inside the sandbox, so code can catch it, and the host gets no OS call for it.
+The clock, sleeps and random seeding are not changed: they follow the `AutoOsCalls` policies (see [time.md](time.md),
+[datetime.md](datetime.md) and [random.md](random.md)).
+The type checker of such a session (`TypeChecker::new(SandboxOs::Absent)`) reports each of these names as an
+unresolved import, reference or attribute.
+It takes the types of `os` that other stubs use, such as `os.PathLike`, from the stub-only module `_typeshed._os`, so
+`import _typeshed._os` passes the checker and raises `ModuleNotFoundError` at runtime, as `import _typeshed` does.
+
 ## Implemented
 
 - `os.getenv(key, default=None)` — yields to the host; the host decides

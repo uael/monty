@@ -5,11 +5,12 @@
 //! `monty -t` refuse code that runs; a name the stub binds and the interpreter lacks passes `monty -t` and then
 //! raises `NameError`.
 //!
-//! This crate is the one that depends on both the interpreter and the type checker, so the two are compared here.
+//! This crate is the one that depends on both the interpreter and the type checker, so the two are compared here,
+//! for a session with the host's operating system and for one with none, which lacks `open` on both sides.
 
 use monty::MontyRun;
 use monty_type_checking::{SourceFile, TypeChecker};
-use monty_types::{BuiltinsFunctions, CompileOptions, ExcType, MontyType, TypeCheckingConfig};
+use monty_types::{BuiltinsFunctions, CompileOptions, ExcType, MontyType, SandboxOs, TypeCheckingConfig};
 use strum::VariantNames;
 
 /// The vendored stub, read from the same file `build.rs` zips into the crate.
@@ -66,10 +67,14 @@ fn candidates() -> Vec<String> {
     names
 }
 
-/// Whether the interpreter runs a bare reference to `name`.
-fn runs(name: &str) -> bool {
+/// Whether the interpreter runs a bare reference to `name` in a session with the given `os`.
+fn runs(name: &str, os: SandboxOs) -> bool {
     let code = format!("got = {name}\n");
-    let mut run = MontyRun::new(code, "reference.py", vec![], CompileOptions::default()).unwrap();
+    let options = CompileOptions {
+        os,
+        ..CompileOptions::default()
+    };
+    let mut run = MontyRun::new(code, "reference.py", vec![], options).unwrap();
     match run.run_no_limits(vec![]) {
         Ok(_) => true,
         Err(no) => {
@@ -82,10 +87,10 @@ fn runs(name: &str) -> bool {
     }
 }
 
-/// Whether the type checker resolves a bare reference to `name`.
-fn resolves(name: &str) -> bool {
+/// Whether the type checker of a session with the given `os` resolves a bare reference to `name`.
+fn resolves(name: &str, os: SandboxOs) -> bool {
     let code = format!("got = {name}\n");
-    TypeChecker::default()
+    TypeChecker::new(os)
         .run(
             &SourceFile::new(&code, "reference.py"),
             None,
@@ -97,19 +102,32 @@ fn resolves(name: &str) -> bool {
 
 #[test]
 fn the_stub_binds_a_builtin_exactly_when_the_interpreter_binds_it() {
-    let apart: Vec<(String, bool, bool)> = candidates()
+    assert_eq!(names_apart(SandboxOs::Host), Vec::new(), "{KEEP_IN_STEP}");
+}
+
+#[test]
+fn without_os_the_stub_binds_a_builtin_exactly_when_the_interpreter_binds_it() {
+    assert_eq!(names_apart(SandboxOs::Absent), Vec::new(), "{KEEP_IN_STEP}");
+    assert!(runs("open", SandboxOs::Host) && !runs("open", SandboxOs::Absent));
+}
+
+/// What to do when the stub and the interpreter disagree.
+const KEEP_IN_STEP: &str = "the stub and the interpreter disagree on these names, as (name, runs, type-checks); keep \
+    ALLOWED_FUNCTIONS, ALLOWED_CLASSES and ALLOWED_NAMES in crates/monty-typeshed/update.py in step with the \
+    interpreter, and what a session without an operating system lacks in step between `Builtins::find` and \
+    crates/monty-typeshed/src/without_os.rs";
+
+/// The candidates that the interpreter and the type checker of a session with the given `os` disagree on, as
+/// `(name, runs, type-checks)`.
+fn names_apart(os: SandboxOs) -> Vec<(String, bool, bool)> {
+    candidates()
         .into_iter()
         .map(|name| {
-            let (ran, typed) = (runs(&name), resolves(&name));
+            let (ran, typed) = (runs(&name, os), resolves(&name, os));
             (name, ran, typed)
         })
         .filter(|(_, ran, typed)| ran != typed)
-        .collect();
-    assert!(
-        apart.is_empty(),
-        "the stub and the interpreter disagree on these names, as (name, runs, type-checks); keep ALLOWED_FUNCTIONS, \
-     ALLOWED_CLASSES and ALLOWED_NAMES in crates/monty-typeshed/update.py in step with the interpreter: {apart:?}"
-    );
+        .collect()
 }
 
 #[test]

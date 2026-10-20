@@ -2233,7 +2233,8 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Loads a module, raising `ModuleNotFoundError` for unknown names.
+    /// Loads a module, raising `ModuleNotFoundError` for unknown names and for
+    /// the modules this session lacks (see [`StandardLib::find`]).
     ///
     /// `sys.modules` answers first, as in CPython, so a module is built once
     /// per session and a name a host put there is found. A standard module
@@ -2243,8 +2244,16 @@ impl<'h> VM<'h> {
             self.push(held);
             return Ok(());
         }
-        let Some(module) = self.interns.static_string(name_id).and_then(StandardLib::from_static) else {
-            return Err(ExcType::module_not_found_error(self.interns.get_str(name_id)));
+        let os = self.env.options.os;
+        let Some(module) = self
+            .interns
+            .static_string(name_id)
+            .and_then(|name| StandardLib::find(name, os))
+        else {
+            let name = self.interns.get_str(name_id);
+            return Err(ExcType::module_not_found_error(
+                StandardLib::lacked_package(name, os).unwrap_or(name),
+            ));
         };
         let heap_id = module.create(self);
         let held = Value::Ref(heap_id);
@@ -3214,7 +3223,7 @@ impl<'h> VM<'h> {
     /// the builtin; once `def sum` runs, the slot holds the user function and the
     /// fallback isn't taken anymore.
     fn builtin_for_name(&self, name_id: StringId) -> Option<Value> {
-        Builtins::value_from_name(self.interns.get_str(name_id))
+        Builtins::value_from_name(self.interns.get_str(name_id), self.env.options.os)
     }
 
     /// Returns the fixed value for a module-level dunder, or `None` if `name_id`

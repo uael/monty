@@ -2632,6 +2632,9 @@ version = "0.0.23"
 dependencies = [
  "path-slash",
  "ruff_db",
+ "ruff_python_ast",
+ "ruff_python_parser",
+ "ruff_text_size",
  "walkdir",
  "zip 0.6.6",
 ]

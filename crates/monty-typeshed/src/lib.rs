@@ -4,6 +4,8 @@ use std::sync::LazyLock;
 
 use ruff_db::vendored::VendoredFileSystem;
 
+mod without_os;
+
 /// The source commit of the vendored typeshed.
 pub const SOURCE_COMMIT: &str = include_str!("../vendor/typeshed/source_commit.txt").trim_ascii_end();
 
@@ -11,11 +13,25 @@ pub const SOURCE_COMMIT: &str = include_str!("../vendor/typeshed/source_commit.t
 // Luckily this crate will fail to build if this file isn't available at build time.
 static TYPESHED_ZIP_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/zipped_typeshed.zip"));
 
+/// The stubs of the stdlib subset Monty implements, for a session whose host
+/// answers its OS calls.
 #[must_use]
 pub fn file_system() -> &'static VendoredFileSystem {
     static VENDORED_TYPESHED_STUBS: LazyLock<VendoredFileSystem> =
         LazyLock::new(|| VendoredFileSystem::new_static(TYPESHED_ZIP_BYTES).unwrap());
     &VENDORED_TYPESHED_STUBS
+}
+
+/// The stubs of a session with no operating system: [`file_system`] less the
+/// `os` module, the builtin `open` and the disk methods of `pathlib.Path`.
+///
+/// Derived from the vendored stubs on the first call, which costs a parse of
+/// the stubs it edits; later calls share the result.
+#[must_use]
+pub fn file_system_without_os() -> &'static VendoredFileSystem {
+    static STUBS_WITHOUT_OS: LazyLock<VendoredFileSystem> =
+        LazyLock::new(|| VendoredFileSystem::new(without_os::derive(TYPESHED_ZIP_BYTES)).unwrap());
+    &STUBS_WITHOUT_OS
 }
 
 #[cfg(test)]

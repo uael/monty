@@ -9,6 +9,12 @@ every divergence listed below applies equally whether the caller uses
 `open(path, ...)` or `path.open(...)`. The only `Path.open()`-specific
 quirks are in the "Path.open()" section at the bottom.
 
+In a session with no operating system (see [os.md](os.md#a-session-with-no-operating-system)), `open` is not a
+builtin: a reference to it raises `NameError`, `builtins.open` raises `AttributeError`, and a call goes to the host as
+a call of an undefined name.
+A name that the code binds to `open` itself stays.
+`Path.open()` raises `AttributeError` there.
+
 ## Design note: no live host file descriptors
 
 Monty **never** keeps a native file handle alive between OS or external
