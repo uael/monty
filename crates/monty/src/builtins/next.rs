@@ -2,10 +2,10 @@
 
 use crate::{
     args::{ArgValues, FromArgs},
-    bytecode::VM,
+    bytecode::{CallResult, VM},
     defer_drop,
     exception_private::RunResult,
-    types::iter::iterator_next,
+    types::{generator::Reader, iter::iterator_next},
     value::Value,
 };
 
@@ -30,8 +30,19 @@ struct NextArgs {
 ///   `StopIteration` when the iterator is exhausted.
 /// - `next(iterator, default)` - Returns the next item from the iterator, or
 ///   `default` if the iterator is exhausted.
-pub fn builtin_next(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+///
+/// A generator is read on the VM's own loop, as its `__next__()` reads it, so a
+/// call to the host in its body suspends the run as it would anywhere.
+pub fn builtin_next(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let NextArgs { iterator, default } = NextArgs::from_args(args, vm)?;
+    if let Some(gen_id) = vm.unfinished_generator(&iterator) {
+        let has_default = default.is_some();
+        if let Some(default) = default {
+            vm.push(default);
+        }
+        vm.push(iterator);
+        return vm.read_generator(gen_id, Reader::Next(has_default));
+    }
     defer_drop!(iterator, vm);
-    iterator_next(iterator, default, vm)
+    iterator_next(iterator, default, vm).map(CallResult::Value)
 }

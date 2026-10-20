@@ -93,6 +93,21 @@ impl Builtins {
         }
     }
 
+    /// Whether this builtin reads its first argument whole, given the count of
+    /// its positional arguments. A generator there fills a list on the VM's
+    /// own loop first, and the builtin runs on the list.
+    ///
+    /// `any()`, `all()` and `next()` read a generator one value at a time
+    /// instead; see [`Reader`](crate::types::generator::Reader).
+    pub(crate) fn reads_whole(self, pos_count: usize) -> bool {
+        match self {
+            Self::Function(BuiltinsFunctions::Sum | BuiltinsFunctions::Sorted) => pos_count > 0,
+            Self::Function(BuiltinsFunctions::Min | BuiltinsFunctions::Max) => pos_count == 1,
+            Self::Type(Type::List | Type::Tuple | Type::Set | Type::FrozenSet | Type::Dict) => pos_count > 0,
+            _ => false,
+        }
+    }
+
     /// Writes the Python repr() string for this callable to a formatter.
     pub fn py_repr_fmt<W: Write>(self, f: &mut W) -> fmt::Result {
         match self {
@@ -140,8 +155,9 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
     fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
         let r = match self {
             Self::Abs => abs::builtin_abs(vm, args),
-            Self::All => all::builtin_all(vm, args),
-            Self::Any => any::builtin_any(vm, args),
+            // `all()`, `any()` and `next()` read a generator on the VM's own loop.
+            Self::All => return all::builtin_all(vm, args),
+            Self::Any => return any::builtin_any(vm, args),
             Self::Bin => bin::builtin_bin(vm, args),
             Self::Callable => callable::builtin_callable(vm, args),
             Self::Chr => chr::builtin_chr(vm, args),
@@ -164,7 +180,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Map => map::builtin_map(vm, args),
             Self::Max => min_max::builtin_max(vm, args),
             Self::Min => min_max::builtin_min(vm, args),
-            Self::Next => next::builtin_next(vm, args),
+            Self::Next => return next::builtin_next(vm, args),
             Self::Oct => oct::builtin_oct(vm, args),
             // `open()` yields an OS call rather than a plain value.
             Self::Open => return open::builtin_open(vm, args),

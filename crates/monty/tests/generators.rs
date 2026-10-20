@@ -222,8 +222,6 @@ fn a_generator_expression_is_lazy() {
 
 /// A generator expression stops at a call to the host the way any other
 /// generator does: the frame it suspends in is saved with the rest of them.
-/// `send` is what reaches it, because a walk that drives the generator for you
-/// cannot cross a host call; see `limitations/generators.md`.
 #[test]
 fn a_generator_expression_survives_a_host_call() {
     let code = "\
@@ -267,4 +265,142 @@ first == 42 and log == ['receiver closed']
         .resume(ExtFunctionResult::Return(MontyObject::int(42)), PrintWriter::Stdout)
         .unwrap();
     assert_eq!(done.into_complete(), Some(t(true)));
+}
+
+/// Answers each call to the host, `fetch(x)`, with `x * 10`, and each lookup
+/// of a name with a host function, until the run ends. With `dumping`, the run
+/// goes through a dump and a load at each call. Gives the value of the last
+/// line and the argument of each call, in order.
+fn answer(mut progress: RunProgress, dumping: bool) -> (MontyObject, Vec<i64>) {
+    let mut asked = Vec::new();
+    loop {
+        if dumping && matches!(progress, RunProgress::FunctionCall(_)) {
+            let bytes = dump("gen.py", None, SessionRef::Running(&progress)).unwrap();
+            let Session::Running(back) = Dump::load(&bytes).unwrap().state else {
+                panic!("dumped a run, loaded something else")
+            };
+            progress = *back;
+        }
+        progress = match progress {
+            RunProgress::NameLookup(lookup) => {
+                let name = lookup.name.clone();
+                lookup
+                    .resume(
+                        NameLookupResult::Value(MontyObject::function(name, None)),
+                        PrintWriter::Stdout,
+                    )
+                    .unwrap()
+            }
+            RunProgress::FunctionCall(call) => {
+                assert_eq!(call.function_name, "fetch");
+                let x: i64 = call.args.arg(0).unwrap().try_into().unwrap();
+                asked.push(x);
+                call.resume(ExtFunctionResult::Return(MontyObject::int(x * 10)), PrintWriter::Stdout)
+                    .unwrap()
+            }
+            done => return (done.into_complete().expect("the run completes"), asked),
+        };
+    }
+}
+
+/// A `for` reads a generator on the VM's own loop, as `send()` does, so a call
+/// to the host in its body suspends the run, and the loop goes on when the
+/// host answers. A comprehension is a `for` too.
+#[test]
+fn a_for_reads_a_generator_across_a_host_call() {
+    let code = "\
+total = 0
+for v in (fetch(x) for x in [1, 2, 3]):
+    total += v
+total == 60 and [v for v in (fetch(x) for x in [4])] == [40]
+";
+    assert_eq!(answer(start(code), false), (t(true), vec![1, 2, 3, 4]));
+}
+
+/// A builtin or an instruction that reads a generator whole has it fill a list
+/// on the VM's own loop first, then runs on the list, so a call to the host in
+/// the body suspends the run.
+#[test]
+fn a_whole_read_of_a_generator_crosses_a_host_call() {
+    for (code, asked) in [
+        ("sum(fetch(x) for x in [1, 2]) == 30", vec![1, 2]),
+        ("''.join(str(fetch(x)) for x in [1, 2]) == '1020'", vec![1, 2]),
+        ("list(fetch(x) for x in [1, 2]) == [10, 20]", vec![1, 2]),
+        ("tuple(fetch(x) for x in [1]) == (10,)", vec![1]),
+        ("sorted(fetch(x) for x in [2, 1]) == [10, 20]", vec![2, 1]),
+        ("max(fetch(x) for x in [1, 2]) == 20", vec![1, 2]),
+        ("set(fetch(x) for x in [1]) == {10}", vec![1]),
+        ("dict((x, fetch(x)) for x in [1]) == {1: 10}", vec![1]),
+        ("[*(fetch(x) for x in [1, 2])] == [10, 20]", vec![1, 2]),
+        ("a, b = (fetch(x) for x in [1, 2])\na + b == 30", vec![1, 2]),
+        ("out = [0]\nout.extend(fetch(x) for x in [1])\nout == [0, 10]", vec![1]),
+    ] {
+        assert_eq!(answer(start(code), false), (t(true), asked), "{code}");
+    }
+}
+
+/// `any()` and `all()` read a generator one value at a time on the VM's own
+/// loop, and stop at the value that decides, as CPython does, so the host is
+/// asked no further.
+#[test]
+fn any_and_all_stop_at_the_value_that_decides() {
+    for (code, value, asked) in [
+        ("any(fetch(x) > 10 for x in [1, 2, 3])", true, vec![1, 2]),
+        ("all(fetch(x) < 20 for x in [1, 2, 3])", false, vec![1, 2]),
+        ("any(fetch(x) > 90 for x in [1, 2])", false, vec![1, 2]),
+    ] {
+        assert_eq!(answer(start(code), false), (t(value), asked), "{code}");
+    }
+}
+
+/// The `next()` builtin reads a generator as its `__next__()` does, and gives
+/// its default once the generator is done.
+#[test]
+fn next_reads_a_generator_across_a_host_call() {
+    let code = "\
+g = (fetch(x) for x in [1])
+next(g) == 10 and next(g, 'end') == 'end'
+";
+    assert_eq!(answer(start(code), false), (t(true), vec![1]));
+}
+
+/// What a generator raises while a reader steps it on the loop reaches the
+/// handlers around the reader, as in CPython, and no handler in the body of
+/// the loop.
+#[test]
+fn a_raise_in_a_read_generator_reaches_the_handler_around_the_reader() {
+    let code = "\
+def g():
+    yield fetch(1)
+    raise ValueError('no')
+
+seen = []
+try:
+    for v in g():
+        try:
+            seen.append(v)
+        except ValueError:
+            seen.append('body')
+except ValueError:
+    seen.append('loop')
+try:
+    sum(g())
+except ValueError:
+    seen.append('sum')
+seen == [10, 'loop', 'sum']
+";
+    assert_eq!(answer(start(code), false), (t(true), vec![1, 1]));
+}
+
+/// A read that waits on the host is a frame and the values on the stack of
+/// its reader, so it survives a dump and goes on where it stood.
+#[test]
+fn a_read_survives_dump_and_load() {
+    let code = "\
+total = 0
+for v in (fetch(x) for x in [1]):
+    total += v
+(total, sum(fetch(x) for x in [2]), any(fetch(x) > 0 for x in [3]), next(fetch(x) for x in [4])) == (10, 20, True, 40)
+";
+    assert_eq!(answer(start(code), true), (t(true), vec![1, 2, 3, 4]));
 }
