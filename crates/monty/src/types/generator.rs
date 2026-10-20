@@ -55,6 +55,49 @@ pub(crate) struct Delegation {
     pub done_ip: usize,
 }
 
+/// Who resumed a generator's frame, which says where its yields and its
+/// return go.
+///
+/// The frame carries it while it runs, so a `yield` and a `return` know what
+/// waits on them without the resumer saying it again at each step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Resumer {
+    /// `send()` or `__next__()`: a `yield` gives its value as a call gives
+    /// its result, and a return raises `StopIteration` at the resumer. Every
+    /// frame that runs no generator says this too.
+    #[default]
+    Call,
+    /// A `yield from`: a return gives its value in place of the receiver, and
+    /// the resumer goes on at this offset, where the delegation ends.
+    Delegation(usize),
+    /// A reader that holds the generator on top of its stack while it steps
+    /// it; see [`Reader`].
+    Reader(Reader),
+}
+
+/// What reads a generator on the VM's own loop, rather than in a nested run
+/// that no call to the host can cross.
+///
+/// The reader holds the generator on top of its stack until the read ends, so
+/// a dump taken while the body waits on the host finds the read whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Reader {
+    /// A `for`: a `yield` gives its value to the body, and a return pops the
+    /// generator and goes on at this offset, the end of the loop.
+    Loop(usize),
+    /// An instruction that reads the generator whole: a `yield` adds its value
+    /// to the list under the generator and resumes it, and a return leaves the
+    /// list in place of the generator, for the instruction to run again on.
+    Fill,
+    /// `any()` (false) or `all()` (true): a `yield` of a value whose truth is
+    /// not this ends the read with the opposite, and a return gives this.
+    Test(bool),
+    /// `next()`, with a default under the generator or not: a `yield` gives
+    /// its value in place of both, and a return gives the default, or raises
+    /// `StopIteration` when there is none.
+    Next(bool),
+}
+
 /// A generator object: everything needed to put its frame back on the stack.
 ///
 /// The saved state is exactly what a frame is, and no more. `ip` is relative to
