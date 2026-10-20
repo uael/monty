@@ -16,7 +16,7 @@ use crate::{
     exception_private::RunResult,
     heap::{ContainsHeap, DropWithContext, Heap, HeapId, HeapReadOutput, HeapReader},
     intern::{FunctionId, StringId},
-    types::generator::Delegation,
+    types::generator::{Delegation, Resumer},
     value::Value,
 };
 
@@ -103,10 +103,9 @@ pub(crate) struct SerializedTaskFrame {
     /// The generator this frame runs, if any (see `CallFrame.generator`).
     #[serde(default)]
     pub generator: Option<HeapId>,
-    /// Where the resumer resumes when this generator returns (see
-    /// `CallFrame.delegated_return`).
+    /// Who resumed this generator's frame (see `CallFrame.resumer`).
     #[serde(default)]
-    pub delegated_return: Option<usize>,
+    pub resumer: Resumer,
     /// The `yield from` this frame waits on (see `CallFrame.delegating`).
     #[serde(default)]
     pub delegating: Option<Delegation>,
