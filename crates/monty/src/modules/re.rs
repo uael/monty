@@ -30,7 +30,7 @@
 //! - `re.ASCII` / `re.A` — ASCII-only matching for `\w`, `\d`, `\s` (value: 256)
 //! - `re.PatternError` / `re.error` — exception type for invalid patterns
 
-use std::rc::Rc;
+use std::{fmt, rc::Rc};
 
 use ahash::RandomState;
 
@@ -605,6 +605,12 @@ const CACHE_CAPACITY: usize = 256;
 /// recompiled per call at default limits, never retained.
 const CACHED_SIZE_LIMIT: usize = 64 * 1024;
 
+/// Entries of the tier of large patterns in [`RePatternCache`].
+const LARGE_CAPACITY: usize = 8;
+
+/// `delegate_size_limit` for compiles retained in the tier of large patterns.
+const LARGE_SIZE_LIMIT: usize = 2 * 1024 * 1024;
+
 /// Longest *source* pattern retained — the text-side counterpart of
 /// [`CACHED_SIZE_LIMIT`], and small because an entry holds the text once per
 /// `fancy_regex` engine it compiles. Source length says nothing about compiled size
@@ -614,15 +620,32 @@ const CACHED_PATTERN_LIMIT: usize = 4 * 1024;
 
 /// Per-run cache of compiled patterns for module-level `re.*` calls, keyed on
 /// `(pattern, flags)` — so `re.split(r'\s+', text)` in a loop compiles once. Mirrors
-/// CPython's `re._cache`; not snapshotted (rebuilt on demand). Direct-mapped with
-/// 5-slot linear probing and LRU-on-collision (jiter's `py_string_cache` design),
-/// bounding retained memory by [`CACHED_SIZE_LIMIT`] and [`CACHED_PATTERN_LIMIT`].
+/// CPython's `re._cache`; a snapshot carries it to the VM that resumes the run, and
+/// never serializes it. Direct-mapped with 5-slot linear probing and LRU-on-collision
+/// (jiter's `py_string_cache` design), bounding retained memory by
+/// [`CACHED_SIZE_LIMIT`] and [`CACHED_PATTERN_LIMIT`].
 ///
 /// The backing store is allocated lazily on first use: every VM builds a
 /// `RePatternCache` but few touch `re`, and zeroing it eagerly measurably regressed
 /// the setup-bound benchmarks (`add_two`, `func_call_*`).
+///
+/// A pattern that compiles past [`CACHED_SIZE_LIMIT`] but within [`LARGE_SIZE_LIMIT`],
+/// as one that matches `\w` does, is retained in a second tier of at most
+/// [`LARGE_CAPACITY`] entries, oldest out first, so a loop that uses one compiles it
+/// once, and the tier adds at most `LARGE_CAPACITY × LARGE_SIZE_LIMIT` to the bound.
 #[derive(Default)]
-pub(crate) struct RePatternCache(Option<(Box<[ReCacheEntry]>, RandomState)>);
+pub(crate) struct RePatternCache(Option<(Box<[ReCacheEntry]>, RandomState)>, Vec<Rc<RePattern>>);
+
+impl fmt::Debug for RePatternCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let held = self
+            .0
+            .as_ref()
+            .map_or(0, |(entries, _)| entries.iter().flatten().count())
+            + self.1.len();
+        f.debug_tuple("RePatternCache").field(&held).finish()
+    }
+}
 
 impl RePatternCache {
     /// Returns the compiled pattern for `(pattern, flags)`, compiling and caching on
@@ -664,14 +687,30 @@ impl RePatternCache {
             }
         }
 
+        if let Some(large) = self.1.iter().find(|one| one.is_compiled_from(pattern, flags)) {
+            return Ok(Rc::clone(large));
+        }
+
         // Miss: compile size-bounded so a retained entry can never pin a huge
-        // compiled regex. A valid pattern that compiles past the cap is
+        // compiled regex. A valid pattern that compiles past the cap is retained in
+        // the tier of large patterns when it fits there, and is otherwise
         // recompiled at default limits and returned uncached — it still works,
         // just recompiled per call.
         let compiled = match RePattern::compile_bounded(pattern.to_owned(), flags, CACHED_SIZE_LIMIT) {
             Ok(compiled) => compiled,
             Err(BoundedCompileError::TooBig) => {
-                return Ok(Rc::new(RePattern::compile(pattern.to_owned(), flags)?));
+                return match RePattern::compile_bounded(pattern.to_owned(), flags, LARGE_SIZE_LIMIT) {
+                    Ok(compiled) => {
+                        let compiled = Rc::new(compiled);
+                        if self.1.len() == LARGE_CAPACITY {
+                            self.1.remove(0);
+                        }
+                        self.1.push(Rc::clone(&compiled));
+                        Ok(compiled)
+                    }
+                    Err(BoundedCompileError::TooBig) => Ok(Rc::new(RePattern::compile(pattern.to_owned(), flags)?)),
+                    Err(BoundedCompileError::Invalid(err)) => Err(err),
+                };
             }
             Err(BoundedCompileError::Invalid(err)) => return Err(err),
         };
@@ -837,17 +876,45 @@ mod tests {
     }
 
     /// A counted repeat that expands far past [`CACHED_SIZE_LIMIT`] in the
-    /// delegated regex compiler while still compiling fine at default limits.
+    /// delegated regex compiler while still compiling within [`LARGE_SIZE_LIMIT`].
     const OVERSIZE_PATTERN: &str = "a{5000}";
 
+    /// A counted repeat that expands past [`LARGE_SIZE_LIMIT`] while still
+    /// compiling fine at default limits.
+    const HUGE_PATTERN: &str = "a{200000}";
+
     #[test]
-    fn oversize_pattern_compiles_but_is_not_retained() {
+    fn oversize_pattern_is_retained_in_the_large_tier() {
         let mut cache = RePatternCache::default();
         let first = cache.get_or_compile(OVERSIZE_PATTERN, 0).unwrap();
         let second = cache.get_or_compile(OVERSIZE_PATTERN, 0).unwrap();
+        // The second call is a hit of the large tier, and the small tier holds nothing.
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(occupied(&cache), 0);
+        assert_eq!(cache.1.len(), 1);
+    }
+
+    #[test]
+    fn huge_pattern_compiles_but_is_not_retained() {
+        let mut cache = RePatternCache::default();
+        let first = cache.get_or_compile(HUGE_PATTERN, 0).unwrap();
+        let second = cache.get_or_compile(HUGE_PATTERN, 0).unwrap();
         // Both calls succeed but nothing is retained: each call recompiles.
         assert!(!Rc::ptr_eq(&first, &second));
         assert_eq!(occupied(&cache), 0);
+        assert!(cache.1.is_empty());
+    }
+
+    #[test]
+    fn large_tier_drops_its_oldest_entry() {
+        let mut cache = RePatternCache::default();
+        let oldest = cache.get_or_compile("a{4000}", 0).unwrap();
+        for i in 0..LARGE_CAPACITY {
+            cache.get_or_compile(&format!("a{{{}}}", 4001 + i), 0).unwrap();
+        }
+        // The tier stays at its capacity, and the first pattern left it.
+        assert_eq!(cache.1.len(), LARGE_CAPACITY);
+        assert!(!Rc::ptr_eq(&oldest, &cache.get_or_compile("a{4000}", 0).unwrap()));
     }
 
     #[test]
