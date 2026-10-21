@@ -505,3 +505,21 @@ assert _capture_error(lambda: {Plain(), [], Plain()}) == UNHASHABLE
 assert _capture_error(lambda: set([Plain(), [], Plain()])) == UNHASHABLE
 assert _capture_error(lambda: frozenset([Plain(), [], Plain()])) == UNHASHABLE
 assert _capture_error(lambda: {x for x in (Plain(), [], Plain())}) == UNHASHABLE
+
+# === ordering by the subset order ===
+assert {1} < {1, 2} and not {1, 2} < {1, 2} and not {3} < {1, 2}
+assert {1} <= {1, 2} and {1, 2} <= {1, 2} and not {3} <= {1, 2}
+assert {1, 2} > {1} and not {1, 2} > {1, 2} and not {1, 2} > {3}
+assert {1, 2} >= {1} and {1, 2} >= {1, 2} and not {1, 2} >= {3}
+assert set() < {1} and set() <= set() and not set() < set()
+assert {1} < frozenset({1, 2}) and {1, 2} >= frozenset({2})
+try:
+    {1} < [1, 2]
+    assert False, 'set < list must raise'
+except TypeError as e:
+    assert str(e) == "'<' not supported between instances of 'set' and 'list'", str(e)
+try:
+    {1} >= 1
+    assert False, 'set >= int must raise'
+except TypeError as e:
+    assert str(e) == "'>=' not supported between instances of 'set' and 'int'", str(e)

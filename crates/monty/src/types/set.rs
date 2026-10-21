@@ -11,6 +11,7 @@ use crate::{
     bytecode::{CallResult, ContainsVM, RecursionToken, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunResult},
+    expressions::CmpOperator,
     hash::HashValue,
     heap::{
         BorrowedHeapRead, BorrowedHeapReadMut, ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapItem,
@@ -484,6 +485,36 @@ impl<'h> HeapRead<'h, SetStorage> {
             }
         }
         Ok(true)
+    }
+
+    /// Returns true if every element of this set is in other.
+    fn is_within(&self, other: &Self, vm: &mut VM<'h>) -> RunResult<bool> {
+        if self.get(vm.heap).len() > other.get(vm.heap).len() {
+            return Ok(false);
+        }
+        let iter = self.iter(vm)?;
+        defer_drop_mut!(iter, vm);
+        while let Some((elem, hash)) = iter.next_entry(vm)? {
+            if !other.contains_with_hash(elem, hash, vm)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Answers an ordering operator between two sets by the subset order, as CPython does:
+    /// `<` and `>` are the proper subset and superset tests, `<=` and `>=` the plain ones.
+    ///
+    /// Returns `None` for any operator other than the four of ordering.
+    fn ordered(&self, other: &Self, op: CmpOperator, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
+        let (mine, theirs) = (self.get(vm.heap).len(), other.get(vm.heap).len());
+        Ok(Some(match op {
+            CmpOperator::Lt => mine < theirs && self.is_within(other, vm)?,
+            CmpOperator::LtE => self.is_within(other, vm)?,
+            CmpOperator::Gt => mine > theirs && other.is_within(self, vm)?,
+            CmpOperator::GtE => other.is_within(self, vm)?,
+            _ => return Ok(None),
+        }))
     }
 
     /// Returns a stack-borrowed lending iterator over the set's elements in
@@ -1296,6 +1327,16 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Set> {
         }
     }
 
+    /// A `set` orders against a `set` or a `frozenset` by the subset order, and
+    /// every other pairing defers to `py_cmp`, which raises `TypeError`, as CPython does.
+    fn py_cmp_op(&self, other: &Value, op: CmpOperator, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
+        match other.read_heap(vm) {
+            Some(HeapReadOutput::Set(other)) => self.storage().ordered(&other.storage(), op, vm),
+            Some(HeapReadOutput::FrozenSet(other)) => self.storage().ordered(&other.storage(), op, vm),
+            _ => Ok(None),
+        }
+    }
+
     fn py_bool(&self, vm: &mut VM<'h>) -> RunResult<bool> {
         Ok(!self.get(vm.heap).is_empty())
     }
@@ -1601,6 +1642,16 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
         match other.read_heap(vm) {
             Some(HeapReadOutput::FrozenSet(other)) => Ok(Some(self.storage().eq(&other.storage(), vm)?)),
             Some(HeapReadOutput::Set(other)) => Ok(Some(self.storage().eq(&other.storage(), vm)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// A `frozenset` orders against a `set` or a `frozenset` by the subset order, and
+    /// every other pairing defers to `py_cmp`, which raises `TypeError`, as CPython does.
+    fn py_cmp_op(&self, other: &Value, op: CmpOperator, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
+        match other.read_heap(vm) {
+            Some(HeapReadOutput::Set(other)) => self.storage().ordered(&other.storage(), op, vm),
+            Some(HeapReadOutput::FrozenSet(other)) => self.storage().ordered(&other.storage(), op, vm),
             _ => Ok(None),
         }
     }
