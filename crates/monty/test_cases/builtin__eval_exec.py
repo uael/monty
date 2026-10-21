@@ -145,6 +145,16 @@ try:
 except SyntaxError as e:
     assert str(e) == "'await' outside function (<string>, line 4)"
 try:
+    exec('async def value():\n    return 42\ndef f():\n    return await value()')
+    assert False, 'expected SyntaxError'
+except SyntaxError as e:
+    assert str(e) == "'await' outside async function (<string>, line 4)"
+try:
+    exec('async def value():\n    return 42\nf = lambda: await value()')
+    assert False, 'expected SyntaxError'
+except SyntaxError as e:
+    assert str(e) == "'await' outside async function (<string>, line 3)"
+try:
     exec('def value():\n    return 42\nreturn value()')
     assert False, 'expected SyntaxError'
 except SyntaxError as e:
