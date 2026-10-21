@@ -31,7 +31,7 @@ implementation**.
   `max_suspensions` budget hosts enforce themselves.
 - `PrintStream` / `PrintWriter` / `CollectedStreams` — `print()` output
   capture, and the labelled buffer behind `PrintWriter::CollectStreams`.
-- `CompileOptions`, `ExtFunctionResult`, `NameLookupResult`, `FileMode`, and
+- `CompileOptions` (with the `SandboxOs` of a session), `ExtFunctionResult`, `NameLookupResult`, `FileMode`, and
   the CPython-compatible formatting helpers behind their `repr()`s.
 
 ## Who should depend on it

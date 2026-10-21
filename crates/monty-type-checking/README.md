@@ -35,6 +35,12 @@ alongside the source and a `from <stubs> import *` line is injected, so
 checked code can reference host functions without defining them — diagnostic
 line numbers are adjusted back to the original source.
 
+`TypeChecker::new` takes the `SandboxOs` of the session the code runs in.
+With `SandboxOs::Absent` the stubs lack what that session lacks, the `os`
+module, the builtin `open` and the disk methods of `pathlib.Path`, so code that
+names one fails the check as it would fail at runtime. `TypeChecker::default()`
+is the checker of a session whose host answers its OS calls.
+
 `TypeCheckingConfig` picks the output format (ty's `full`, `concise`, `json`,
 `github`, ... renderings) and whether to use ANSI colour. It is passed to
 `run` rather than applied to the result because `TypeCheckingDiagnostics`

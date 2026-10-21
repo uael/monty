@@ -2,7 +2,7 @@ use std::thread;
 
 use insta::assert_snapshot;
 use monty_type_checking::{SourceFile, TypeChecker};
-use monty_types::{TypeCheckingConfig, TypeCheckingFormat};
+use monty_types::{SandboxOs, TypeCheckingConfig, TypeCheckingFormat};
 
 /// Type-checks one snippet with a throwaway checker, rendered in `Full`.
 fn check(code: &str, path: &str) -> Option<String> {
@@ -490,4 +490,81 @@ fn collections_unimplemented_names_are_unresolved() {
     1 | from collections import OrderedDict, ChainMap, UserDict, UserList, UserString
       |                                                                    ^^^^^^^^^^
     ");
+}
+
+/// Type-checks one snippet, rendered in `Concise`, for a session with the given `os`.
+fn check_for(os: SandboxOs, code: &str) -> Option<String> {
+    let mut checker = TypeChecker::new(os);
+    checker
+        .run(&SourceFile::new(code, "main.py"), None, concise())
+        .expect("type check should not fail internally")
+        .map(|diagnostics| diagnostics.to_string())
+}
+
+/// Code that asks the operating system: the `os` module, `open`, and the disk
+/// methods of `pathlib.Path`, `Path.open` among them.
+const ASKS_OS: &str = "\
+import os
+from os import getenv, PathLike
+from pathlib import Path
+
+os.environ.get('HOME')
+open('/data.txt')
+p = Path('/data.txt')
+p.read_text()
+p.write_text('x')
+p.exists()
+p.iterdir()
+p.resolve()
+p.open()
+p.touch()
+";
+
+/// A session with no operating system lacks what only asks it, so the checker
+/// reports each use as the runtime would raise it.
+#[test]
+fn session_without_os_lacks_os_open_and_disk_methods() {
+    let diagnostics = check_for(SandboxOs::Absent, ASKS_OS).expect("expected errors");
+    assert_snapshot!(diagnostics, @"
+    main.py:1:8: error[unresolved-import] Cannot resolve imported module `os`
+    main.py:2:6: error[unresolved-import] Cannot resolve imported module `os`
+    main.py:6:1: error[unresolved-reference] Name `open` used when not defined
+    main.py:8:1: error[unresolved-attribute] Object of type `Path` has no attribute `read_text`
+    main.py:9:1: error[unresolved-attribute] Object of type `Path` has no attribute `write_text`
+    main.py:10:1: error[unresolved-attribute] Object of type `Path` has no attribute `exists`
+    main.py:11:1: error[unresolved-attribute] Object of type `Path` has no attribute `iterdir`
+    main.py:12:1: error[unresolved-attribute] Object of type `Path` has no attribute `resolve`
+    main.py:13:1: error[unresolved-attribute] Object of type `Path` has no attribute `open`
+    main.py:14:1: error[unresolved-attribute] Object of type `Path` has no attribute `touch`
+    ");
+}
+
+/// The default checker is the one of a session whose host answers its OS calls.
+#[test]
+fn session_with_host_os_keeps_os_open_and_disk_methods() {
+    assert_eq!(check_for(SandboxOs::Host, ASKS_OS), None);
+    let mut checker = TypeChecker::default();
+    let diagnostics = checker
+        .run(&SourceFile::new(ASKS_OS, "main.py"), None, concise())
+        .unwrap();
+    assert!(diagnostics.is_none());
+}
+
+/// The pure path methods, which `PurePath` holds, and `Path.cwd()`, which the
+/// sandbox answers itself, stay in a session with no operating system.
+#[test]
+fn session_without_os_keeps_pure_paths() {
+    let code = "\
+from pathlib import Path, PurePath
+
+p = Path('/data') / 'notes.txt'
+parts: tuple[str, ...] = p.parts
+names: list[str] = [p.name, p.stem, p.suffix, p.as_posix(), str(p.parent)]
+renamed: Path = p.with_name('a.md').with_suffix('.txt').with_stem('b').joinpath('c')
+pure: PurePath = p
+absolute: bool = p.is_absolute()
+here: Path = Path.cwd()
+text = f'{p}'
+";
+    assert_eq!(check_for(SandboxOs::Absent, code), None);
 }

@@ -14,6 +14,8 @@ makes `import <name>` work for anything else: `sys.modules['x'] = obj` then
 `import` is the only thing that reads the table. `__import__` and `importlib`
 are absent, a dotted name is not split into parent packages, and nothing else
 (a `from x import y`, a submodule, a reload) consults or writes it.
+A session with no operating system has no `os` module, and an import of a name
+under `os` fails on `os` (see [os.md](os.md#a-session-with-no-operating-system)).
 Module attributes still cannot be set (`sys.x = 1` raises `AttributeError`), so
 state is shared through a module a program built itself rather than through a
 stdlib one.

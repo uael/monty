@@ -20,6 +20,9 @@ path = "src/lib.rs"
 
 [dependencies]
 ruff_db = { workspace = true }
+ruff_python_ast = { workspace = true }
+ruff_python_parser = { workspace = true }
+ruff_text_size = { workspace = true }
 zip = { version = "0.6.6", default-features = false }
 
 [build-dependencies]

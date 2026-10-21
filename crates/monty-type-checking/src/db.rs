@@ -64,15 +64,22 @@ impl fmt::Debug for MemoryDb {
 pub(crate) const SRC_ROOT: &str = "/";
 
 impl Default for MemoryDb {
-    /// Create a fresh database wired up for type checking under `SRC_ROOT`.
+    /// A database on the stubs of a session whose host answers its OS calls.
+    fn default() -> Self {
+        Self::new(monty_typeshed::file_system().clone())
+    }
+}
+
+impl MemoryDb {
+    /// Create a fresh database wired up for type checking under `SRC_ROOT`,
+    /// with `vendored` as the stdlib stubs.
     ///
     /// Registers `SRC_ROOT` as a Salsa-tracked project root and installs the
     /// `Program` settings needed by `check_file_unwrap`. Returning a db without this
     /// setup would unwrap-panic the first time `check_file_unwrap` is called, so this
     /// constructor is the only sanctioned way to build a `MemoryDb`.
-    fn default() -> Self {
+    pub(crate) fn new(vendored: VendoredFileSystem) -> Self {
         let src_root = SystemPathBuf::from(SRC_ROOT);
-        let vendored = monty_typeshed::file_system().clone();
         let mut db = Self {
             storage: salsa::Storage::new(None),
             system: TestSystem::default(),

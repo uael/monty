@@ -30,16 +30,25 @@ crate.
   via `make update-typeshed` from the workspace root.
 - `build.rs` — zips the vendored stubs into the compiled binary at build time,
   so Monty ships type checking with no files on disk.
+- `src/without_os.rs`: derives the stubs of a session with no operating
+  system from the zipped stubs. It panics when a stub it edits loses the shape
+  it expects, so a typeshed update cannot give such a session `open` back.
 
 ## API
 
-The crate exposes a single entry point: `file_system()` returns a static
-`ruff_db` `VendoredFileSystem` over the zipped stubs, which
-`monty-type-checking` uses as the search path for stdlib module resolution.
+`file_system()` returns a static `ruff_db` `VendoredFileSystem` over the
+zipped stubs, which `monty-type-checking` uses as the search path for stdlib
+module resolution. `file_system_without_os()` returns the stubs of a session
+with no operating system. It is derived from the same stubs on its first
+call: `os` does not resolve, `builtins` has no `open`, and `pathlib.Path` keeps
+only its constructor and `cwd` beside what `PurePath` gives. The types other
+stubs take from `os`, such as `PathLike`, move to the stub-only module
+`_typeshed._os`.
 
 ```rust
 let typeshed = monty_typeshed::file_system();
 assert!(typeshed.exists("stdlib/builtins.pyi"));
+assert!(!monty_typeshed::file_system_without_os().exists("stdlib/os.pyi"));
 ```
 
 ## Monty crates

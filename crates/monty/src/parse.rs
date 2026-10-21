@@ -795,7 +795,7 @@ impl<'a, 'i> Parser<'a, 'i> {
 
         let name = self.identifier(&function.name.id, function.name.range);
         // Parse function body recursively
-        let outer = std::mem::replace(&mut self.in_function, true);
+        let outer = mem::replace(&mut self.in_function, true);
         let body = self.parse_statements(function.body);
         self.in_function = outer;
         let body = body?;

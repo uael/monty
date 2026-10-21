@@ -198,7 +198,7 @@ fn compile_and_push(
     } else {
         &mut *vm.global_names
     };
-    let nodes = prepare_snippet(nodes, &overlay, globals, names).map_err(|e| e.into_run_error(source))?;
+    let nodes = prepare_snippet(nodes, &overlay, globals, names, options.os).map_err(|e| e.into_run_error(source))?;
     let code = Compiler::compile_snippet(
         &nodes,
         &mut overlay,

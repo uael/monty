@@ -45,6 +45,8 @@ mod zip;
 
 use std::{fmt, fmt::Write, str::FromStr};
 
+use monty_types::SandboxOs;
+
 use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
@@ -70,12 +72,30 @@ pub(crate) enum Builtins {
 impl Builtins {
     /// Resolves builtin names that evaluate directly to singleton values.
     #[must_use]
-    pub fn value_from_name(name: &str) -> Option<Value> {
+    pub fn value_from_name(name: &str, os: SandboxOs) -> Option<Value> {
         match name {
             "Ellipsis" => Some(Value::Ellipsis),
             "NotImplemented" => Some(Value::NotImplemented),
-            _ => name.parse::<Self>().ok().map(Value::Builtin),
+            _ => Self::find(name, os).map(Value::Builtin),
         }
+    }
+
+    /// The builtin a bare `name` resolves to in a session with the given `os`.
+    ///
+    /// Every path from a name to a builtin goes through here, so a session
+    /// without an operating system has no `open` at compile time, at runtime
+    /// and in the `builtins` module alike.
+    #[must_use]
+    pub fn find(name: &str, os: SandboxOs) -> Option<Self> {
+        name.parse::<Self>()
+            .ok()
+            .filter(|builtin| os == SandboxOs::Host || !builtin.asks_os())
+    }
+
+    /// Whether the builtin only asks the operating system, so that a session
+    /// without one lacks it.
+    fn asks_os(self) -> bool {
+        matches!(self, Self::Function(BuiltinsFunctions::Open))
     }
 
     /// Calls this builtin, allowing builtins that need host involvement to yield.

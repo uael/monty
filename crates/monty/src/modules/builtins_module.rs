@@ -20,7 +20,7 @@ use crate::{
 /// Builds the `builtins` module.
 ///
 /// The names come from the three enums a bare name resolves through, and each
-/// one is set through [`Builtins::from_str`], so the module cannot hold a name
+/// one is set through [`Builtins::find`], so the module cannot hold a name
 /// that does not resolve or miss one that does.
 pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     let mut module = Module::new(StaticStrings::Builtins, vm.interns);
@@ -29,7 +29,7 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         .chain(ExcType::VARIANTS)
         .chain(Type::BUILTIN_NAMES);
     for name in named {
-        if let Ok(one) = name.parse::<Builtins>() {
+        if let Some(one) = Builtins::find(name, vm.env.options.os) {
             module.set_named(name, Value::Builtin(one), vm);
         }
     }

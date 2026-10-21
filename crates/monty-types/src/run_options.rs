@@ -1,18 +1,42 @@
-//! Compile-time configuration: [`CompileOptions`] and the
-//! [`AssertMessageAnnotations`] introspected-assert setting.
+//! Compile-time configuration: [`CompileOptions`], the
+//! [`AssertMessageAnnotations`] introspected-assert setting and the
+//! [`SandboxOs`] a session asks for files and the environment.
 
 use std::num::NonZeroU32;
 /// Options controlling how Monty behavior diverges from plain CPython.
 ///
 /// Consumed when code is compiled: a `MontyRun` bakes the choices into the
 /// program at construction, while a `MontyRepl` stores them so every snippet
-/// fed to the session compiles the same way.
+/// fed to the session compiles the same way. The VM of each run reads them
+/// too, for what it resolves at runtime.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct CompileOptions {
     /// Give failed `assert` statements pytest-style introspected messages,
     /// deliberately diverging from CPython; see `limitations/assert.md`.
     /// On by default with a 120-byte operand-repr truncation.
     pub assert_message_annotations: AssertMessageAnnotations,
+    /// Whether the session has an operating system to ask for files and the
+    /// environment. The host's by default; see `limitations/os.md`.
+    pub os: SandboxOs,
+}
+
+/// The operating system a session asks for files and the environment, set by
+/// [`CompileOptions::os`].
+///
+/// A session without one lacks every name that only asks it, so code that
+/// would suspend with such an `OsFunctionCall` fails inside the sandbox
+/// instead. The clock, sleeps and random seeding are `AutoOsCalls` policies
+/// and do not change here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SandboxOs {
+    /// The host's: `os`, `open()` and the disk methods of `pathlib.Path`
+    /// suspend with an `OsFunctionCall` that the host answers.
+    #[default]
+    Host,
+    /// None: `import os` raises `ModuleNotFoundError`, `open` is no builtin,
+    /// and the disk methods of `pathlib.Path`, `open` among them, raise
+    /// `AttributeError`. The pure path methods and `Path.cwd()` stay.
+    Absent,
 }
 
 /// Controls the pytest-style introspected `assert` failure messages of
