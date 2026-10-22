@@ -61,6 +61,9 @@ fn issubclass_check(cls: &Value, chain: &[HeapId], classinfo: &Value, vm: &mut V
             _ => false,
         }),
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Tuple(_)) => issubclass_tuple(cls, chain, *id, vm),
+        Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::LiteralGenericAlias(_)) => {
+            Err(ExcType::type_error_subscripted_generic_check())
+        }
         _ => Err(ExcType::type_error(
             "issubclass() arg 2 must be a class, or tuple of classes",
         )),

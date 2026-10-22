@@ -27,8 +27,8 @@ use crate::{
     percent_format::{copy_bytes_template, percent_format, percent_format_bytes},
     resource_checks::check_pow_size,
     types::{
-        Bytes, BytesIterator, CmpOrder, GenericAlias, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
-        Union,
+        Bytes, BytesIterator, CmpOrder, GenericAlias, LazyHeapSet, LiteralGenericAlias, LongInt, Property, PyTrait,
+        StringIterator, Type, Union,
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
         host_class_type,
         instance::{class_name, instance_dataclass_eq, instance_getattr, instance_str, instance_user_eq},
@@ -1340,6 +1340,7 @@ impl<'h> PyTrait<'h> for Value {
             // `|` unions spelled the pre-3.10 way.
             Self::Builtin(Builtins::Type(Type::Union)) => Union::subscript(key.clone_with_heap(vm), vm),
             Self::Marker(Marker(StaticStrings::Optional)) => Union::optional(key.clone_with_heap(vm), vm),
+            Self::Marker(Marker(StaticStrings::Literal)) => LiteralGenericAlias::subscript(key.clone_with_heap(vm), vm),
             Self::Builtin(Builtins::Type(t)) => {
                 Err(ExcType::type_error_type_not_subscriptable(&t.name(vm.heap, vm.interns)))
             }

@@ -167,6 +167,8 @@ macro_rules! heap_payloads {
             ContextVar(inline $crate::types::ContextVar),
             /// The `contextvars.Token` a `ContextVar.set()` handed back.
             ContextVarToken(inline $crate::types::ContextVarToken),
+            /// A `typing._LiteralGenericAlias` such as `Literal['a', 'b']`.
+            LiteralGenericAlias(inline $crate::types::LiteralGenericAlias),
         }
     };
 }
@@ -244,6 +246,7 @@ impl HeapData {
             | Self::ExternalFuture(_)
             | Self::Partial(_)
             | Self::GenericAlias(_)
+            | Self::LiteralGenericAlias(_)
             | Self::Union(_)
             // An alias's memoized `__value__` can reach back to the alias itself,
             // and a template holds arbitrary interpolated values.
@@ -303,6 +306,7 @@ impl HeapData {
                 | Self::ExtFunction(_)
                 | Self::Partial(_)
                 | Self::GenericAlias(_)
+                | Self::LiteralGenericAlias(_)
                 | Self::NamedTupleClass(_)
                 | Self::HostClassType(_)
         )
@@ -333,6 +337,7 @@ impl HeapData {
             Self::Template(_) => Type::Template,
             Self::Interpolation(_) => Type::Interpolation,
             Self::GenericAlias(_) => Type::GenericAlias,
+            Self::LiteralGenericAlias(_) => Type::LiteralGenericAlias,
             Self::Union(_) => Type::Union,
             Self::DictKeysView(_) => Type::DictKeys,
             Self::DictItemsView(_) => Type::DictItems,
@@ -656,6 +661,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Partial($value) => $body,
             Self::Random($value) => $body,
             Self::GenericAlias($value) => $body,
+            Self::LiteralGenericAlias($value) => $body,
             Self::Union($value) => $body,
             Self::Tuple($value) => $body,
             Self::NamedTuple($value) => $body,
@@ -1191,6 +1197,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             | Self::Partial(_)
             | Self::Random(_)
             | Self::GenericAlias(_)
+            | Self::LiteralGenericAlias(_)
             | Self::Union(_)
             | Self::Cell(_)
             | Self::Exception(_)

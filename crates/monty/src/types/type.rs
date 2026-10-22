@@ -299,6 +299,10 @@ pub enum Type {
     /// The running event loop, named as `asyncio`'s own loop classes are.
     #[strum(serialize = "EventLoop")]
     EventLoop,
+    /// `typing._LiteralGenericAlias`, the type of `Literal['a']`. CPython
+    /// defines it in Python, so its `__name__` is `'_LiteralGenericAlias'`.
+    #[strum(serialize = "typing._LiteralGenericAlias")]
+    LiteralGenericAlias,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

@@ -1381,6 +1381,9 @@ pub enum MontyType {
     /// The running event loop `asyncio.get_running_loop()` hands back.
     #[strum(serialize = "EventLoop")]
     EventLoop,
+    /// `typing._LiteralGenericAlias`, the type of `Literal['a']`.
+    #[strum(serialize = "typing._LiteralGenericAlias")]
+    LiteralGenericAlias,
 }
 
 impl fmt::Display for MontyType {

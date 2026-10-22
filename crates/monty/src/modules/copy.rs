@@ -186,10 +186,11 @@ fn shallow_copy(value: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
         | HeapReadOutput::HostClassType(_)
         | HeapReadOutput::Closure(_)
         | HeapReadOutput::FunctionDefaults(_)
-        // Type forms: `list[int]` and `int | None`. Nothing can mutate one, so
-        // sharing is visible only to `is` — CPython rebuilds them through
-        // `operator.getitem`, see `limitations/copy.md`.
+        // Type forms: `list[int]`, `Literal['a']` and `int | None`. Nothing can
+        // mutate one, so sharing is visible only to `is` — CPython rebuilds them
+        // through `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
+        | HeapReadOutput::LiteralGenericAlias(_)
         | HeapReadOutput::Union(_)
         // A PEP 695 alias is immutable apart from the `__value__` it memoizes
         // once, and CPython has no `__copy__` for one either. A template and
@@ -324,10 +325,11 @@ pub(crate) fn deep_copy(source: &Value, memo: &mut Memo, vm: &mut VM<'_>) -> Run
         // made under a globals dict, so a rebinding copy shares them too.
         | HeapReadOutput::NamedTupleClass(_)
         | HeapReadOutput::HostClassType(_)
-        // Type forms: `list[int]` and `int | None`. Nothing can mutate one, so
-        // sharing is visible only to `is` — CPython rebuilds them through
-        // `operator.getitem`, see `limitations/copy.md`.
+        // Type forms: `list[int]`, `Literal['a']` and `int | None`. Nothing can
+        // mutate one, so sharing is visible only to `is` — CPython rebuilds them
+        // through `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
+        | HeapReadOutput::LiteralGenericAlias(_)
         | HeapReadOutput::Union(_)
         | HeapReadOutput::TypeAliasType(_)
         | HeapReadOutput::Template(_)
