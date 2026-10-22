@@ -21,7 +21,7 @@ use std::{borrow::Cow, mem};
 pub(crate) use attr::PendingLookupEffect;
 pub(crate) use call::CallResult;
 pub(crate) use collections::unpack_exact;
-use monty_types::{InvalidInputError, MontyObject, MontyUuid, OsFunctionCall, PrintWriter};
+use monty_types::{InvalidInputError, MontyObject, MontyUuid, OsFunctionCall, PrintWriter, ResourceError};
 pub(crate) use namespace::{FrameNamespace, function_namespace};
 pub(crate) use recursion::{ContainsVM, RecursionToken, RunReentryGuard};
 use scheduler::Scheduler;
@@ -1290,7 +1290,10 @@ impl<'h> VM<'h> {
         // exceptions, so allocate-then-raise feeds must not evade the limits.
         // The uncatchable resource error out-ranks the turn's own error.
         match self.heap.tracker.check_memory_time() {
-            Ok(()) => result,
+            // A turn that reached the host or completed has no place left to
+            // raise the first excess, which its code could catch, so it ends
+            // as it came.
+            Ok(()) | Err(ResourceError::TurnTimeout { .. }) => result,
             Err(e) => {
                 if let Ok(value) = result {
                     value.drop_with(self);
@@ -1304,12 +1307,22 @@ impl<'h> VM<'h> {
     /// loop stays small: the amortized memory + time check — where a timeout
     /// swallowed by a truncating caller re-detects (elapsed time is
     /// monotonic), backstopped by the `run_external` exit check — the
-    /// GC-scheduling probe, and the print writer's flush poll.
+    /// GC-scheduling probe, and the print writer's flush poll. It gives the
+    /// first excess of the turn budget back to raise where the code stands, so
+    /// the handlers of the code run; every other error ends the loop.
     #[inline(never)]
-    fn dispatch_checkpoint(&mut self, check_limits: bool, poll_print: bool) -> Result<(), RunError> {
-        if check_limits {
-            self.heap.tracker.check_memory_time()?;
-        }
+    fn dispatch_checkpoint(&mut self, check_limits: bool, poll_print: bool) -> Result<Option<RunError>, RunError> {
+        let raised = if check_limits {
+            match self.heap.tracker.check_memory_time() {
+                Err(raised @ ResourceError::TurnTimeout { .. }) => Some(raised.into()),
+                checked => {
+                    checked?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if self.heap.should_gc() {
             self.run_gc();
         }
@@ -1319,7 +1332,7 @@ impl<'h> VM<'h> {
         if poll_print {
             self.print_writer.poll_flush()?;
         }
-        Ok(())
+        Ok(raised)
     }
 
     /// Main execution loop.
@@ -1368,7 +1381,9 @@ impl<'h> VM<'h> {
                 countdown = c;
             } else {
                 countdown = CHECK_INTERVAL;
-                self.dispatch_checkpoint(check_limits, poll_print)?;
+                if let Some(raised) = self.dispatch_checkpoint(check_limits, poll_print)? {
+                    catch!(self, raised);
+                }
             }
 
             // Track instruction IP for exception table lookup

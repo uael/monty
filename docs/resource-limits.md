@@ -137,6 +137,9 @@ Neither bounds how long a host callback itself may take: the clock is paused for
 to bound its own waiting wants `request_timeout`.
 
 Exceeding either raises `TimeoutError` in the sandbox.
+The first excess of `max_turn_duration_secs` in a turn is one the code can catch: its handlers run on a turn clock
+that restarts once, and a second excess in the same turn cannot be caught; see
+[time](limitations/resource_limits.md#time).
 The next feed resets both clocks, so the worker keeps serving the session — but a time limit stops the sandbox
 mid-operation, leaving no guarantees about its heap.
 Discard the session rather than feeding it again; see
@@ -153,6 +156,8 @@ Host-side deadlines cover that:
     any single timeout.
 - **A duration backstop per limit.** For each duration budget a session sets, the worker reports its consumed time on
     every protocol turn, and the host kills the worker a grace period after the budget expires.
+    The turn backstop allows twice `max_turn_duration_secs`, since the handlers of its first excess get a restarted
+    clock.
 
 The grace is what the sandbox gets to raise `TimeoutError` itself and keep the session alive; missing it costs the
 session, so set it well above how long a checkpoint may be away.

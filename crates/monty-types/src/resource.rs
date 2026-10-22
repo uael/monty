@@ -68,9 +68,11 @@ pub const LARGE_RESULT_THRESHOLD: usize = 100_000;
 /// This allows the sandbox to enforce strict limits on execution time
 /// and memory usage.
 ///
-/// All variants except `Recursion` are **uncatchable** inside the sandbox:
-/// untrusted code must never intercept resource enforcement. `Recursion`
-/// surfaces as a catchable `RecursionError`, matching CPython.
+/// All variants except `Recursion` and `TurnTimeout` are **uncatchable**
+/// inside the sandbox: untrusted code must never intercept resource
+/// enforcement, and code that catches a `TurnTimeout` and runs on meets the
+/// uncatchable `Time` of the same turn. `Recursion` surfaces as a catchable
+/// `RecursionError`, matching CPython.
 #[derive(Debug, Clone)]
 pub enum ResourceError {
     /// One of the two execution-time budgets was exceeded; `scope` says which.
@@ -79,6 +81,13 @@ pub enum ResourceError {
         limit: Duration,
         elapsed: Duration,
     },
+    /// The first excess of `max_turn_duration` in a turn, which the code may
+    /// catch: a `TimeoutError` raised where the code stands, so its `except`
+    /// and `finally` blocks restore its state. The turn clock restarts for
+    /// them, and a second excess in the same turn is `Time`, which ends the
+    /// run. The message holds no elapsed time, so a run that is made again
+    /// raises the same exception.
+    TurnTimeout { limit: Duration },
     /// Maximum memory usage exceeded.
     Memory { limit: usize, used: usize },
     /// Maximum recursion depth exceeded.
@@ -115,6 +124,7 @@ impl fmt::Display for ResourceError {
             Self::Time { scope, limit, elapsed } => {
                 write!(f, "{}time limit exceeded: {elapsed:?} > {limit:?}", scope.prefix())
             }
+            Self::TurnTimeout { limit } => write!(f, "turn time limit exceeded: {limit:?}"),
             Self::Memory { limit, used } => {
                 write!(f, "memory limit exceeded: {used} bytes > {limit} bytes")
             }
@@ -149,7 +159,9 @@ pub struct ResourceLimits {
     pub max_feed_duration: Option<Duration>,
     /// Maximum execution time for a single host turn, reset at each feed and
     /// each resume. Bounds the stretch of sandbox code between two host round
-    /// trips, so a host can bound its own response time per call.
+    /// trips, so a host can bound its own response time per call. Its first
+    /// excess in a turn raises a `TimeoutError` that the code may catch, and
+    /// its second ends the run; see [`ResourceError::TurnTimeout`].
     ///
     /// Defaulted on deserialization like
     /// [`max_feed_duration`](Self::max_feed_duration).
@@ -287,6 +299,10 @@ pub struct ResourceTracker {
     /// loads it starts a fresh turn.
     #[serde(skip)]
     turn_execution_time: Cell<Duration>,
+    /// Whether this turn raised its catchable [`ResourceError::TurnTimeout`]
+    /// already, so its next excess ends the run. Reset with the turn clock.
+    #[serde(skip)]
+    turn_raised: Cell<bool>,
     /// When the current execution window started; `None` while suspended or
     /// idle. Never serialized — a snapshot is by definition taken while not
     /// executing.
@@ -332,6 +348,7 @@ impl ResourceTracker {
             total_execution_time: Cell::new(Duration::ZERO),
             feed_execution_time: Cell::new(Duration::ZERO),
             turn_execution_time: Cell::new(Duration::ZERO),
+            turn_raised: Cell::new(false),
             running_since: Cell::new(None),
             recursion_limit_override: Cell::new(None),
         }
@@ -488,7 +505,9 @@ impl ResourceTracker {
     /// Called periodically to check both execution-time budgets.
     ///
     /// Each clock is monotonic within its scope, so once a budget is exceeded
-    /// every later call in that scope fails too. The feed budget is tested
+    /// every later call in that scope fails too, but for the first excess of
+    /// the turn budget: it is the catchable [`ResourceError::TurnTimeout`],
+    /// and the turn clock restarts once for its handlers. The feed budget is tested
     /// first, since it is the one a new turn cannot recover from.
     #[inline]
     pub fn check_time(&self) -> Result<(), ResourceError> {
@@ -502,13 +521,32 @@ impl ResourceTracker {
             self.limits.max_feed_duration,
             self.feed_execution_time.get() + running,
         )
-        .and_then(|()| {
-            check_budget(
-                TimeLimitScope::Turn,
-                self.limits.max_turn_duration,
-                self.turn_execution_time.get() + running,
-            )
+        .and_then(|()| match self.limits.max_turn_duration {
+            Some(limit) if self.turn_execution_time.get() + running > limit => {
+                let elapsed = self.turn_execution_time.get() + running;
+                if self.turn_raised.replace(true) {
+                    Err(ResourceError::Time {
+                        scope: TimeLimitScope::Turn,
+                        limit,
+                        elapsed,
+                    })
+                } else {
+                    self.restart_turn_clock();
+                    Err(ResourceError::TurnTimeout { limit })
+                }
+            }
+            _ => Ok(()),
         })
+    }
+
+    /// Starts the turn clock again in the middle of an execution window, so
+    /// the handlers of a `TurnTimeout` run on a whole budget of their own.
+    fn restart_turn_clock(&self) {
+        if self.running_since.get().is_some() {
+            self.on_execution_stop();
+            self.on_execution_start();
+        }
+        self.turn_execution_time.set(Duration::ZERO);
     }
 
     /// Items processed between full checks in amortized per-item Rust loops
@@ -695,6 +733,7 @@ impl ResourceTracker {
     /// future, a task switch) stay inside the turn that started them.
     pub fn on_turn_start(&self) {
         self.turn_execution_time.set(Duration::ZERO);
+        self.turn_raised.set(false);
     }
 
     /// Performs a standard-execution sleep without charging `max_feed_duration`.

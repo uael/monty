@@ -1807,6 +1807,100 @@ fn max_turn_duration_is_enforced_alone() {
     );
 }
 
+/// The first excess of the turn budget is a `TimeoutError` that the code can
+/// catch, raised where the code stands, so its `finally` and `except` blocks
+/// run on a turn clock that starts again. Its message holds no elapsed time.
+#[test]
+fn first_turn_excess_is_catchable() {
+    let limits = ResourceLimits::default().max_turn_duration(Duration::from_millis(50));
+    let mut repl = MontyRepl::new("test.py", ResourceTracker::new(limits), CompileOptions::default());
+    let code = "
+ran = []
+try:
+    try:
+        while True:
+            pass
+    finally:
+        ran.append('finally')
+except TimeoutError as e:
+    ran.append(str(e))
+ran
+";
+    let got = repl
+        .feed_run(code, vec![], PrintWriter::Stdout)
+        .expect("the code catches the first excess");
+    assert_eq!(
+        got,
+        MontyObject::list([
+            MontyObject::string("finally".to_owned()),
+            MontyObject::string("turn time limit exceeded: 50ms".to_owned()),
+        ])
+    );
+}
+
+/// Code that catches the first excess and runs on meets the second excess of
+/// the same turn, which it cannot catch, and which ends the run.
+#[test]
+fn second_turn_excess_ends_the_run() {
+    let limits = ResourceLimits::default().max_turn_duration(Duration::from_millis(50));
+    let mut repl = MontyRepl::new("test.py", ResourceTracker::new(limits), CompileOptions::default());
+    let code = "
+while True:
+    try:
+        while True:
+            pass
+    except TimeoutError:
+        pass
+";
+    let exc = repl
+        .feed_run(code, vec![], PrintWriter::Stdout)
+        .expect_err("the second excess ends the run");
+    assert_eq!(exc.exc_type(), ExcType::TimeoutError);
+    let message = exc.message().unwrap_or_default();
+    assert!(
+        message.starts_with("turn time limit exceeded: ") && message.ends_with(" > 50ms"),
+        "the second excess is the terminal one, got {exc}"
+    );
+}
+
+/// Each turn may catch its own first excess: a resume starts the turn clock
+/// and the catchable excess again.
+#[test]
+fn each_turn_catches_its_first_excess() {
+    // `interrupt` is resolved once, so the drive loop below is resumes only.
+    let code = "
+pause = interrupt
+caught = []
+for _ in range(2):
+    try:
+        while True:
+            pass
+    except TimeoutError as e:
+        caught.append(str(e))
+    pause()
+caught
+";
+    let run = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let limits = ResourceLimits::default().max_turn_duration(Duration::from_millis(50));
+    let mut progress = resolve_name_lookups(
+        run.start(vec![], ResourceTracker::new(limits), PrintWriter::Stdout)
+            .unwrap(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        progress = progress
+            .into_function_call()
+            .expect("each turn catches its excess and suspends")
+            .resume(MontyObject::none(), PrintWriter::Stdout)
+            .unwrap();
+    }
+    let caught = MontyObject::string("turn time limit exceeded: 50ms".to_owned());
+    assert_eq!(
+        progress.into_complete(),
+        Some(MontyObject::list([caught.clone(), caught]))
+    );
+}
+
 /// `call_function` is its own unit of work: it opens a fresh feed, so a
 /// session that has already spent one still gets the full per-feed budget.
 ///
