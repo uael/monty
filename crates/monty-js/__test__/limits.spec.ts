@@ -153,7 +153,9 @@ test('turn duration limit', async () => {
   await using session = await pool().checkout({ limits: { maxTurnDurationSecs: 0.1 } })
   const error = await t.throwsAsync(() => session.feedRun('while True:\n    pass\n'), isRuntimeError)
   t.is(error.exception.typeName, 'TimeoutError')
-  t.regex(error.display('msg'), /^turn time limit exceeded: \d+(\.\d+)?ms > 100ms$/)
+  // The first excess of the turn budget is a TimeoutError that code can catch, and its message holds no
+  // elapsed time. Nothing catches it here, so it ends the feed, and the session stays usable.
+  t.is(error.display('msg'), 'turn time limit exceeded: 100ms')
   t.is(await session.feedRun('2 + 2'), 4)
 })
 
@@ -245,8 +247,8 @@ test('a suspension answering abort-feed ends the wasm worker', async () => {
 })
 
 test.each([
-  { feedGrace: 100, turnGrace: 200, initial: 1000, resumed: 700, loaded: 2100 },
-  { feedGrace: null, turnGrace: 200, initial: 1000, resumed: 1000, loaded: 3200 },
+  { feedGrace: 100, turnGrace: 200, initial: 1100, resumed: 700, loaded: 2100 },
+  { feedGrace: null, turnGrace: 200, initial: 1800, resumed: 1800, loaded: 6200 },
   { feedGrace: 100, turnGrace: null, initial: 1100, resumed: 700, loaded: 2100 },
   { feedGrace: null, turnGrace: null, initial: undefined, resumed: undefined, loaded: undefined },
 ])(

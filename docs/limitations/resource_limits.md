@@ -3,7 +3,8 @@
 Monty limits memory, time, sleep and recursion, while the host limits suspension
 events. Exceeding the memory, time, or suspension limit returns `MemoryError`,
 `TimeoutError`, or `RuntimeError`, respectively; sandboxed code cannot catch
-these exceptions. `RecursionError` is catchable, as in CPython.
+these exceptions, but for the first excess of `max_turn_duration` in a turn
+(see [Time](#time)). `RecursionError` is catchable, as in CPython.
 
 ## Compilation
 
@@ -229,6 +230,13 @@ indistinguishable from a stack overflow.
     inside the sandbox bounds what a session costs over its lifetime.
 - When one checkpoint blows both budgets, the feed one is reported. The message
     names the scope — `feed time limit exceeded`, `turn time limit exceeded`.
+- The first excess of `max_turn_duration` in a turn raises a `TimeoutError` that
+    the code can catch, where the code stands: `turn time limit exceeded: <limit>`,
+    with no elapsed time, so a run made again raises the same exception. The turn
+    clock restarts once for its `except` and `finally` blocks, and a second excess
+    in the same turn raises the uncatchable
+    `turn time limit exceeded: <elapsed> > <limit>`. An operation that swallows the
+    first excess, as `repr` does when it truncates with `...[timeout]`, spends it.
 - Enforcement is polled, not preemptive: a single bytecode instruction may
     run a long native operation (a `bytes` substring scan, a sort, an iterator
     drain), and those poll the clock at a coarse granularity. A run can
@@ -251,7 +259,9 @@ indistinguishable from a stack overflow.
     its result. Two consequences: a turn whose Python code raised an exception
     reports the resource error instead of that exception, and an operation
     that swallows a timeout internally (`repr` truncating with `...[timeout]`)
-    still fails the turn that contained it.
+    still fails the turn that contained it. The first excess of the turn budget
+    is not re-checked so: a turn that reaches the host or completes before a
+    checkpoint sees it ends as it came.
 - `bytes` operations that search for a sub-sequence (`in` with a bytes-like
     probe, `find`, `count`, `split`, `partition`, `replace` and their
     variants) poll the clock every 64KiB, or every two lengths of the
@@ -310,4 +320,5 @@ A worker remains responsive after a soft memory or time limit and its session
 can receive another feed, but execution is not transactional and no guarantees
 are made about heap state or reference counts. Hosts should discard the session;
 the worker itself remains reusable. A caught `RecursionError` may continue
-normally inside the sandbox.
+normally inside the sandbox, and so may a caught first excess of
+`max_turn_duration`, which unwinds as any exception does.

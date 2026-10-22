@@ -23,7 +23,7 @@ pub(crate) use attr::PendingLookupEffect;
 pub(crate) use call::CallResult;
 pub(crate) use collections::unpack_exact;
 use exceptions::CaughtException;
-use monty_types::{InvalidInputError, MontyObject, MontyUuid, OsFunctionCall, PrintWriter, SourceRange};
+use monty_types::{InvalidInputError, MontyObject, MontyUuid, OsFunctionCall, PrintWriter, ResourceError, SourceRange};
 pub(crate) use namespace::{FrameNamespace, function_namespace};
 use recursion::frame_recursion_depth;
 pub(crate) use recursion::{ContainsVM, RecursionToken, RunReentryGuard};
@@ -1142,7 +1142,10 @@ impl<'h> VM<'h> {
         // exceptions, so allocate-then-raise feeds must not evade the limits.
         // The uncatchable resource error out-ranks the turn's own error.
         match self.heap.tracker.check_memory_time() {
-            Ok(()) => result,
+            // A turn that reached the host or completed has no place left to
+            // raise the first excess, which its code could catch, so it ends
+            // as it came.
+            Ok(()) | Err(ResourceError::TurnTimeout { .. }) => result,
             Err(e) => {
                 if let Ok(value) = result {
                     value.drop_with(self);
@@ -1210,7 +1213,9 @@ impl<'h> VM<'h> {
     /// loop stays small: the amortized memory + time check — where a timeout
     /// swallowed by a truncating caller re-detects (elapsed time is
     /// monotonic), backstopped by the `run_external` exit check — the
-    /// GC-scheduling probe, and the print writer's flush poll.
+    /// GC-scheduling probe, and the print writer's flush poll. Its error goes
+    /// to the handlers of the code, so the first excess of the turn budget,
+    /// which is catchable, raises where the code stands.
     #[inline(never)]
     fn dispatch_checkpoint(&mut self, check_limits: bool, poll_print: bool) -> Result<(), RunError> {
         if check_limits {
