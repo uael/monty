@@ -173,3 +173,36 @@ assert next(loop) == 0
 assert next(loop) == 1
 assert loop.close() is None
 assert seen == [0, 1]
+
+
+# === throw() binds the object it was given, not one rebuilt from it ===
+def catcher():
+    try:
+        yield 1
+    except ValueError as exc:
+        yield exc
+
+
+thrown = ValueError('why')
+c = catcher()
+assert next(c) == 1
+assert c.throw(thrown) is thrown
+
+# one that never started raises the same object where it was asked
+unstarted = catcher()
+early = KeyError('early')
+try:
+    unstarted.throw(early)
+    raise AssertionError('expected KeyError')
+except KeyError as exc:
+    assert exc is early
+
+# and so does one that is over
+over = catcher()
+assert list(over) == [1]
+gone = ValueError('gone')
+try:
+    over.throw(gone)
+    raise AssertionError('expected ValueError')
+except ValueError as exc:
+    assert exc is gone

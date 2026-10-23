@@ -11,13 +11,6 @@ fn get_parse_err(code: impl Into<String>) -> MontyException {
 }
 
 #[test]
-fn yield_from_expressions_return_not_implemented_error() {
-    let err = get_parse_err("def foo():\n    yield from [1]");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support yield from expressions");
-}
-
-#[test]
 fn repeated_class_keyword_returns_syntax_error() {
     // CPython reports the repeat before considering the metaclass.
     let err = get_parse_err("class C(metaclass=type, metaclass=type):\n    pass");

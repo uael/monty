@@ -40,14 +40,13 @@ They exist for development and for agents debugging code that runs on Monty; mos
     see [modules.md](modules.md#host-modules)
 - Starred unpacking everywhere CPython allows it
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)
-- Generators: `def` with `yield`, and the `send` / `close` / `throw` surface, see
+- Generators: `def` with `yield`, `yield from`, and the `send` / `close` / `throw` surface, see
     [generators.md](generators.md). Generator *expressions* parse, but currently materialise to a `list`
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
 
 - Class inheritance and metaclasses (`class Foo(Bar):`)
 - Decorators on methods — so no `@classmethod`, `@staticmethod`, `@property`
-- `yield from`
 - `del`, both `del x` and `del d[k]`
 - `try*` / `except*` exception groups
 - PEP 695 `type` aliases

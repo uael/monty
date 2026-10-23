@@ -410,8 +410,12 @@ impl VM<'_> {
                 };
                 this.exception_stack.push(caught);
 
-                // Jump to handler
-                this.current_frame_mut().ip = handler_offset;
+                // Jump to handler. From here the frame is out of any
+                // `yield from` it was waiting on, since the handler stands
+                // where the delegation loop no longer does.
+                let frame = this.current_frame_mut();
+                frame.ip = handler_offset;
+                frame.delegating = None;
 
                 return ExceptionHandlingResult::Caught;
             }

@@ -1130,77 +1130,77 @@ fn deep_copy_of_a_near_limit_dict_raises_rather_than_dying() {
 fn large_allocations_are_rejected_before_the_hard_limit() {
     // each case with the allocator usage it should be refused at
     let cases = [
-        ("'x' * 10_000_000", 10_042_753),
+        ("'x' * 10_000_000", 10_043_393),
         // Each formatter builder must fail softly before the worker reaches its hard ceiling.
-        ("s = 'x' * 400_000\n'{0}{0}'.format(s)", 1_243_187),
-        ("s = 'x' * 400_000\n'{0:>1000000}'.format(s)", 1_443_219),
-        ("s = 'é' * 200_000\n'{0!a}'.format(s)", 1_243_224),
+        ("s = 'x' * 400_000\n'{0}{0}'.format(s)", 1_243_827),
+        ("s = 'x' * 400_000\n'{0:>1000000}'.format(s)", 1_443_859),
+        ("s = 'é' * 200_000\n'{0!a}'.format(s)", 1_243_864),
         // `%` formatting: padding, float digits, integer zero-extension and output growth.
-        ("'%*d' % (2_000_000, 1)", 2_042_913),
-        ("'%.*f' % (1_000_000, 1.0)", 1_171_952),
-        ("'%.*d' % (2_000_000, 1)", 2_042_917),
-        ("s = 'x' * 400_000\n'%s%s' % (s, s)", 1_643_370),
-        ("b'%*d' % (2_000_000, 1)", 2_051_135),
-        ("s = b'x' * 400_000\nb'%s%s' % (s, s)", 1_651_593),
-        ("b'x' * 10_000_000", 10_050_987),
-        ("[None] * 1_000_000", 16_042_915),
-        ("2 ** 10_000_000", 10_042_752),
-        ("1 << 10_000_000", 1_292_753),
+        ("'%*d' % (2_000_000, 1)", 2_043_553),
+        ("'%.*f' % (1_000_000, 1.0)", 1_172_592),
+        ("'%.*d' % (2_000_000, 1)", 2_043_557),
+        ("s = 'x' * 400_000\n'%s%s' % (s, s)", 1_644_010),
+        ("b'%*d' % (2_000_000, 1)", 2_051_775),
+        ("s = b'x' * 400_000\nb'%s%s' % (s, s)", 1_652_233),
+        ("b'x' * 10_000_000", 10_051_627),
+        ("[None] * 1_000_000", 16_043_555),
+        ("2 ** 10_000_000", 10_043_392),
+        ("1 << 10_000_000", 1_293_393),
         // `int / int` scales one operand before dividing; both shift directions are
         // preflighted.
-        ("x = 1 << 3_000_000\nx / (x - 1)", 1_543_378),
-        ("x = 1 << 3_000_000\nx / (x >> 100)", 1_543_361),
+        ("x = 1 << 3_000_000\nx / (x - 1)", 1_544_018),
+        ("x = 1 << 3_000_000\nx / (x >> 100)", 1_544_001),
         // `math.factorial`, `comb` and `perm` preflight their product's size.
-        ("import math\nmath.factorial(2_000_000)", 10_547_954),
+        ("import math\nmath.factorial(2_000_000)", 10_548_594),
         // A binomial is bounded by `2**n`, so `comb` needs a larger `n` to trip the check.
-        ("import math\nmath.comb(9_000_000, 4_500_000)", 2_297_968),
-        ("import math\nmath.perm(4_000_000, 2_000_000)", 11_047_968),
+        ("import math\nmath.comb(9_000_000, 4_500_000)", 2_298_608),
+        ("import math\nmath.perm(4_000_000, 2_000_000)", 11_048_608),
         // `math.lcm` of two large coprime ints is a product, preflighted like `*`.
-        ("import math\nx = 1 << 2_000_000\nmath.lcm(x + 1, x - 1)", 1_298_315),
-        ("('a' * 1000).replace('a', 'b' * 2000)", 2_046_303),
+        ("import math\nx = 1 << 2_000_000\nmath.lcm(x + 1, x - 1)", 1_298_955),
+        ("('a' * 1000).replace('a', 'b' * 2000)", 2_046_943),
         // Every `%Z` copies the zone name into a `StringBuilder`, refused at a
         // capacity doubling like the formatter cases above: fixed-size pushes
         // make that step deterministic.
         (
             "from datetime import datetime, timezone, timedelta\ntz = timezone(timedelta(0), 'n' * 100_000)\ndatetime(2024, 1, 1, tzinfo=tz).strftime('%Z' * 5_000)",
-            1_254_473,
+            1_255_113,
         ),
         // Bulk container clones: `+=` preflights the temp clone plus the target
         // growth, `+` preflights each side's clone.
-        ("x = [None] * 40_000\nx += x", 1_963_375),
-        ("t = (None,) * 40_000\nt + t", 1_323_375),
-        ("x = [None] * 40_000\nx.copy()", 1_323_121),
+        ("x = [None] * 40_000\nx += x", 1_964_015),
+        ("t = (None,) * 40_000\nt + t", 1_324_015),
+        ("x = [None] * 40_000\nx.copy()", 1_323_761),
         // `dict | dict` snapshots the left pairs and builds the merged dict
         // while that snapshot is live, so both are preflighted together.
-        ("d = dict.fromkeys(range(12_000))\nd | {}", 1_806_238),
+        ("d = dict.fromkeys(range(12_000))\nd | {}", 1_806_878),
         // The right operand is snapshotted inside the same call, so that copy is
         // preflighted too. Only the copy: see the overlap test below.
-        ("d = dict.fromkeys(range(12_000))\n{} | d", 1_230_238),
+        ("d = dict.fromkeys(range(12_000))\n{} | d", 1_230_878),
         // A partial re-clones its bound arguments on every call, so that clone
         // is preflighted like any other bulk container copy.
         (
             "import functools\ndef f(*a):\n    return 0\np = functools.partial(f, *range(20_000))\njunk = [None] * 40_000\np()",
-            1_327_247,
+            1_327_887,
         ),
         // Reading `p.args` / `p.keywords` rebuilds them in full, so both are
         // preflighted like any other bulk container copy.
         (
             "import functools\ndef f(*a):\n    return 0\np = functools.partial(f, *range(20_000))\njunk = [0] * 40_000\np.args",
-            1_327_247,
+            1_327_887,
         ),
         (
             "import functools\ndef f(**k):\n    return 0\np = functools.partial(f, **{str(i): i for i in range(6_000)})\njunk = [0] * 30_000\np.keywords",
-            1_056_427,
+            1_057_067,
         ),
         // `deque.extend` preflights exact-hint iterators up front.
         (
             "from collections import deque\nd = deque()\nd.extend(range(1_000_000))",
-            16_043_499,
+            16_044_139,
         ),
         // The json encoder preflights each doubling of its output buffer.
-        ("import json\njson.dumps(['x' * 1000] * 2000)", 1_167_524),
+        ("import json\njson.dumps(['x' * 1000] * 2000)", 1_168_164),
         // `randbytes` charges its word buffer and the byte buffer it fills.
-        ("import random\nrandom.seed(0)\nrandom.randbytes(600_000)", 1_248_019),
+        ("import random\nrandom.seed(0)\nrandom.randbytes(600_000)", 1_248_659),
         // A `range` population can be as long as `i64::MAX` while costing nothing,
         // so `sample` must saturate its size arithmetic and refuse the pick buffer.
         (
@@ -1210,45 +1210,45 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
         // `itertools.batched` preflights one batch, capped at `n`.
         (
             "import itertools\nnext(itertools.batched(range(1_000_000), 1_000_000))",
-            16_045_604,
+            16_046_244,
         ),
         // The two combinatoric iterators whose width is not bounded by their
         // pool preflight that width: `r` repeats of a one-item pool, and
         // `repeat` copies of the argument list.
         (
             "import itertools\nnext(itertools.combinations_with_replacement('a', 1_000_000))",
-            24_045_419,
+            24_046_059,
         ),
         (
             "import itertools\nnext(itertools.product('ab', repeat=1_000_000))",
-            24_045_481,
+            24_046_121,
         ),
         // A SHAKE digest preflights its output; `hexdigest` also counts the raw
         // digest it keeps live while encoding, so a length whose hex alone
         // would fit is still refused.
-        ("import hashlib\nhashlib.shake_128().digest(2_000_000)", 2_046_399),
-        ("import hashlib\nhashlib.shake_128().hexdigest(400_000)", 1_246_400),
+        ("import hashlib\nhashlib.shake_128().digest(2_000_000)", 2_047_039),
+        ("import hashlib\nhashlib.shake_128().hexdigest(400_000)", 1_247_040),
         // A csv record copies its fields' text into the line, refused at a capacity
         // doubling like the formatter cases above.
         (
             "import csv\nclass S:\n    def write(self, t):\n        pass\ns = 'x' * 400_000\ncsv.writer(S()).writerow([s, s])",
-            1_251_329,
+            1_251_969,
         ),
         // A `DictReader` row's dict is sized from `fieldnames` up front, preflighted like a
         // dict copy.
         (
             "import csv\nnames = list(range(30_000))\nnext(csv.DictReader(['x'], fieldnames=names))",
-            1_966_160,
+            1_966_800,
         ),
         // A list `fieldnames` is copied per row, and the keys of a row dict are copied for
         // the `extrasaction='raise'` check: both bulk copies are preflighted.
         (
             "import csv\nclass S:\n    def write(self, t):\n        pass\nnames = [None] * 40_000\ncsv.DictWriter(S(), names).writerow({})",
-            1_331_513,
+            1_332_153,
         ),
         (
             "import csv\nclass S:\n    def write(self, t):\n        pass\nrow = {i: None for i in range(10_000)}\ncsv.DictWriter(S(), []).writerow(row)",
-            1_079_912,
+            1_080_552,
         ),
     ];
 
@@ -1286,7 +1286,7 @@ fn dict_writer_rows_are_rejected_before_the_hard_limit() {
     let error = expect_error(event);
     assert_eq!(error.exc_type, "MemoryError", "{code}");
     let message = error.message.expect("MemoryError should have a message");
-    assert_reported_usage(&message, 1_207_205, code);
+    assert_reported_usage(&message, 1_207_245, code);
     assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
     child.shutdown();
 }
@@ -1308,7 +1308,7 @@ fn expandvars_growth_is_rejected_before_the_hard_limit() {
     let error = expect_error(event);
     assert_eq!(error.exc_type, "MemoryError", "{code}");
     let message = error.message.expect("MemoryError should have a message");
-    assert_reported_usage(&message, 1_370_976, code);
+    assert_reported_usage(&message, 1_371_016, code);
     assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
     child.shutdown();
 }
@@ -1523,7 +1523,7 @@ fn iterdir_joins_are_preflighted() {
     let error = expect_error(event);
     assert_eq!(error.exc_type, "MemoryError");
     let message = error.message.expect("MemoryError should have a message");
-    assert_reported_usage(&message, 2_245_125, code);
+    assert_reported_usage(&message, 2_245_165, code);
     assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
     child.shutdown();
 }
