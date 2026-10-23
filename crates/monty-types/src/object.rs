@@ -1406,6 +1406,12 @@ pub enum MontyType {
     /// The wrapper `functools.lru_cache` / `functools.cache` returns.
     #[strum(serialize = "functools._lru_cache_wrapper")]
     LruCacheWrapper,
+    /// `contextvars.ContextVar`, named as CPython's C module names it.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// `contextvars.Token`, what `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
 }
 
 impl fmt::Display for MontyType {

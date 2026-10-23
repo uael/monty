@@ -18,8 +18,8 @@ use crate::{
     },
     py_value::PyValue,
     types::{
-        Bytes, Deque, Dict, FrozenSet, GenericAlias, List, LongInt, Partial, Path, PyTrait, Random, Range, Set, Slice,
-        Str, TimeZone, Tuple,
+        Bytes, ContextVar, Deque, Dict, FrozenSet, GenericAlias, List, LongInt, Partial, Path, PyTrait, Random, Range,
+        Set, Slice, Str, TimeZone, Tuple,
         bytes::{bytes_fromhex, bytes_repr},
         complex, date, datetime,
         dict::{DictKind, dict_fromkeys},
@@ -325,6 +325,12 @@ pub enum Type {
     /// A resolved `csv` dialect, CPython's `_csv.Dialect`.
     #[strum(serialize = "_csv.Dialect")]
     CsvDialect,
+    /// `contextvars.ContextVar`, qualified as CPython's C module names it.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// `contextvars.Token`, what `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -479,6 +485,8 @@ impl Type {
                 // The one `itertools` type CPython gives a
                 // `__class_getitem__`; the rest reject a subscript.
                 | Self::ItertoolsChain
+                | Self::ContextVar
+                | Self::ContextVarToken
         )
     }
 
@@ -869,6 +877,14 @@ impl Type {
                 };
                 defer_drop!(v, vm);
                 Ok(Value::Bool(v.py_bool(vm)?))
+            }
+
+            Self::ContextVar => ContextVar::init(vm, args),
+
+            // CPython gives `Token` no constructor of its own.
+            Self::ContextVarToken => {
+                args.drop_with(vm);
+                Err(SimpleException::new_msg(ExcType::RuntimeError, "Tokens can only be created by ContextVars").into())
             }
 
             // CPython words this one differently from the other uncallable types.

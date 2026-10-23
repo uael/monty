@@ -197,6 +197,7 @@ pub const SANDBOX_MODULE_NAMES: &[&str] = &[
     "binascii",
     "bisect",
     "collections",
+    "contextvars",
     "copy",
     "csv",
     "dataclasses",

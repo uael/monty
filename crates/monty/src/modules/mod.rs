@@ -19,6 +19,7 @@ pub(crate) mod base64;
 pub(crate) mod binascii;
 pub(crate) mod bisect;
 pub(crate) mod collections;
+pub(crate) mod contextvars;
 pub(crate) mod copy;
 pub(crate) mod csv;
 pub(crate) mod dataclasses;
@@ -98,6 +99,8 @@ pub(crate) enum StandardLib {
     Csv,
     /// The `tomllib` module: `loads()`, `load()` and `TOMLDecodeError`.
     Tomllib,
+    /// The `contextvars` module exposing `ContextVar` and its `Token`.
+    Contextvars,
     /// The `gc` module exposing a single `collect()` for tests. Only present
     /// under the `test-hooks` feature so production sandboxes never see it.
     ///
@@ -133,6 +136,7 @@ impl StandardLib {
             StaticStrings::Bisect => Some(Self::Bisect),
             StaticStrings::Csv => Some(Self::Csv),
             StaticStrings::Tomllib => Some(Self::Tomllib),
+            StaticStrings::Contextvars => Some(Self::Contextvars),
             #[cfg(feature = "test-hooks")]
             StaticStrings::Gc => Some(Self::Gc),
             _ => None,
@@ -174,6 +178,7 @@ impl StandardLib {
             Self::Bisect => bisect::create_module(vm),
             Self::Csv => csv::create_module(vm),
             Self::Tomllib => tomllib::create_module(vm),
+            Self::Contextvars => contextvars::create_module(vm),
             #[cfg(feature = "test-hooks")]
             Self::Gc => gc::create_module(vm),
         }
