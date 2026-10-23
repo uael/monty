@@ -225,6 +225,37 @@ assert l2['r'] is l2
 assert eval('locals()', {'p': 1})['p'] == 1
 
 
+# === globals() ===
+gx = 10
+
+
+def read_gx():
+    return globals()['gx']
+
+
+assert read_gx() == 10
+assert globals()['gx'] == 10
+assert globals()['read_gx'] is read_gx
+assert globals().get('never_bound') is None
+
+g3 = {}
+exec('r = globals()', g3)
+assert g3['r'] is g3
+assert eval('globals()', {'p': 1})['p'] == 1
+g4, l4 = {}, {'q': 2}
+exec('r = globals()', g4, l4)
+assert l4['r'] is g4
+g5 = {}
+exec('def f():\n    return globals()', g5)
+assert g5['f']() is g5
+
+try:
+    globals()[1]
+    assert False, 'expected a KeyError'
+except KeyError:
+    pass
+
+
 # === Captures passed through to nested closures are still function locals ===
 def passthrough_locals():
     first, second = 41, 1

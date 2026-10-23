@@ -1,4 +1,4 @@
-# eval(), exec() and locals()
+# eval(), exec(), globals() and locals()
 
 `eval(source, /, globals=None, locals=None)` and `exec(source, /, globals=None, locals=None, *, closure=None)` compile
 `source` when called and run it in the namespace CPython would: the module globals for a call at module scope, a
@@ -40,10 +40,19 @@ The snippet can call host functions and raise into the caller; top-level `await`
 - Frames of snippet code appear in tracebacks as `File "<string>", line N, in <module>` with no source line, as in
     CPython.
 
+## globals()
+
+- Outside an `exec()` / `eval()` globals dict, `globals()` returns a fresh `dict` of the bound module globals, not the
+    module namespace itself: writes to it are not reflected, a name bound after the call is absent,
+    `globals() is globals()` is `False`, and the module-level dunders are absent.
+    Module globals are slots rather than a dict, so there is no namespace object to hand back.
+- At module scope `globals() is locals()` is `False`, where CPython returns the one module namespace for both.
+- Inside a snippet, and in a function a snippet defines, `globals()` is the snippet's `globals` dict itself, as in
+    CPython: writes through it are seen by everything that shares it.
+
 ## locals()
 
-- At module scope `locals()` returns a fresh `dict` of the bound module globals, not the module namespace itself:
-    writes to it are not reflected, `locals() is locals()` is `False`, and the module-level dunders are absent.
+- At module scope `locals()` returns the same snapshot `globals()` does, not the module namespace itself.
 - Inside a function it is a snapshot of the named locals, with captured variables read through their cells, as in
     CPython 3.13 and later.
     A function with both `*args` and keyword-only parameters lists `*args` before the keyword-only parameters; CPython
