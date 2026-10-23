@@ -56,6 +56,10 @@ jobs:
   benchmarks:
     name: Run benchmarks (${{ matrix.mode }})
     needs: [build-worker]
+    # Only pydantic/monty has a CodSpeed project and its macro runner. A fork gets a 401 at the upload and waits
+    # for the runner with no end, so it skips this job. The job bench-test of ci.yml still runs the main
+    # benchmarks once each as a test there.
+    if: github.repository == 'pydantic/monty'
     strategy:
       fail-fast: false
       matrix:
