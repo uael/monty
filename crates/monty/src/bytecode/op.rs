@@ -598,6 +598,10 @@ pub enum Opcode {
     /// becomes `[v, a, b, c]`. Operand: u8 n. The inverse of `LiftToTop`; the
     /// pattern compiler uses it to park a capture under the pattern's temporaries.
     SinkTop = 129,
+
+    /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
+    /// `__value__` read. Operand: u16 name_id (the alias's `__name__`).
+    MakeTypeAlias = 130,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -745,7 +749,8 @@ impl Opcode {
             | Self::StoreAttr
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
-            | Self::MethodDictMerge => OperandShape::U16,
+            | Self::MethodDictMerge
+            | Self::MakeTypeAlias => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
             | Self::JumpIfFalse
@@ -1013,6 +1018,8 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
+            // The thunk is replaced in place by the alias object.
+            (MakeTypeAlias, Operand::U16(_)) => 0,
             // `DictMerge` takes a u16 operand carrying the func_name_id for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under

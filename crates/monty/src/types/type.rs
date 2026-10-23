@@ -325,6 +325,9 @@ pub enum Type {
     /// A resolved `csv` dialect, CPython's `_csv.Dialect`.
     #[strum(serialize = "_csv.Dialect")]
     CsvDialect,
+    /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
+    #[strum(serialize = "typing.TypeAliasType")]
+    TypeAliasType,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
