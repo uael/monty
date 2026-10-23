@@ -690,6 +690,8 @@ pub enum StaticStrings {
     BlockSize,
     /// Kwarg name `buffering` — `open(buffering=...)`.
     Buffering,
+    /// The `builtins` module name.
+    Builtins,
     /// `sys.builtin_module_names` attribute.
     BuiltinModuleNames,
     /// `sys.byteorder` attribute.

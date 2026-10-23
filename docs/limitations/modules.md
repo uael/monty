@@ -23,6 +23,7 @@ in the next feed, and after a dump (see [random.md](random.md)).
 | `base64`      | [base64.md](base64.md)           |
 | `binascii`    | [base64.md](base64.md)           |
 | `bisect`      | [bisect.md](bisect.md)           |
+| `builtins`    | [builtins.md](builtins.md)       |
 | `collections` | [collections.md](collections.md) |
 | `copy`        | [copy.md](copy.md)               |
 | `csv`         | [csv.md](csv.md)                 |
