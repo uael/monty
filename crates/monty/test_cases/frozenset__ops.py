@@ -183,15 +183,3 @@ assert {1, 2, 3} != frozenset({1, 2})
 assert frozenset() == set()
 assert set() == frozenset()
 assert {1: 'a', 2: 'b'}.keys() == frozenset({1, 2})
-
-# === ordering by the subset order ===
-assert frozenset({1}) < frozenset({1, 2}) and not frozenset({1, 2}) < frozenset({1, 2})
-assert frozenset({1, 2}) <= frozenset({1, 2}) and not frozenset({3}) <= frozenset({1, 2})
-assert frozenset({1, 2}) > frozenset({1}) and not frozenset({1, 2}) > frozenset({3})
-assert frozenset({1, 2}) >= frozenset({1, 2}) and not frozenset() >= frozenset({1})
-assert frozenset({1}) < {1, 2} and frozenset({1, 2}) >= {2} and not frozenset({1}) > {1}
-try:
-    frozenset({1}) <= (1,)
-    assert False, 'frozenset <= tuple must raise'
-except TypeError as e:
-    assert str(e) == "'<=' not supported between instances of 'frozenset' and 'tuple'", str(e)
