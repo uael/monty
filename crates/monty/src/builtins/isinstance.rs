@@ -38,7 +38,7 @@ pub fn builtin_isinstance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> 
 /// - The abstract base classes of `collections.abc`: `isinstance(x, Iterable)`,
 ///   answered from what the value is; see [`abc_instance`]
 /// - Tuples (possibly nested) of the above
-pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
+fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match classinfo {
         Value::Builtin(Builtins::Type(t)) => Ok(obj.py_type(vm).is_instance_of(*t)),
         // A sandbox exception class's instance matches through the builtin

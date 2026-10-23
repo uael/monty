@@ -27,7 +27,6 @@ pub mod itertools;
 pub mod list;
 pub mod literal_generic_alias;
 pub mod long_int;
-pub mod match_pattern;
 pub mod module;
 pub mod namedtuple;
 pub mod partial;
