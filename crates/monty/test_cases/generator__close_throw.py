@@ -91,7 +91,7 @@ except RuntimeError as e:
 
 
 # === throw() raises at the yield, and the body may catch it and go on ===
-def catcher():
+def first_catcher():
     while True:
         try:
             yield 'ok'
@@ -99,7 +99,7 @@ def catcher():
             yield 'caught ' + str(e)
 
 
-c = catcher()
+c = first_catcher()
 assert next(c) == 'ok'
 assert c.throw(ValueError('boom')) == 'caught boom'
 assert next(c) == 'ok'

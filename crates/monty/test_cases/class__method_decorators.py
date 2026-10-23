@@ -43,7 +43,7 @@ class Sample:
         return 0
 
     # A decorator defined earlier in the class body resolves there.
-    def local_deco(fn):
+    def local_deco(fn):  # pyright: ignore
         def wrapper(self):
             return 'local:' + fn(self)
 

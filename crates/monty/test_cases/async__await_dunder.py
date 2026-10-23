@@ -40,7 +40,7 @@ assert said == ['answered', None]
 
 # === a class with no __await__ is not awaitable ===
 async def bad():
-    await Plain()  # pyright: ignore
+    await Plain()
 
 
 c = bad()
@@ -57,7 +57,7 @@ def counts():
 
 
 async def worse():
-    await counts()  # pyright: ignore
+    await counts()
 
 
 c = worse()

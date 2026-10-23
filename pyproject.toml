@@ -243,6 +243,9 @@ exclude = [
     # deliberately subscripts types with the wrong arity and with non-type
     # arguments to pin `types.GenericAlias` behaviour
     "crates/monty/test_cases/generic_alias.py",
+    # the value of a `type` statement is lazy and is any expression under test, as a list
+    # or a name bound later, which pyright reads as a malformed type expression
+    "crates/monty/test_cases/typealias__pep695.py",
     "crates/monty/test_cases/generic_alias__not_subscriptable.py",
     "crates/monty/test_cases/refcount__generic_alias.py",
     "crates/monty/test_cases/typing__union.py",

@@ -91,12 +91,12 @@ c.close()
 # === a coroutine is no iterator ===
 c = gives(6)
 try:
-    iter(c)  # pyright: ignore
+    iter(c)
     assert False, 'expected TypeError'
 except TypeError as exc:
     assert str(exc) == "'coroutine' object is not iterable"
 try:
-    next(c)  # pyright: ignore
+    next(c)
     assert False, 'expected TypeError'
 except TypeError as exc:
     assert str(exc) == "'coroutine' object is not an iterator"
