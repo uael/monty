@@ -54,8 +54,9 @@ order and error wording, but with these divergences:
     sandbox.** Two or more raise
     `NotImplementedError: ... a class with more than one base ...`, because
     Monty resolves a member by walking one chain and has no linearization to
-    resolve a second base against. A builtin type, including `object`, raises
-    `TypeError: a class can only inherit from a class defined in the sandbox`.
+    resolve a second base against. A builtin type other than an exception,
+    `object` included, raises
+    `TypeError: a class can only inherit from a class defined in the sandbox or a builtin exception`.
 - **Keywords are always rejected.** CPython forwards extra keywords to
     `__init_subclass__`; Monty has no `__init_subclass__`, but the error
     message matches what `object.__init_subclass__` produces
@@ -372,10 +373,10 @@ every construction request. Divergences:
 - `super()`, in either form. A method reaches its base's version by naming the
     base class: `Base.m(self)`.
 - `__mro__` and `__base__`. A class reports what it inherits only through
-    `__bases__`: a tuple of its one base, or `(object,)` for a class made with
-    none.
-- Inheriting from a builtin type, including `object`, and from a builtin
-    exception type.
+    `__bases__`: a tuple of its one base, a class or a builtin exception, or
+    `(object,)` for a class made with none.
+- Inheriting from a builtin type other than an exception, `object` included. A
+    builtin exception *is* inheritable; see [exceptions.md](exceptions.md).
 - Metaclasses, `__init_subclass__`, `__set_name__`, and any other
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).

@@ -1,8 +1,12 @@
 # `__bases__` of a class: the one it was made with, a class of the session as
-# itself, and `object` for a class made with none.
+# itself, a builtin as the type it is, and `object` for a class made with none.
 
 
 class Plain:
+    pass
+
+
+class Boom(ValueError):
     pass
 
 
@@ -12,6 +16,7 @@ class Sub(Plain):
 
 # === the base a class was made with ===
 assert Plain.__bases__ == (object,)
+assert Boom.__bases__ == (ValueError,)
 assert Sub.__bases__ == (Plain,)
 assert Sub.__bases__[0] is Plain
 

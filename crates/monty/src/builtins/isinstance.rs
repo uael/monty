@@ -7,7 +7,10 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{HeapData, HeapId, HeapRead, HeapReadOutput},
-    types::{PyTrait, Tuple, Type, instance::class_chain},
+    types::{
+        PyTrait, Tuple, Type,
+        instance::{class_chain, instance_builtin_exc},
+    },
     value::Value,
 };
 
@@ -35,9 +38,12 @@ pub fn builtin_isinstance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> 
 pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match classinfo {
         Value::Builtin(Builtins::Type(t)) => Ok(obj.py_type(vm).is_instance_of(*t)),
-        Value::Builtin(Builtins::ExcType(handler_type)) => {
-            Ok(matches!(obj.py_type(vm), Type::Exception(exc_type) if exc_type.is_subclass_of(*handler_type)))
-        }
+        // A sandbox exception class's instance matches through the builtin
+        // ancestor its class resolved at creation.
+        Value::Builtin(Builtins::ExcType(handler_type)) => Ok(match instance_builtin_exc(obj, vm) {
+            Some(ancestor) => ancestor.is_subclass_of(*handler_type),
+            None => matches!(obj.py_type(vm), Type::Exception(exc_type) if exc_type.is_subclass_of(*handler_type)),
+        }),
         // A user-defined class: true for an instance of it or of a subclass.
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => Ok(instance_of_class(obj, *id, vm)),
         // A `collections.namedtuple` class, matched by the instance's `class_id`.
