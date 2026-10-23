@@ -195,7 +195,6 @@ Monty has no `UnicodeError`.
     in CPython. Only a module, a class and an instance carry a namespace; every
     other object raises
     `TypeError: vars() argument must have __dict__ attribute`.
-
 - **`type` is a built-in function, not the class `type`.** `repr(type)` reads
     `<built-in function type>` and `type(type)` reads
     `<class 'builtin_function_or_method'>`, where CPython reads
