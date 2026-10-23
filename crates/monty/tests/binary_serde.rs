@@ -620,6 +620,51 @@ ext_fn(0)
     assert_eq!(from_loaded.into_complete().unwrap(), expected);
 }
 
+/// A live `typing._LiteralGenericAlias` on the heap survives a round-trip with
+/// its `__args__` tuple intact — the only coverage that carries
+/// `HeapData::LiteralGenericAlias` through postcard.
+#[test]
+fn run_progress_round_trip_preserves_literal_generic_alias() {
+    let code = r"
+from typing import Literal
+Choice = Literal['a', 'b', 1, 'a']
+ext_fn(0)
+[repr(Choice), Choice.__args__, Choice == Literal[1, 'b', 'a'], hash(Choice) == hash(Literal[1, 'b', 'a']), repr(Choice | None), Choice.__origin__ is Literal]
+"
+    .to_owned();
+    let runner = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
+
+    // Suspend at `ext_fn` with the alias built and still live.
+    let progress = runner
+        .start(vec![], ResourceTracker::default(), PrintWriter::Stdout)
+        .unwrap();
+    let progress = resolve_name_lookups(progress).unwrap();
+    let loaded: RunProgress = round_trip_progress(&progress);
+
+    let expected = MontyObject::list([
+        MontyObject::string("typing.Literal['a', 'b', 1]".to_owned()),
+        MontyObject::tuple([
+            MontyObject::string("a".to_owned()),
+            MontyObject::string("b".to_owned()),
+            MontyObject::int(1),
+        ]),
+        MontyObject::bool(true),
+        MontyObject::bool(true),
+        MontyObject::string("typing.Literal['a', 'b', 1] | None".to_owned()),
+        MontyObject::bool(true),
+    ]);
+
+    // Both are resumed for the reason given in the itertools round-trip above.
+    let original = progress.into_function_call().expect("should be at function call");
+    assert_eq!(original.function_name, "ext_fn");
+    let from_original = original.resume(MontyObject::int(0), PrintWriter::Stdout).unwrap();
+    assert_eq!(from_original.into_complete().unwrap(), expected);
+
+    let call = loaded.into_function_call().expect("should be at function call");
+    let from_loaded = call.resume(MontyObject::int(0), PrintWriter::Stdout).unwrap();
+    assert_eq!(from_loaded.into_complete().unwrap(), expected);
+}
+
 #[test]
 fn run_progress_complete_round_trip() {
     // When execution completes, we can still dump/load the Complete variant

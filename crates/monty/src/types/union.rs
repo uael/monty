@@ -41,11 +41,12 @@ pub(crate) struct Union {
 }
 
 /// How a value takes part in `|`: CPython's `type.__or__` accepts types,
-/// `None`, generic aliases and unions, and a union's own `__or__` accepts
-/// anything at all.
+/// `None`, generic aliases and unions, and the `__or__` of a union or of a
+/// `typing` alias such as `Literal['a']` accepts anything at all.
 #[derive(PartialEq, Eq)]
 enum Operand {
-    Union,
+    /// A union or a literal alias, whose `__or__` takes any operand.
+    Open,
     /// A type-like value with an `__or__`: a builtin type, exception type,
     /// class object, generic alias or `typing` form.
     TypeLike,
@@ -63,7 +64,7 @@ impl Union {
     pub(crate) fn try_or(lhs: &Value, rhs: &Value, vm: &mut VM<'_>) -> RunResult<Option<Value>> {
         let (lhs_kind, rhs_kind) = (operand_kind(lhs, vm), operand_kind(rhs, vm));
         let unionable = match (lhs_kind, rhs_kind) {
-            (Some(Operand::Union), _) | (_, Some(Operand::Union)) => true,
+            (Some(Operand::Open), _) | (_, Some(Operand::Open)) => true,
             (Some(l), Some(r)) => l != Operand::NoneValue || r != Operand::NoneValue,
             _ => false,
         };
@@ -160,7 +161,7 @@ impl Union {
     }
 
     /// `py_or_impl` for the heap types that take part in unions (classes,
-    /// generic aliases, unions): `this | other`.
+    /// generic aliases, literal aliases, unions): `this | other`.
     pub(crate) fn heap_or<'h>(
         this: &HeapObjectRead<'h, impl HeapPayload>,
         other: &Value,
@@ -215,7 +216,7 @@ fn operand_kind(value: &Value, vm: &VM<'_>) -> Option<Operand> {
         // `typing.Any`, `typing.List` and the other forms all define `__or__`.
         Value::Marker(marker) if marker.py_type() == Type::SpecialForm => Some(Operand::TypeLike),
         Value::Ref(id) => match vm.heap.get(*id) {
-            HeapData::Union(_) => Some(Operand::Union),
+            HeapData::Union(_) | HeapData::LiteralGenericAlias(_) => Some(Operand::Open),
             HeapData::Class(_)
             | HeapData::NamedTupleClass(_)
             | HeapData::HostClassType(_)
@@ -229,7 +230,7 @@ fn operand_kind(value: &Value, vm: &VM<'_>) -> Option<Operand> {
 /// Owned clones of a tuple's items, or `None` when `value` is not a plain
 /// tuple (a namedtuple key is one member, as in CPython). Preflights the
 /// clone like `clone_all_pairs`.
-fn tuple_items(value: &Value, vm: &mut VM<'_>) -> RunResult<Option<Vec<Value>>> {
+pub(crate) fn tuple_items(value: &Value, vm: &mut VM<'_>) -> RunResult<Option<Vec<Value>>> {
     let Value::Ref(id) = value else { return Ok(None) };
     let HeapData::Tuple(tuple) = vm.heap.get(*id) else {
         return Ok(None);

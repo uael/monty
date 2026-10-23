@@ -23,7 +23,7 @@ use crate::{
     intern::{FunctionId, StaticStrings},
     modules::{ModuleFunctions, collections::defaultdict::defaultdict_missing},
     types::{
-        GenericAlias, LazyHeapSet, LongInt, Property, PyTrait, Type, Union, allocate_string,
+        GenericAlias, LazyHeapSet, LiteralGenericAlias, LongInt, Property, PyTrait, Type, Union, allocate_string,
         bytes::PyBytes,
         long_int::{PyInt, arithmetic::float_binary},
         numeric::{round_digits, round_float},
@@ -545,6 +545,7 @@ impl<'h> PyTrait<'h> for PyValue<'h> {
             Self::Builtin(Builtins::Function(BuiltinsFunctions::Type)) => Ok(GenericAlias::subscript(Type::Type, key.clone_with_heap(vm), vm)),
             Self::Builtin(Builtins::Type(Type::Union)) => Union::subscript(key.clone_with_heap(vm), vm),
             Self::Marker(Marker(StaticStrings::Optional)) => Union::optional(key.clone_with_heap(vm), vm),
+            Self::Marker(Marker(StaticStrings::Literal)) => LiteralGenericAlias::subscript(key.clone_with_heap(vm), vm),
             Self::Builtin(Builtins::Type(t)) => Err(ExcType::type_error_type_not_subscriptable(&t.name(vm.heap, vm.interns))),
             Self::Builtin(Builtins::ExcType(exc_type)) => Err(ExcType::type_error_type_not_subscriptable((*exc_type).into())),
             _ => Err(ExcType::type_error_not_sub(&self.py_type_name(vm))),

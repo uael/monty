@@ -122,6 +122,7 @@ pub(super) fn host_type_object(py: Python<'_>, t: MontyType) -> PyResult<Option<
         // `types.UnionType` is the type of `int | None` on every supported host;
         // on 3.14+ it is the same object as `typing.Union`.
         MontyType::Union => cached!("types", "UnionType"),
+        MontyType::LiteralGenericAlias => cached!("typing", "_LiteralGenericAlias"),
         // stdlib exceptions (`re.error`, `json.JSONDecodeError`) resolve as well as builtins
         MontyType::Exception(exc_type) => exc_class_to_py(py, exc_type),
         _ => return Ok(None),

@@ -2,8 +2,9 @@
 
 `typing` exists so type-annotated code can `import` it without
 `ModuleNotFoundError`. **No runtime type checking happens.** Apart from
-`Union` and `Optional` (see [Unions](#unions)) the forms are inert marker
-objects that cannot be subscripted: `List[int]` and `Callable[[int], str]`
+`Union` and `Optional` (see [Unions](#unions)) and `Literal` (see
+[Literals](#literals)) the forms are inert marker objects that cannot be
+subscripted: `List[int]` and `Callable[[int], str]`
 raise `TypeError: 'typing._SpecialForm' object is not subscriptable`.
 Annotations are unaffected, being stringized rather than evaluated (see below).
 
@@ -148,3 +149,23 @@ Divergences in the aliases themselves:
     objects round-trip: `types.GenericAlias` by identity, and Monty's
     `typing.Union` as the host's `types.UnionType`, which is `typing.Union`
     itself only from Python 3.14.
+
+## Literals
+
+`Literal['a', 'b']` builds a `typing._LiteralGenericAlias`, as in CPython 3.14: it flattens a nested `Literal`, drops a
+repeated `(type, value)` pair, compares as a set of them, and takes part in `|`. Divergences:
+
+- **Error messages name the type with its module.** `Literal[1] < Literal[2]` raises
+    `TypeError: '<' not supported between instances of 'typing._LiteralGenericAlias' and ...`, and an unknown
+    attribute `AttributeError: 'typing._LiteralGenericAlias' object has no attribute 'foo'`, where CPython prints
+    `'_LiteralGenericAlias'` and `AttributeError: foo`.
+- **No attributes beyond `__origin__`, `__args__`, `__parameters__`, `__name__` and `__qualname__`.** CPython also
+    gives the other attributes of `typing._GenericAlias`, such as `copy_with` and `__mro_entries__`.
+- **Not iterable.** `iter(Literal['a'])` raises `TypeError` where CPython yields `typing.Unpack[Literal['a']]`.
+- **A named tuple key is one value.** `Literal[Point(1, 2)]` holds the named tuple, where CPython unpacks it as a
+    tuple of values.
+- **Value reprs use Monty's type names**, as in a generic alias.
+- **A bare `Literal` is accepted in a union.** `Literal | None` builds `typing.Literal | None` where CPython raises
+    `TypeError: Plain typing.Literal is not valid as type argument`.
+- **A literal alias does not cross the host boundary.** One built in the sandbox reaches the host as its repr string,
+    as a generic alias does. Its type object round-trips as the host's `typing._LiteralGenericAlias`.

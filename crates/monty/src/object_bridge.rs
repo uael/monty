@@ -668,6 +668,7 @@ impl MontyTypeExt for MontyType {
             Self::GenericAlias => Type::GenericAlias,
             Self::Union => Type::Union,
             Self::LruCacheWrapper => Type::LruCacheWrapper,
+            Self::LiteralGenericAlias => Type::LiteralGenericAlias,
             Self::Tuple => Type::Tuple,
             Self::NamedTuple => Type::NamedTuple,
             Self::Dict => Type::Dict,
@@ -764,6 +765,7 @@ impl MontyTypeExt for MontyType {
             Type::Partial => Self::Partial,
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
+            Type::LiteralGenericAlias => Self::LiteralGenericAlias,
             Type::LruCacheWrapper => Self::LruCacheWrapper,
             Type::Random
             | Type::HashlibHash
