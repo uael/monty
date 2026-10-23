@@ -1031,7 +1031,14 @@ impl<'de> serde::Deserialize<'de> for Heap {
             ext_function_cache,
             boundary_index,
             host_type_index,
-        } = restore_entries(&mut entries).map_err(D::Error::custom)?;
+        } = match restore_entries(&mut entries) {
+            Ok(indexes) => indexes,
+            Err(message) => {
+                // A refused snapshot frees its entries as a dropped heap does.
+                free_entries(&mut entries);
+                return Err(D::Error::custom(message));
+            }
+        };
         Ok(Self {
             entries,
             tracker: fields.tracker,
@@ -1807,12 +1814,18 @@ impl HeapReader<'_> {
 #[cfg(feature = "memory-model-checks")]
 impl Drop for Heap {
     fn drop(&mut self) {
-        for id in 0..self.entries.len() {
-            if let Some(mut entry) = self.entries.entry(HeapId::from_index(id)) {
-                // Mark all `Value::Ref` payloads as `Dereferenced` so they don't panic when dropped
-                py_dec_ref_ids_for_data(entry.get_mut().data.0.get_mut(), &mut Vec::new());
-                entry.free();
-            }
+        free_entries(&mut self.entries);
+    }
+}
+
+/// Frees every entry of a heap that goes away whole: a dropped heap, or the
+/// entries of a snapshot that [`restore_entries`] refused.
+fn free_entries(entries: &mut StableHeap<HeapEntry>) {
+    for id in 0..entries.len() {
+        if let Some(mut entry) = entries.entry(HeapId::from_index(id)) {
+            // Mark all `Value::Ref` payloads as `Dereferenced` so they don't panic when dropped
+            py_dec_ref_ids_for_data(entry.get_mut().data.0.get_mut(), &mut Vec::new());
+            entry.free();
         }
     }
 }
