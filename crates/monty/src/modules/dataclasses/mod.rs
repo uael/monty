@@ -38,7 +38,7 @@ use crate::{
     types::{
         Class, Dict, Module, PyTrait, TupleVec, allocate_tuple,
         host_class::host_class_type,
-        instance::{class_defines, namespace_member},
+        instance::{class_defines, class_dunder, namespace_member},
     },
     value::{Marker, Value},
 };
@@ -54,6 +54,8 @@ pub(crate) enum DataclassesFunctions {
     /// `field(...)` — builds the `Field` a class body binds and the decorator
     /// then adopts.
     Field,
+    /// `fields(obj)` — the `Field`s of a dataclass class or instance, in order.
+    Fields,
     /// The decorator `@dataclass(...)` returns while it waits for the class,
     /// carrying the bound options so `d = dataclass(frozen=True)` then `@d`
     /// works. Named for the user-visible decorator, not the variant.
@@ -72,6 +74,11 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     module.set_attr(
         StaticStrings::IsDataclass,
         Value::ModuleFunction(ModuleFunctions::Dataclasses(DataclassesFunctions::IsDataclass)),
+        vm,
+    );
+    module.set_attr(
+        StaticStrings::Fields,
+        Value::ModuleFunction(ModuleFunctions::Dataclasses(DataclassesFunctions::Fields)),
         vm,
     );
     module.set_attr(
@@ -100,6 +107,7 @@ pub(super) fn call(vm: &mut VM<'_>, func: DataclassesFunctions, args: ArgValues)
         DataclassesFunctions::Dataclass => dataclass_decorator(vm, args),
         DataclassesFunctions::IsDataclass => is_dataclass(vm, args),
         DataclassesFunctions::Field => field::field(vm, args),
+        DataclassesFunctions::Fields => fields(vm, args),
         // The options are already bound; this call supplies the class.
         DataclassesFunctions::Configured(options) => {
             let ConfiguredArgs { cls } = ConfiguredArgs::from_args(args, vm)?;
@@ -796,4 +804,34 @@ fn is_dataclass(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     };
     arg.drop_with(vm);
     Ok(Value::Bool(result))
+}
+
+/// `dataclasses.fields(obj)`: the `Field` objects of a dataclass class or one
+/// of its instances, as a tuple in definition order.
+///
+/// A class that is not a dataclass raises CPython's own `TypeError`, and so
+/// does a host-backed class: those carry dataclass-ness as a flag rather than
+/// a `__dataclass_fields__` mapping, so there are no `Field` objects to hand
+/// back (see `limitations/dataclasses.md`).
+fn fields(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    let arg = args.get_one_arg("fields", vm.heap)?;
+    defer_drop!(arg, vm);
+    let class_id = match arg {
+        Value::Ref(id) => match vm.heap.get(*id) {
+            HeapData::Class(_) => Some(*id),
+            HeapData::Instance(instance) => Some(instance.class()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let name: &'static str = StaticStrings::DataclassFields.into();
+    let fields_id = match class_id.and_then(|id| class_dunder(id, name, vm)) {
+        Some(Value::Ref(id)) if matches!(vm.heap.get(*id), HeapData::Dict(_)) => *id,
+        _ => return Err(ExcType::type_error("must be called with a dataclass type or instance")),
+    };
+    let HeapData::Dict(dict) = vm.heap.get(fields_id) else {
+        unreachable!("checked to be a dict above");
+    };
+    let items: TupleVec = dict.iter().map(|(_, value)| value.clone_with_heap(vm.heap)).collect();
+    Ok(allocate_tuple(items, vm.heap))
 }

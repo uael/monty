@@ -1098,6 +1098,8 @@ pub enum StaticStrings {
     FieldSizeLimit,
     /// `fieldnames` parameter and attribute of `csv.DictReader` / `csv.DictWriter`.
     Fieldnames,
+    /// `dataclasses.fields()` function.
+    Fields,
     /// Kwarg name `file` — `open(file=...)`.
     File,
     /// Kwarg name `filename` — `os.path.getsize(filename=...)`, `os.path.realpath(filename=...)`.
