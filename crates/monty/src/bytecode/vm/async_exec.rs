@@ -11,7 +11,7 @@ use std::{mem, task::Poll};
 use monty_types::{InvalidInputError, MontyException, ResourceError, ResourceTracker};
 use smallvec::{SmallVec, smallvec};
 
-use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, stack_index};
+use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, frame_code, recursion::frame_recursion_depth, stack_index};
 use crate::{
     args::ArgValues,
     asyncio::{
@@ -22,8 +22,8 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{
-        ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapObjectRead, HeapRead, HeapReadOutput,
-        HeapReader,
+        ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapObjectRead, HeapRead, HeapReadMut,
+        HeapReadOutput, HeapReader,
     },
     object_bridge::MontyObjectExt,
     run_progress::{ExtFunctionResult, ExtFunctionResultExt},
@@ -100,7 +100,7 @@ impl<'h> VM<'h> {
             // The frame's own `ReturnValue` pushes the receiver into the slot
             // the awaitable just left.
             CallResult::FramePushed => Ok(()),
-            other => Err(this.unsupported_call_result("__await__", other)),
+            other => Err(this.unsupported_call_result(other)),
         }
     }
 
@@ -133,7 +133,7 @@ impl<'h> VM<'h> {
         );
         let poll = match self.heap.read(receiver_id) {
             HeapReadOutput::GatherFuture(gather) => self.await_gather_future(gather, awaiter)?,
-            HeapReadOutput::ExternalFuture(mut future) => self.await_external_future(&mut future, awaiter)?,
+            HeapReadOutput::ExternalFuture(future) => self.await_external_future(&future, awaiter)?,
             _ => unreachable!("poll_future_receiver is reached off a future alone"),
         };
         match poll {
@@ -318,13 +318,13 @@ impl<'h> VM<'h> {
                     }
                     Poll::Pending
                 }
-                HeapReadOutput::ExternalFuture(mut fut) => {
+                HeapReadOutput::ExternalFuture(fut) => {
                     self.heap.inc_ref(gather_id);
                     let sub_awaiter = Awaiter::GatherSlot {
                         gather: gather_id,
                         source: item_id,
                     };
-                    self.await_external_future(&mut fut, sub_awaiter)?
+                    self.await_external_future(&fut, sub_awaiter)?
                 }
                 HeapReadOutput::GatherFuture(child_gather) => {
                     if let Some(value) = poll_settled_gather(&child_gather, self.heap)? {
@@ -365,7 +365,7 @@ impl<'h> VM<'h> {
     /// parks in `Awaited`, taking over the frame's bookkeeping, and later
     /// resolutions drive it from there.
     fn settle_gather_commit(&mut self, frame: GatherCommit) -> Poll<Value> {
-        let HeapReadOutput::GatherFuture(mut gather) = self.heap.read(frame.gather) else {
+        let HeapReadOutput::GatherFuture(gather) = self.heap.read(frame.gather) else {
             panic!("gather commit frame id is not a GatherFuture")
         };
 
@@ -395,10 +395,10 @@ impl<'h> VM<'h> {
     /// error so re-awaits replay it, and drops the result slots and awaiter the
     /// frame was holding. The children it had already committed keep running and
     /// keep pointing at their now-`Failed` gather, as they do for a failure that
-    /// arrives after the commit pass (see [`HeapRead::fail`]).
+    /// arrives after the commit pass (see [`HeapReadMut::fail`]).
     fn unwind_gather_commits(&mut self, stack: Vec<GatherCommit>, err: &RunError) {
         for frame in stack.into_iter().rev() {
-            let HeapReadOutput::GatherFuture(mut gather) = self.heap.read(frame.gather) else {
+            let HeapReadOutput::GatherFuture(gather) = self.heap.read(frame.gather) else {
                 panic!("gather commit frame id is not a GatherFuture")
             };
             gather.get_mut(self.heap).state = GatherState::Failed(err.clone());
@@ -419,7 +419,7 @@ impl<'h> VM<'h> {
     ///   plumbing lands.
     fn await_external_future(
         &mut self,
-        fut: &mut HeapRead<'h, ExternalFuture>,
+        fut: &HeapReadMut<'h, ExternalFuture>,
         awaiter: Awaiter,
     ) -> Result<Poll<Value>, RunError> {
         let mut awaiter_guard = DropGuard::new(awaiter, self);
@@ -550,6 +550,7 @@ impl<'h> VM<'h> {
                 resumer: f.resumer,
                 delegating: f.delegating,
                 namespace: f.namespace,
+                import_from_module: f.import_from_module,
             })
             .collect();
         // The namespace moves across so the frame left behind releases nothing.
@@ -566,11 +567,12 @@ impl<'h> VM<'h> {
             resumer: current.resumer,
             delegating: current.delegating,
             namespace: mem::take(&mut current.namespace),
+            import_from_module: current.import_from_module,
         });
 
         // Count this task's recursion depth contribution and subtract it from
         // the global counter so the next task gets a clean budget.
-        let task_depth = frames.len().saturating_sub(1); // root frame doesn't contribute to recursion depth
+        let task_depth = frame_recursion_depth(frames.iter().map(|f| f.function_id), self.interns);
         self.recursion_depth -= task_depth;
 
         // Save VM state into the task
@@ -606,7 +608,7 @@ impl<'h> VM<'h> {
         let coroutine_id = task.coroutine_id;
 
         // Restore this task's recursion depth contribution to the global counter
-        let task_depth = frames.len().saturating_sub(1); // root frame doesn't contribute to recursion depth
+        let task_depth = frame_recursion_depth(frames.iter().map(|f| f.function_id), self.interns);
         self.recursion_depth += task_depth;
 
         if !frames.is_empty() {
@@ -619,11 +621,7 @@ impl<'h> VM<'h> {
             let mut frames: Vec<_> = frames
                 .into_iter()
                 .map(|sf| {
-                    let code = match sf.function_id {
-                        Some(func_id) => &self.interns.get_function(func_id).code,
-                        // The main task's module-level code.
-                        None => self.module_code,
-                    };
+                    let code = frame_code(self.interns, self.module_code, sf.function_id);
                     CallFrame {
                         code,
                         bytecode: code.bytecode(),
@@ -640,6 +638,7 @@ impl<'h> VM<'h> {
                         generator: sf.generator,
                         resumer: sf.resumer,
                         delegating: sf.delegating,
+                        import_from_module: sf.import_from_module,
                     }
                 })
                 .collect();
@@ -674,7 +673,7 @@ impl<'h> VM<'h> {
     ///
     /// Similar to exec_get_awaitable's coroutine handling, but for task initialization.
     fn init_task_from_coroutine(&mut self, coroutine_id: HeapId) -> Result<(), RunError> {
-        let HeapReadOutput::Generator(mut coro) = self.heap.read(coroutine_id) else {
+        let HeapReadOutput::Generator(coro) = self.heap.read(coroutine_id) else {
             panic!("task coroutine_id doesn't point to a coroutine")
         };
 
@@ -735,7 +734,7 @@ impl<'h> VM<'h> {
         let this = self;
         defer_drop!(fut_val, this);
 
-        let HeapReadOutput::ExternalFuture(mut fut) = this.heap.read(future_id) else {
+        let HeapReadOutput::ExternalFuture(fut) = this.heap.read(future_id) else {
             panic!("pending_externals entry doesn't point to an ExternalFuture")
         };
 
@@ -795,7 +794,7 @@ impl<'h> VM<'h> {
                 Awaiter::GatherSlot { gather, source } => {
                     let gather_val = Value::Ref(gather);
                     defer_drop!(gather_val, this);
-                    let HeapReadOutput::GatherFuture(mut outer) = this.heap.read(gather) else {
+                    let HeapReadOutput::GatherFuture(outer) = this.heap.read(gather) else {
                         panic!("Awaiter::GatherSlot gather id is not a GatherFuture")
                     };
                     let success = outer.resolve_child(this, source, value)?;
@@ -816,7 +815,7 @@ impl<'h> VM<'h> {
             let next = match awaiter {
                 Awaiter::Task(t) => break *t,
                 Awaiter::GatherSlot { gather, .. } => {
-                    let HeapReadOutput::GatherFuture(mut gather) = this.heap.read(*gather) else {
+                    let HeapReadOutput::GatherFuture(gather) = this.heap.read(*gather) else {
                         panic!("Awaiter::GatherSlot gather id is not a GatherFuture")
                     };
                     // A gather that already settled has handed its waiter on;
@@ -843,7 +842,7 @@ impl<'h> VM<'h> {
         let this = self;
         defer_drop!(fut_val, this);
 
-        let HeapReadOutput::ExternalFuture(mut fut) = this.heap.read(future_id) else {
+        let HeapReadOutput::ExternalFuture(fut) = this.heap.read(future_id) else {
             panic!("pending_externals entry doesn't point to an ExternalFuture")
         };
         let awaiter = match mem::replace(
@@ -924,10 +923,7 @@ impl<'h> VM<'h> {
     /// suspension the user sees.
     pub fn abort(&mut self, exc: MontyException) -> RunResult<FrameExit> {
         let main = TaskId::default();
-        if self.current_frame.is_parked
-            && self.scheduler.has_task(main)
-            && !self.scheduler.get_task_mut(main).frames.is_empty()
-        {
+        if self.current_frame.is_parked && self.scheduler.main_task().is_some_and(|task| !task.frames.is_empty()) {
             self.scheduler.set_current_task(Some(main));
             self.load_or_init_task(main)?;
         }
@@ -1016,7 +1012,7 @@ impl GatherCommit {
     ///
     /// A nested gather that settled synchronously fills its slot like any other
     /// ready item; one that parked joins `pending_children`, so a later
-    /// resolution reaches this gather through [`HeapRead::resolve_child`].
+    /// resolution reaches this gather through [`HeapReadMut::resolve_child`].
     fn resume_after_child(&mut self, child: HeapId, slot: usize, poll: Poll<Value>) {
         match poll {
             Poll::Ready(value) => self.results[slot] = Some(value),
@@ -1072,7 +1068,7 @@ fn poll_settled_gather<'h>(
     }
 }
 
-/// Outcome of [`HeapRead::resolve_child`] when a gather has finished driving
+/// Outcome of [`HeapReadMut::resolve_child`] when a gather has finished driving
 /// its children successfully.
 ///
 /// `list_id` is the cached result list to hand back; `waiter` is the
@@ -1082,7 +1078,7 @@ pub(crate) struct GatherSuccess {
     pub awaiter: Awaiter,
 }
 
-impl<'h> HeapRead<'h, GatherFuture> {
+impl<'h> HeapReadMut<'h, GatherFuture> {
     /// Caches `list_id` as the gather's successful result.
     ///
     /// Inc_refs `list_id` so the cached state and the caller both own a ref
@@ -1091,7 +1087,7 @@ impl<'h> HeapRead<'h, GatherFuture> {
     /// [`VM::await_gather_future`] for the synchronous-completion paths
     /// (empty gather, all externals already resolved); on the async path the
     /// transition happens inside [`Self::resolve_child`].
-    pub(crate) fn cache_result(&mut self, heap: &mut HeapReader<'h>, list_id: HeapId) {
+    pub(crate) fn cache_result(&self, heap: &mut HeapReader<'h>, list_id: HeapId) {
         heap.inc_ref(list_id);
         self.get_mut(heap).state = GatherState::Completed(Value::Ref(list_id));
     }
@@ -1099,7 +1095,7 @@ impl<'h> HeapRead<'h, GatherFuture> {
     /// Records a child's value in its result slots, completing the gather when no children remain.
     /// Returns the completed result and awaiter, or `None` while other children are pending.
     /// A gather that already failed discards later values while its siblings continue running.
-    fn resolve_child(&mut self, vm: &mut VM<'h>, child_id: HeapId, value: Value) -> Option<GatherSuccess> {
+    fn resolve_child(&self, vm: &mut VM<'h>, child_id: HeapId, value: Value) -> Option<GatherSuccess> {
         // A sibling failed (or the commit pass rolled back) while this child
         // was still running: it has a result, and nowhere for it to go.
         // `Pending` is not reachable — a child only exists once awaited.
@@ -1172,7 +1168,7 @@ impl<'h> HeapRead<'h, GatherFuture> {
     /// Caches the first failure and transfers the gather's waiter to the caller.
     /// Returns `None` if already settled. Children keep running and retain their references
     /// to this gather, so none can free it while the caller holds this heap reader.
-    pub(crate) fn fail(&mut self, heap: &mut HeapReader<'h>, error: &RunError) -> Option<Awaiter> {
+    pub(crate) fn fail(&self, heap: &mut HeapReader<'h>, error: &RunError) -> Option<Awaiter> {
         // Take the Awaited bookkeeping. The state stays `Awaited` (with
         // placeholder fields) until the state replace below commits the
         // transition. The extracted `awaiter` is transferred to the caller

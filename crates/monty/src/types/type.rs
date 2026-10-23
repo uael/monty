@@ -3,24 +3,30 @@ use std::{borrow::Cow, fmt};
 use num_bigint::BigInt;
 
 use crate::{
-    args::{ArgValues, FromArgs, is_long_int},
-    builtins::{Builtins, object_setattr::builtin_object_setattr},
+    args::{ArgValues, FromArgs},
+    builtins::{Builtins, BuiltinsFunctions, iter::builtin_iter, object_setattr::builtin_object_setattr},
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{DropWithContext, Heap, HeapData, HeapId},
     intern::{Interns, StaticStrings, StringId},
-    modules::{collections, itertools, itertools::ItertoolsFunctions},
+    modules::{
+        ModuleFunctions, collections, csv,
+        hashlib::{self, Blake2Kind},
+        itertools,
+        itertools::ItertoolsFunctions,
+    },
+    py_value::PyValue,
     types::{
         Bytes, ContextVar, Deque, Dict, FrozenSet, GenericAlias, List, LongInt, Partial, Path, PyTrait, Random, Range,
         Set, Slice, Str, TimeZone, Tuple,
         bytes::{bytes_fromhex, bytes_repr},
-        date, datetime,
+        complex, date, datetime,
         dict::{DictKind, dict_fromkeys},
         instance::class_name,
-        long_int::{INT_MAX_STR_DIGITS, bigint_to_f64_checked},
+        long_int::INT_MAX_STR_DIGITS,
         path, property,
-        str::StringRepr,
+        str::{StringRepr, allocate_string},
         template, time,
         timedelta::{self, DAY_MICROSECONDS, MAX_TIMEDELTA_DAYS, MIN_TIMEDELTA_DAYS},
         timezone::{self, MAX_TIMEZONE_CONSTANT_SECONDS},
@@ -62,6 +68,7 @@ pub enum Type {
     Bool,
     Int,
     Float,
+    Complex,
     Range,
     Slice,
     /// A code object, what `compile()` answers. CPython names the type `code`.
@@ -170,7 +177,18 @@ pub enum Type {
     /// A regex match result from `re.match()` / `re.search()` etc. - displays as "re.Match"
     #[strum(serialize = "re.Match")]
     ReMatch,
-    // Serialized enum variants are append-only to preserve postcard discriminants.
+    /// An `os.DirEntry` from `os.scandir()`.
+    #[strum(serialize = "posix.DirEntry")]
+    DirEntry,
+    /// The iterator `os.scandir()` returns.
+    #[strum(serialize = "posix.ScandirIterator")]
+    ScandirIterator,
+    /// The iterator `os.walk()` and `Path.walk()` return; CPython's is a generator,
+    /// and [`name`](Self::name) shows it as one. Its own name stays apart from
+    /// [`Generator`](Self::Generator)'s, so the name `generator` parses to that.
+    #[strum(serialize = "os._walk_generator")]
+    WalkGenerator,
+    // Variants serialize by name into dumps: renaming one needs `#[serde(alias)]`.
     #[strum(serialize = "tuple_iterator")]
     TupleIterator,
     #[strum(serialize = "str_ascii_iterator")]
@@ -219,6 +237,9 @@ pub enum Type {
     /// private `dataclasses._DataclassParams` reports itself.
     #[strum(serialize = "_DataclassParams")]
     DataclassParams,
+    /// The type of `dataclasses.MISSING`, CPython's private `_MISSING_TYPE`.
+    #[strum(serialize = "dataclasses._MISSING_TYPE")]
+    MissingType,
     #[strum(serialize = "itertools.takewhile")]
     ItertoolsTakeWhile,
     #[strum(serialize = "itertools.dropwhile")]
@@ -279,6 +300,37 @@ pub enum Type {
     /// reads `<class 'random.Random'>`.
     #[strum(serialize = "random.Random")]
     Random,
+    /// The wrapper returned by caching decorators. Monty exposes this type
+    /// through `type(f)`, but not as a `functools` module attribute.
+    #[strum(serialize = "functools._lru_cache_wrapper")]
+    LruCacheWrapper,
+    /// The OpenSSL-backed `hashlib` hash object, `_hashlib.HASH`.
+    #[strum(serialize = "_hashlib.HASH")]
+    HashlibHash,
+    /// The `shake_128` / `shake_256` hash object, `_hashlib.HASHXOF`.
+    #[strum(serialize = "_hashlib.HASHXOF")]
+    HashlibHashXof,
+    /// `hashlib.blake2b`, a type in CPython and so callable here.
+    #[strum(serialize = "_blake2.blake2b")]
+    Blake2b,
+    /// `hashlib.blake2s`, a type in CPython and so callable here.
+    #[strum(serialize = "_blake2.blake2s")]
+    Blake2s,
+    /// The iterator `csv.reader()` returns, CPython's `_csv.reader`.
+    #[strum(serialize = "_csv.reader")]
+    CsvReader,
+    /// The object `csv.writer()` returns, CPython's `_csv.writer`.
+    #[strum(serialize = "_csv.writer")]
+    CsvWriter,
+    /// `csv.DictReader`, a class in CPython and so callable here.
+    #[strum(serialize = "csv.DictReader")]
+    CsvDictReader,
+    /// `csv.DictWriter`, a class in CPython and so callable here.
+    #[strum(serialize = "csv.DictWriter")]
+    CsvDictWriter,
+    /// A resolved `csv` dialect, CPython's `_csv.Dialect`.
+    #[strum(serialize = "_csv.Dialect")]
+    CsvDialect,
     /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
     /// Dotted like `re.Match`; only `__name__` diverges from CPython's bare
     /// `'Template'`. See `limitations/string_templatelib.md`.
@@ -343,6 +395,7 @@ impl Type {
         match self {
             Self::Instance(class_id) => class_name(class_id, heap, interns),
             Self::Exception(exc_type) => Cow::Borrowed(exc_type.into()),
+            Self::WalkGenerator => Cow::Borrowed(Self::Generator.into()),
             other => Cow::Borrowed(other.into()),
         }
     }
@@ -384,6 +437,7 @@ impl Type {
             Self::Bool => Some("bool"),
             Self::Int => Some("int"),
             Self::Float => Some("float"),
+            Self::Complex => Some("complex"),
             Self::Str => Some("str"),
             Self::Bytes => Some("bytes"),
             Self::List => Some("list"),
@@ -435,6 +489,7 @@ impl Type {
             "bool" => Some(Self::Bool),
             "int" => Some(Self::Int),
             "float" => Some(Self::Float),
+            "complex" => Some(Self::Complex),
             "str" => Some(Self::Str),
             "bytes" => Some(Self::Bytes),
             "list" => Some(Self::List),
@@ -481,6 +536,15 @@ impl Type {
         )
     }
 
+    /// Whether multiplication can fall back to CPython's sequence-repetition protocol.
+    #[must_use]
+    pub(crate) const fn has_sequence_repeat(self) -> bool {
+        matches!(
+            self,
+            Self::Str | Self::Bytes | Self::List | Self::Tuple | Self::NamedTuple | Self::Deque
+        )
+    }
+
     /// Returns whether this is one of Python's concrete iterator types.
     #[must_use]
     pub(crate) const fn is_iterator(self) -> bool {
@@ -500,6 +564,8 @@ impl Type {
                 | Self::DictValueIterator
                 | Self::SetIterator
                 | Self::CallableIterator
+                | Self::ScandirIterator
+                | Self::WalkGenerator
                 | Self::ItertoolsCount
                 | Self::ItertoolsRepeat
                 | Self::ItertoolsPairwise
@@ -521,6 +587,8 @@ impl Type {
                 | Self::ItertoolsGroupBy
                 | Self::ItertoolsGrouper
                 | Self::ItertoolsTee
+                | Self::CsvReader
+                | Self::CsvDictReader
         )
     }
 
@@ -575,6 +643,7 @@ impl Type {
             Self::Slice => Some(11),
             Self::Iterator => Some(12),
             Self::Path => Some(13),
+            Self::Complex => Some(14),
             _ => None,
         }
     }
@@ -599,6 +668,7 @@ impl Type {
             11 => Some(Self::Slice),
             12 => Some(Self::Iterator),
             13 => Some(Self::Path),
+            14 => Some(Self::Complex),
             _ => None,
         }
     }
@@ -634,6 +704,9 @@ impl Type {
                 Err(ExcType::not_implemented("Counter.fromkeys() is undefined.  Use Counter(iterable) instead.").into())
             }
             (Self::Bytes, Some(StaticStrings::Fromhex)) => bytes_fromhex(args, vm).map(CallResult::Value),
+            (Self::Complex, Some(StaticStrings::FromNumber)) => {
+                complex::class_from_number(vm, args).map(CallResult::Value)
+            }
             (Self::Date, Some(StaticStrings::Today)) => date::class_today(vm, args),
             (Self::Path, Some(StaticStrings::Cwd)) => path::class_cwd(vm, args).map(CallResult::Value),
             (Self::Date, Some(StaticStrings::Fromisoformat)) => {
@@ -648,7 +721,7 @@ impl Type {
             }
             // `object.__setattr__(obj, name, value)` called directly, which is
             // how it is nearly always reached; `object.__setattr__` as a value
-            // is handled by `Value::py_getattr`.
+            // is handled by `class_getattr`.
             (Self::Object, _) if vm.interns.get_str(method_id) == "__setattr__" => {
                 builtin_object_setattr(vm, args).map(CallResult::Value)
             }
@@ -665,21 +738,54 @@ impl Type {
             }
             // The type's plain attributes (`list.__name__`); a missing name
             // raises the lookup's `type object 'list' has no attribute` error.
-            _ => match Value::Builtin(Builtins::Type(self)).py_getattr(&EitherStr::Interned(method_id), vm) {
-                Ok(CallResult::Value(value)) => {
+            _ => {
+                let attr = EitherStr::Interned(method_id);
+                if let Some(value) = self.class_getattr(&attr, vm) {
                     defer_drop!(value, vm);
                     vm.call_function(value, args)
-                }
-                Ok(other) => {
+                } else {
                     args.drop_with(vm.heap);
-                    Ok(other)
+                    Err(self.attribute_error(&attr, vm))
                 }
-                Err(err) => {
-                    args.drop_with(vm.heap);
-                    Err(err)
-                }
-            },
+            }
         }
+    }
+
+    /// Resolves an attribute read on a builtin type object itself — `list.__name__`,
+    /// `date.max`, `chain.from_iterable` — returning `None` when there is no such
+    /// member so the caller raises [`Self::attribute_error`].
+    pub(crate) fn class_getattr(self, attr: &EitherStr, vm: &mut VM<'_>) -> Option<Value> {
+        let is_dunder_name = attr.static_string(vm.interns).map_or_else(
+            || attr.as_str(vm.interns) == "__name__",
+            |ss| ss == StaticStrings::DunderName,
+        );
+        if is_dunder_name {
+            Some(allocate_string(self.dunder_name(vm.heap, vm.interns), vm.heap))
+        } else if let Some(constant) = self.class_constant(attr, vm) {
+            Some(constant)
+        } else if self == Self::ItertoolsChain && attr.static_string(vm.interns) == Some(StaticStrings::FromIterable) {
+            // `chain.from_iterable`, the one attribute an `itertools` type
+            // carries. Handed out as a value so it can be bound and called
+            // later, not only called in place.
+            Some(Value::ModuleFunction(ModuleFunctions::Itertools(
+                ItertoolsFunctions::ChainFromIterable,
+            )))
+        } else if self == Self::Object && attr.as_str(vm.interns) == "__setattr__" {
+            // `object.__setattr__` is the only member `object` carries: it
+            // exists so a class that hooks attribute writes has a way to
+            // perform one (see `limitations/classes.md`).
+            Some(Value::Builtin(Builtins::Function(BuiltinsFunctions::ObjectSetattr)))
+        } else {
+            None
+        }
+    }
+
+    /// The `AttributeError` for a name missing from this type object.
+    ///
+    /// CPython names the class rather than the metaclass here:
+    /// `type object 'list' has no attribute 'nonexistent'`.
+    pub(crate) fn attribute_error(self, attr: &EitherStr, vm: &VM<'_>) -> RunError {
+        ExcType::attribute_error_type(&self.name(vm.heap, vm.interns), attr.as_str(vm.interns))
     }
 
     /// Resolves a class-level constant on a builtin type object (`time.max`,
@@ -712,6 +818,11 @@ impl Type {
                 timedelta::allocate_micros(1, vm.heap)
             }
             (Self::TimeZone, StaticStrings::Utc) => vm.heap.get_timezone_utc(),
+            // The `_blake2` size limits, on the class and so on its instances.
+            (Self::Blake2b, StaticStrings::MaxDigestSize | StaticStrings::MaxKeySize) => Value::Int(64),
+            (Self::Blake2b, StaticStrings::SaltSize | StaticStrings::PersonSize) => Value::Int(16),
+            (Self::Blake2s, StaticStrings::MaxDigestSize | StaticStrings::MaxKeySize) => Value::Int(32),
+            (Self::Blake2s, StaticStrings::SaltSize | StaticStrings::PersonSize) => Value::Int(8),
             (Self::TimeZone, StaticStrings::Min) => timezone::allocate_offset(-MAX_TIMEZONE_CONSTANT_SECONDS, vm.heap),
             (Self::TimeZone, StaticStrings::Max) => timezone::allocate_offset(MAX_TIMEZONE_CONSTANT_SECONDS, vm.heap),
             _ => return None,
@@ -720,9 +831,17 @@ impl Type {
 
     /// Calls this type as a constructor (e.g., `list(x)`, `int(x)`).
     ///
-    /// Dispatches to the appropriate type's init method for container types,
-    /// or handles primitive type conversions inline.
-    pub(crate) fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    /// Iterator acquisition may suspend in user code; other constructors complete natively.
+    pub(crate) fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
+        if self == Self::Iterator {
+            builtin_iter(vm, args)
+        } else {
+            self.call_native(vm, args).map(CallResult::Value)
+        }
+    }
+
+    /// Dispatches constructors which do not yield, including primitive conversions.
+    fn call_native(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         match self {
             // Container types - delegate to init methods
             Self::List => List::init(vm, args),
@@ -742,12 +861,13 @@ impl Type {
             Self::Time => time::init(vm, args),
             Self::TimeDelta => timedelta::init(vm, args),
             Self::TimeZone => TimeZone::init(vm, args),
-            Self::Iterator => super::iter::init(vm, args),
             Self::Path => Path::init(vm, args),
             Self::Partial => Partial::init(vm, args),
             Self::Random => Random::init(vm, args),
             Self::Template => template::template_init(vm, args),
             Self::Interpolation => template::interpolation_init(vm, args),
+            Self::Blake2b => hashlib::blake2_init(Blake2Kind::Blake2b, vm, args),
+            Self::Blake2s => hashlib::blake2_init(Blake2Kind::Blake2s, vm, args),
 
             // Every `itertools` name but `tee` is a type, as in CPython, so
             // `isinstance(x, itertools.count)` and `type(x) is count` hold.
@@ -774,6 +894,11 @@ impl Type {
             | Self::ItertoolsTee
             | Self::ItertoolsTeeDataObject => itertools::construct(self, vm, args),
 
+            Self::Complex => complex::init(vm, args),
+            Self::CsvDictReader => csv::dict_reader_init(vm, args),
+            Self::CsvDictWriter => csv::dict_writer_init(vm, args),
+            Self::CsvDialect => csv::dialect_init(vm, args),
+
             // Primitive types - inline implementation
             Self::Int => int_init(vm, args),
             Self::Float => {
@@ -782,20 +907,18 @@ impl Type {
                     return Ok(Value::Float(0.0));
                 };
                 defer_drop!(v, vm);
-                match v {
-                    Value::Float(f) => Ok(Value::Float(*f)),
-                    Value::Int(i) => Ok(Value::Float(*i as f64)),
-                    Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
-                    Value::InternString(string_id) => {
-                        Ok(Value::Float(parse_f64_from_str(interns.get_str(*string_id))?))
-                    }
-                    Value::InternLongInt(id) => Ok(Value::Float(bigint_to_f64_checked(interns.get_long_int(*id))?)),
-                    Value::Ref(heap_id) => match vm.heap.get(*heap_id) {
-                        HeapData::Str(s) => Ok(Value::Float(parse_f64_from_str(s.as_str())?)),
-                        HeapData::LongInt(value) => Ok(Value::Float(value.to_f64_checked()?)),
+                if let Some(value) = v.py_float(vm)? {
+                    Ok(Value::Float(value))
+                } else {
+                    match v {
+                        Value::InternString(string_id) => {
+                            Ok(Value::Float(parse_f64_from_str(interns.get_str(*string_id))?))
+                        }
+                        Value::Ref(heap_id) if let HeapData::Str(s) = vm.heap.get(*heap_id) => {
+                            Ok(Value::Float(parse_f64_from_str(s.as_str())?))
+                        }
                         _ => Err(ExcType::type_error_float_conversion(&v.py_type_name(vm))),
-                    },
-                    _ => Err(ExcType::type_error_float_conversion(&v.py_type_name(vm))),
+                    }
                 }
             }
             Self::Bool => {
@@ -822,7 +945,10 @@ impl Type {
             }
 
             // Non-callable types - raise TypeError
-            _ => Err(ExcType::type_error_not_callable(&self.name(vm.heap, vm.interns))),
+            _ => {
+                args.drop_with(vm.heap);
+                Err(ExcType::type_error_not_callable(&self.name(vm.heap, vm.interns)))
+            }
         }
     }
 }
@@ -832,13 +958,19 @@ impl Type {
 /// This supports:
 /// - Leading/trailing whitespace (e.g. `"  1.5  "`)
 /// - The special values `inf`, `-inf`, `infinity`, and `nan` (case-insensitive)
-///
-/// Underscore digit separators are not currently supported.
-fn parse_f64_from_str(value: &str) -> RunResult<f64> {
+/// - Underscore digit separators, strictly between two digits (`1_000.5`, `1e1_0`)
+pub(crate) fn parse_f64_from_str(value: &str) -> RunResult<f64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(value_error_could_not_convert_string_to_float(value));
     }
+    let stripped;
+    let trimmed = if trimmed.contains('_') {
+        stripped = strip_underscores(trimmed).ok_or_else(|| value_error_could_not_convert_string_to_float(value))?;
+        stripped.as_str()
+    } else {
+        trimmed
+    };
 
     let lower = trimmed.to_ascii_lowercase();
     let parsed = match lower.as_str() {
@@ -852,6 +984,25 @@ fn parse_f64_from_str(value: &str) -> RunResult<f64> {
     };
 
     Ok(parsed)
+}
+
+/// Removes digit-separator underscores, or returns `None` when one is not
+/// strictly between two digits (CPython's `_Py_string_to_number_with_underscores`).
+pub(crate) fn strip_underscores(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    for (i, c) in text.char_indices() {
+        if c == '_' {
+            let before = i.checked_sub(1).map(|j| bytes[j]);
+            let after = bytes.get(i + 1);
+            if !(before.is_some_and(|b| b.is_ascii_digit()) && after.is_some_and(u8::is_ascii_digit)) {
+                return None;
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
 }
 
 /// Creates the `ValueError` raised by `float()` when a string cannot be parsed.
@@ -914,20 +1065,16 @@ fn int_init(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 
 /// `int(x)` with no base: numeric coercion plus base-10 str/bytes parsing.
 fn int_convert(x: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
-    let interns = vm.interns;
-    match x {
-        Value::Int(i) => Ok(Value::Int(*i)),
-        Value::Float(f) => LongInt::value_from_f64(*f, vm.heap),
-        Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
-        Value::InternString(string_id) => parse_int_from_str(interns.get_str(*string_id), 10, vm.heap),
-        Value::InternBytes(bytes_id) => parse_int_from_bytes(interns.get_bytes(*bytes_id), 10, vm.heap),
-        Value::Ref(heap_id) => match vm.heap.get(*heap_id) {
-            HeapData::Str(s) => parse_int_from_str(s.as_str(), 10, vm.heap),
-            HeapData::Bytes(b) => parse_int_from_bytes(b.as_slice(), 10, vm.heap),
-            HeapData::LongInt(_) => Ok(x.clone_with_heap(vm.heap)),
+    if let Some(value) = x.py_int_impl(vm)? {
+        Ok(value)
+    } else if let Some(value) = x.py_index_impl(vm)? {
+        Ok(value)
+    } else {
+        match x.py_value(vm) {
+            PyValue::Str(value) => parse_int_from_str(value.as_str(vm), 10, vm.heap),
+            PyValue::Bytes(value) => parse_int_from_bytes(value.as_slice(vm), 10, vm.heap),
             _ => Err(ExcType::type_error_int_conversion(&x.py_type_name(vm))),
-        },
-        _ => Err(ExcType::type_error_int_conversion(&x.py_type_name(vm))),
+        }
     }
 }
 
@@ -939,13 +1086,7 @@ fn int_convert(x: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
 /// `TypeError` before the range is checked.
 fn int_base(base: Value, vm: &mut VM<'_>) -> RunResult<u32> {
     defer_drop!(base, vm);
-    let n = match base {
-        Value::Bool(b) => i64::from(*b),
-        Value::Int(i) => *i,
-        // Clamped by PyNumber_AsSsize_t: any i64-overflowing int is out of range.
-        _ if is_long_int(base, vm) => i64::MAX,
-        _ => return Err(ExcType::type_error_not_integer(&base.py_type_name(vm))),
-    };
+    let n = base.saturating_index(vm)?;
     match u32::try_from(n) {
         Ok(0) => Ok(0),
         Ok(b @ 2..=36) => Ok(b),

@@ -164,6 +164,10 @@ struct Prepare<'i, 'g> {
     /// released when the surrounding comprehension finishes. IDs are unique
     /// among simultaneously active comprehensions; siblings reuse them.
     comp_var_depth: u16,
+    /// Highest `comp_var_depth` reached since it was last reset.
+    ///
+    /// Lets a comprehension reserve every slot its first iterable used, however deeply nested.
+    comp_var_peak: u16,
     /// Stack of comprehension-name → binding maps for currently active comprehensions.
     ///
     /// Pushed on entry to a comprehension, popped on exit. Read by `get_id`
@@ -512,6 +516,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             names_assigned_in_order: AHashSet::new(),
             names_used: AHashSet::new(),
             comp_var_depth: 0,
+            comp_var_peak: 0,
             comp_name_scopes: Vec::new(),
             top_level_by_name: false,
             module_global_names: AHashSet::new(),
@@ -625,6 +630,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             names_assigned_in_order: AHashSet::new(),
             names_used: AHashSet::new(),
             comp_var_depth: 0,
+            comp_var_peak: 0,
             comp_name_scopes: Vec::new(),
             top_level_by_name: false,
             module_global_names: AHashSet::new(),
@@ -834,32 +840,6 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     let or_else = self.prepare_nodes(or_else)?;
                     new_nodes.push(Node::If { test, body, or_else });
                 }
-                Node::Match {
-                    subject,
-                    slot,
-                    cases,
-                    position,
-                } => {
-                    let subject = self.prepare_expression(subject)?;
-                    // The hidden subject local resolves like any store target.
-                    self.names_assigned_in_order.insert(slot.name_id);
-                    let slot = self.get_id(slot)?;
-                    let mut prepared = Vec::with_capacity(cases.len());
-                    for case in cases {
-                        let pattern = self.prepare_pattern(case.pattern)?;
-                        // The guard reads what the pattern bound, so it is
-                        // prepared after it.
-                        let guard = case.guard.map(|g| self.prepare_expression(g)).transpose()?;
-                        let body = self.prepare_nodes(case.body)?;
-                        prepared.push(MatchCase { pattern, guard, body });
-                    }
-                    new_nodes.push(Node::Match {
-                        subject,
-                        slot,
-                        cases: prepared,
-                        position,
-                    });
-                }
                 Node::FunctionDef {
                     def:
                         RawFunctionDef {
@@ -1004,6 +984,22 @@ impl<'i, 'g> Prepare<'i, 'g> {
                         finally,
                     }));
                 }
+                Node::Match {
+                    subject,
+                    cases,
+                    position,
+                } => {
+                    let subject = self.prepare_expression(subject)?;
+                    let cases = cases
+                        .into_iter()
+                        .map(|case| self.prepare_match_case(case))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    new_nodes.push(Node::Match {
+                        subject,
+                        cases,
+                        position,
+                    });
+                }
                 Node::With {
                     context,
                     target,
@@ -1037,6 +1033,8 @@ impl<'i, 'g> Prepare<'i, 'g> {
                             let resolved_binding = self.get_id(import_name.binding)?;
                             Ok(ImportName {
                                 module_name: import_name.module_name,
+                                submodules: import_name.submodules,
+                                binds_top_level: import_name.binds_top_level,
                                 binding: resolved_binding,
                             })
                         })
@@ -1045,6 +1043,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 }
                 Node::ImportFrom {
                     module_name,
+                    submodules,
                     names,
                     position,
                 } => {
@@ -1059,6 +1058,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
                         .collect::<Result<_, _>>()?;
                     new_nodes.push(Node::ImportFrom {
                         module_name,
+                        submodules,
                         names: resolved_names,
                         position,
                     });
@@ -1444,7 +1444,12 @@ impl<'i, 'g> Prepare<'i, 'g> {
         let first_gen = generators_iter
             .next()
             .expect("comprehension must have at least one generator");
+        let saved_var_peak = mem::replace(&mut self.comp_var_peak, self.comp_var_depth);
         let first_iter = self.prepare_expression(first_gen.iter)?;
+        // The compiler activates this comprehension's captured cells before compiling the
+        // first iterable, so its targets must not reuse any slot a comprehension nested there used.
+        self.comp_var_depth = self.comp_var_peak;
+        self.comp_var_peak = saved_var_peak.max(self.comp_var_peak);
         let remaining_gens: Vec<Comprehension> = generators_iter.collect();
 
         // Predeclare every generator target's names as comp-var slots BEFORE
@@ -1623,6 +1628,100 @@ impl<'i, 'g> Prepare<'i, 'g> {
         }
     }
 
+    /// Prepares one `case` clause: pattern captures bind like assignment
+    /// targets, then the guard and body are prepared in the same scope.
+    fn prepare_match_case(&mut self, case: MatchCase<ParseNode>) -> Result<MatchCase<PreparedNode>, ParseError> {
+        let pattern = self.prepare_pattern(case.pattern)?;
+        let guard = match case.guard {
+            Some(guard) => Some(self.prepare_expression(guard)?),
+            None => None,
+        };
+        let body = self.prepare_nodes(case.body)?;
+        Ok(MatchCase {
+            pattern,
+            guard,
+            body,
+            position: case.position,
+        })
+    }
+
+    /// Resolves a pattern's expressions and capture names.
+    ///
+    /// Every capture (`case x`, `*rest`, `**rest`, `as name`) is a store target in
+    /// the enclosing scope, so it goes through [`Self::get_id`] like an unpack name.
+    fn prepare_pattern(&mut self, pattern: Pattern) -> Result<Pattern, ParseError> {
+        Ok(match pattern {
+            Pattern::Value(expr) => Pattern::Value(self.prepare_expression(expr)?),
+            Pattern::Singleton(expr) => Pattern::Singleton(self.prepare_expression(expr)?),
+            Pattern::Sequence { patterns, position } => Pattern::Sequence {
+                patterns: self.prepare_patterns(patterns)?,
+                position,
+            },
+            Pattern::Mapping {
+                keys,
+                patterns,
+                rest,
+                position,
+            } => Pattern::Mapping {
+                keys: keys
+                    .into_iter()
+                    .map(|key| self.prepare_expression(key))
+                    .collect::<Result<Vec<_>, _>>()?,
+                patterns: self.prepare_patterns(patterns)?,
+                rest: self.prepare_capture(rest)?,
+                position,
+            },
+            Pattern::Class {
+                cls,
+                patterns,
+                kwd_attrs,
+                kwd_patterns,
+                position,
+            } => Pattern::Class {
+                cls: self.prepare_expression(cls)?,
+                patterns: self.prepare_patterns(patterns)?,
+                kwd_attrs,
+                kwd_patterns: self.prepare_patterns(kwd_patterns)?,
+                position,
+            },
+            Pattern::Star { name, position } => Pattern::Star {
+                name: self.prepare_capture(name)?,
+                position,
+            },
+            Pattern::As {
+                pattern,
+                name,
+                position,
+            } => Pattern::As {
+                pattern: match pattern {
+                    Some(inner) => Some(Box::new(self.prepare_pattern(*inner)?)),
+                    None => None,
+                },
+                name: self.prepare_capture(name)?,
+                position,
+            },
+            Pattern::Or { patterns, position } => Pattern::Or {
+                patterns: self.prepare_patterns(patterns)?,
+                position,
+            },
+        })
+    }
+
+    fn prepare_patterns(&mut self, patterns: Vec<Pattern>) -> Result<Vec<Pattern>, ParseError> {
+        patterns.into_iter().map(|p| self.prepare_pattern(p)).collect()
+    }
+
+    /// Resolves an optional capture name to its store slot.
+    fn prepare_capture(&mut self, name: Option<Identifier>) -> Result<Option<Identifier>, ParseError> {
+        match name {
+            Some(ident) => {
+                self.names_assigned_in_order.insert(ident.name_id);
+                Ok(Some(self.get_id(ident)?))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Predeclares an unpack target's names as comprehension-variable slots.
     ///
     /// Called during the first pass of `prepare_comprehension`, before any
@@ -1682,6 +1781,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
         } else {
             let slot = self.comp_var_depth;
             self.comp_var_depth = slot.checked_add(1).ok_or_else(|| namespace_overflow(position))?;
+            self.comp_var_peak = self.comp_var_peak.max(self.comp_var_depth);
             top.insert(name_id, CompBinding { slot, captured: false });
             Ok(slot)
         }
@@ -1864,68 +1964,6 @@ impl<'i, 'g> Prepare<'i, 'g> {
     ///   assembly) from the inner preparer's locals.
     ///
     /// The class name itself binds in the **enclosing** scope, exactly like a `def`.
-    /// Resolves the names in a pattern: a capture binds like a store target, a
-    /// value/class expression reads like any other, and the two never mix.
-    fn prepare_pattern(&mut self, pattern: Pattern) -> Result<Pattern, ParseError> {
-        Ok(match pattern {
-            Pattern::Wildcard => Pattern::Wildcard,
-            Pattern::Capture(name) => Pattern::Capture(self.bind_pattern_name(name)?),
-            Pattern::Value(expr) => Pattern::Value(self.prepare_expression(expr)?),
-            Pattern::Singleton(literal) => Pattern::Singleton(literal),
-            Pattern::Sequence(items) => Pattern::Sequence(
-                items
-                    .into_iter()
-                    .map(|item| self.prepare_pattern(item))
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-            ),
-            Pattern::Star(name) => Pattern::Star(name.map(|n| self.bind_pattern_name(n)).transpose()?),
-            Pattern::Mapping { keys, patterns, rest } => Pattern::Mapping {
-                keys: keys
-                    .into_iter()
-                    .map(|key| self.prepare_expression(key))
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-                patterns: patterns
-                    .into_iter()
-                    .map(|item| self.prepare_pattern(item))
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-                rest: rest.map(|n| self.bind_pattern_name(n)).transpose()?,
-            },
-            Pattern::Class {
-                cls,
-                positional,
-                keywords,
-            } => Pattern::Class {
-                cls: self.prepare_expression(cls)?,
-                positional: positional
-                    .into_iter()
-                    .map(|item| self.prepare_pattern(item))
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-                // An attribute name is a plain string at runtime, so it is not
-                // resolved to a slot the way a capture is.
-                keywords: keywords
-                    .into_iter()
-                    .map(|(attr, item)| Ok((attr, self.prepare_pattern(item)?)))
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-            },
-            Pattern::Or(alternatives) => Pattern::Or(
-                alternatives
-                    .into_iter()
-                    .map(|item| self.prepare_pattern(item))
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-            ),
-            Pattern::As { pattern, name } => Pattern::As {
-                pattern: Box::new(self.prepare_pattern(*pattern)?),
-                name: self.bind_pattern_name(name)?,
-            },
-        })
-    }
-
-    /// Resolves one name a pattern binds, registering it as assigned here.
-    fn bind_pattern_name(&mut self, name: Identifier) -> Result<Identifier, ParseError> {
-        self.names_assigned_in_order.insert(name.name_id);
-        self.get_id_for_store_target(name)
-    }
-
     fn prepare_class_def(
         &mut self,
         name: Identifier,
@@ -2719,25 +2757,6 @@ fn collect_scope_info_from_node(
                 collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
             }
         }
-        Node::Match {
-            subject, slot, cases, ..
-        } => {
-            collect_assigned_names_from_expr(subject, assigned_names, interner);
-            // The hidden subject local is a binding of this scope, as is every
-            // name the patterns capture.
-            assigned_names.insert(slot.name_id);
-            for case in cases {
-                let mut bound = Vec::new();
-                collect_pattern_bindings(&case.pattern, &mut bound);
-                assigned_names.extend(bound.into_iter().map(|name| name.name_id));
-                if let Some(guard) = &case.guard {
-                    collect_assigned_names_from_expr(guard, assigned_names, interner);
-                }
-                for n in &case.body {
-                    collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
-                }
-            }
-        }
         Node::FunctionDef {
             def: RawFunctionDef { name, .. },
             decorators,
@@ -2812,6 +2831,21 @@ fn collect_scope_info_from_node(
             }
             for n in finally {
                 collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
+            }
+        }
+        Node::Match { subject, cases, .. } => {
+            collect_assigned_names_from_expr(subject, assigned_names, interner);
+            for case in cases {
+                collect_pattern_captures(&case.pattern, assigned_names);
+                for_each_pattern_expr(&case.pattern, &mut |expr| {
+                    collect_assigned_names_from_expr(expr, assigned_names, interner);
+                });
+                if let Some(guard) = &case.guard {
+                    collect_assigned_names_from_expr(guard, assigned_names, interner);
+                }
+                for n in &case.body {
+                    collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
+                }
             }
         }
         Node::With {
@@ -3187,18 +3221,6 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
             }
         }
-        Node::Match { subject, cases, .. } => {
-            collect_cell_vars_from_expr(subject, our_locals, cell_vars, interner);
-            for case in cases {
-                collect_pattern_cell_vars(&case.pattern, our_locals, cell_vars, interner);
-                if let Some(guard) = &case.guard {
-                    collect_cell_vars_from_expr(guard, our_locals, cell_vars, interner);
-                }
-                for n in &case.body {
-                    collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
-                }
-            }
-        }
         Node::Try(Try {
             body,
             handlers,
@@ -3209,6 +3231,9 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
             }
             for handler in handlers {
+                if let Some(exc_type) = &handler.exc_type {
+                    collect_cell_vars_from_expr(exc_type, our_locals, cell_vars, interner);
+                }
                 for n in &handler.body {
                     collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
                 }
@@ -3218,6 +3243,20 @@ fn collect_cell_vars_from_node(
             }
             for n in finally {
                 collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
+            }
+        }
+        Node::Match { subject, cases, .. } => {
+            collect_cell_vars_from_expr(subject, our_locals, cell_vars, interner);
+            for case in cases {
+                for_each_pattern_expr(&case.pattern, &mut |expr| {
+                    collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
+                });
+                if let Some(guard) = &case.guard {
+                    collect_cell_vars_from_expr(guard, our_locals, cell_vars, interner);
+                }
+                for n in &case.body {
+                    collect_cell_vars_from_node(n, our_locals, cell_vars, interner);
+                }
             }
         }
         Node::With {
@@ -3237,11 +3276,10 @@ fn collect_cell_vars_from_node(
         }
         Node::Assert { test, msg } => {
             collect_cell_vars_from_expr(test, our_locals, cell_vars, interner);
-            if let Some(m) = msg {
-                collect_cell_vars_from_expr(m, our_locals, cell_vars, interner);
+            if let Some(msg) = msg {
+                collect_cell_vars_from_expr(msg, our_locals, cell_vars, interner);
             }
         }
-        Node::Return(None) => {}
         Node::Assign { object, .. } => {
             collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
         }
@@ -3282,8 +3320,17 @@ fn collect_cell_vars_from_node(
             }
             collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
         }
-        // Other nodes don't contain nested function definitions or lambdas
-        _ => {}
+        // Listed rather than matched by `_`: a missed capture compiles a local's
+        // stores as plain stores and its later loads as cell loads.
+        Node::Pass
+        | Node::Return(None)
+        | Node::Raise(None)
+        | Node::Break { .. }
+        | Node::Continue { .. }
+        | Node::Global { .. }
+        | Node::Nonlocal { .. }
+        | Node::Import { .. }
+        | Node::ImportFrom { .. } => {}
     }
 }
 
@@ -3746,18 +3793,6 @@ fn collect_referenced_names_from_node(
                 collect_referenced_names_from_node(n, referenced, interner);
             }
         }
-        Node::Match { subject, cases, .. } => {
-            collect_referenced_names_from_expr(subject, referenced, interner);
-            for case in cases {
-                collect_pattern_referenced_names(&case.pattern, referenced, interner);
-                if let Some(guard) = &case.guard {
-                    collect_referenced_names_from_expr(guard, referenced, interner);
-                }
-                for n in &case.body {
-                    collect_referenced_names_from_node(n, referenced, interner);
-                }
-            }
-        }
         Node::FunctionDef {
             def: RawFunctionDef { signature, body, .. },
             decorators,
@@ -3824,6 +3859,20 @@ fn collect_referenced_names_from_node(
             }
             for n in finally {
                 collect_referenced_names_from_node(n, referenced, interner);
+            }
+        }
+        Node::Match { subject, cases, .. } => {
+            collect_referenced_names_from_expr(subject, referenced, interner);
+            for case in cases {
+                for_each_pattern_expr(&case.pattern, &mut |expr| {
+                    collect_referenced_names_from_expr(expr, referenced, interner);
+                });
+                if let Some(guard) = &case.guard {
+                    collect_referenced_names_from_expr(guard, referenced, interner);
+                }
+                for n in &case.body {
+                    collect_referenced_names_from_node(n, referenced, interner);
+                }
             }
         }
         Node::With {
@@ -4202,6 +4251,84 @@ fn collect_referenced_names_from_fstring_parts(
     }
 }
 
+/// Adds every name a pattern binds (`case x`, `*rest`, `**rest`, `as name`) to `names`.
+fn collect_pattern_captures(pattern: &Pattern, names: &mut AHashSet<StringId>) {
+    match pattern {
+        Pattern::Value(_) | Pattern::Singleton(_) => {}
+        Pattern::Sequence { patterns, .. } | Pattern::Or { patterns, .. } => {
+            for p in patterns {
+                collect_pattern_captures(p, names);
+            }
+        }
+        Pattern::Mapping { patterns, rest, .. } => {
+            for p in patterns {
+                collect_pattern_captures(p, names);
+            }
+            if let Some(rest) = rest {
+                names.insert(rest.name_id);
+            }
+        }
+        Pattern::Class {
+            patterns, kwd_patterns, ..
+        } => {
+            for p in patterns.iter().chain(kwd_patterns) {
+                collect_pattern_captures(p, names);
+            }
+        }
+        Pattern::Star { name, .. } => {
+            if let Some(name) = name {
+                names.insert(name.name_id);
+            }
+        }
+        Pattern::As { pattern, name, .. } => {
+            if let Some(inner) = pattern {
+                collect_pattern_captures(inner, names);
+            }
+            if let Some(name) = name {
+                names.insert(name.name_id);
+            }
+        }
+    }
+}
+
+/// Calls `f` on every expression a pattern evaluates: value and singleton
+/// constants, mapping keys and class names. Captures are not expressions.
+fn for_each_pattern_expr(pattern: &Pattern, f: &mut impl FnMut(&ExprLoc)) {
+    match pattern {
+        Pattern::Value(expr) | Pattern::Singleton(expr) => f(expr),
+        Pattern::Sequence { patterns, .. } | Pattern::Or { patterns, .. } => {
+            for p in patterns {
+                for_each_pattern_expr(p, f);
+            }
+        }
+        Pattern::Mapping { keys, patterns, .. } => {
+            for key in keys {
+                f(key);
+            }
+            for p in patterns {
+                for_each_pattern_expr(p, f);
+            }
+        }
+        Pattern::Class {
+            cls,
+            patterns,
+            kwd_patterns,
+            ..
+        } => {
+            f(cls);
+            for p in patterns.iter().chain(kwd_patterns) {
+                for_each_pattern_expr(p, f);
+            }
+        }
+        Pattern::Star { .. } => {}
+        Pattern::As { pattern, .. } => {
+            if let Some(inner) = pattern {
+                for_each_pattern_expr(inner, f);
+            }
+        }
+    }
+}
+
 /// Collects the names an unpack target binds into the given set.
 ///
 /// Recursively traverses nested tuples to find all identifier names. Attribute
@@ -4363,111 +4490,4 @@ fn collect_referenced_names_from_assign_target(
             }
         }
     }
-}
-
-/// Collects every name a pattern binds. Mirrors the parser's own collector; the
-/// two are separate because that one runs before any name is resolved and this
-/// one after, and neither should reach across the phase boundary.
-fn collect_pattern_bindings(pattern: &Pattern, names: &mut Vec<Identifier>) {
-    match pattern {
-        Pattern::Wildcard | Pattern::Value(_) | Pattern::Singleton(_) => {}
-        Pattern::Capture(name) => names.push(*name),
-        Pattern::Star(name) => names.extend(name.iter().copied()),
-        Pattern::Sequence(items) => {
-            for item in items {
-                collect_pattern_bindings(item, names);
-            }
-        }
-        Pattern::Mapping { patterns, rest, .. } => {
-            for item in patterns {
-                collect_pattern_bindings(item, names);
-            }
-            names.extend(rest.iter().copied());
-        }
-        Pattern::Class {
-            positional, keywords, ..
-        } => {
-            for item in positional {
-                collect_pattern_bindings(item, names);
-            }
-            for (_, item) in keywords {
-                collect_pattern_bindings(item, names);
-            }
-        }
-        // Every alternative binds the same names (the parser checked), so one
-        // of them answers for all.
-        Pattern::Or(alternatives) => {
-            if let Some(first) = alternatives.first() {
-                collect_pattern_bindings(first, names);
-            }
-        }
-        Pattern::As { pattern, name } => {
-            collect_pattern_bindings(pattern, names);
-            names.push(*name);
-        }
-    }
-}
-
-/// Runs `visit` on every expression a pattern evaluates: the values it compares
-/// against, the classes it tests, and the mapping keys it looks up.
-fn visit_pattern_exprs(pattern: &Pattern, visit: &mut impl FnMut(&ExprLoc)) {
-    match pattern {
-        Pattern::Wildcard | Pattern::Capture(_) | Pattern::Singleton(_) | Pattern::Star(_) => {}
-        Pattern::Value(expr) => visit(expr),
-        Pattern::Sequence(items) => {
-            for item in items {
-                visit_pattern_exprs(item, visit);
-            }
-        }
-        Pattern::Mapping { keys, patterns, .. } => {
-            for key in keys {
-                visit(key);
-            }
-            for item in patterns {
-                visit_pattern_exprs(item, visit);
-            }
-        }
-        Pattern::Class {
-            cls,
-            positional,
-            keywords,
-        } => {
-            visit(cls);
-            for item in positional {
-                visit_pattern_exprs(item, visit);
-            }
-            for (_, item) in keywords {
-                visit_pattern_exprs(item, visit);
-            }
-        }
-        Pattern::Or(alternatives) => {
-            for item in alternatives {
-                visit_pattern_exprs(item, visit);
-            }
-        }
-        Pattern::As { pattern, .. } => visit_pattern_exprs(pattern, visit),
-    }
-}
-
-/// Collects the names a pattern *reads* (never the ones it binds).
-fn collect_pattern_referenced_names(
-    pattern: &Pattern,
-    referenced: &mut AHashSet<StringId>,
-    interner: &CompileInterns<'_>,
-) {
-    visit_pattern_exprs(pattern, &mut |expr| {
-        collect_referenced_names_from_expr(expr, referenced, interner);
-    });
-}
-
-/// Flags our locals that a nested scope inside a pattern expression captures.
-fn collect_pattern_cell_vars(
-    pattern: &Pattern,
-    our_locals: &AHashSet<StringId>,
-    cell_vars: &mut AHashSet<StringId>,
-    interner: &CompileInterns<'_>,
-) {
-    visit_pattern_exprs(pattern, &mut |expr| {
-        collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
-    });
 }

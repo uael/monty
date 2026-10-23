@@ -3,8 +3,8 @@
 //! A paused `RunProgress` goes through the real dump format ([`monty::dump`] /
 //! [`monty::Dump::load`]), which is how a host would actually snapshot it.
 //! `MontyRun` has no dump of its own — it is compiled code, not a session — but
-//! it is `Serialize`/`Deserialize`, so it is round-tripped through postcard
-//! directly to cover the serde impls a dump ultimately rests on.
+//! it is `Serialize`/`Deserialize`, so it is round-tripped through the dump
+//! codec directly to cover the serde impls a dump ultimately rests on.
 
 use std::fmt::Write;
 
@@ -16,15 +16,15 @@ use monty_types::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::to_value;
 
-/// Round-trips compiled code through postcard.
+/// Round-trips compiled code through the dump codec, without the dump header.
 fn round_trip<T: Serialize + DeserializeOwned>(value: &T) -> T {
-    postcard::from_bytes(&postcard::to_allocvec(value).unwrap()).unwrap()
+    minicbor_serde::from_slice(&minicbor_serde::to_vec(value).unwrap()).unwrap()
 }
 
 /// Round-trips a paused run through the dump format, asserting it comes back on
 /// the arm it went out on.
 fn round_trip_progress(progress: &RunProgress) -> RunProgress {
-    let bytes = dump("test.py", None, SessionRef::Running(progress)).unwrap();
+    let bytes = dump("test.py", None, &[], SessionRef::Running(progress)).unwrap();
     match Dump::load(&bytes).unwrap().state {
         Session::Running(progress) => *progress,
         _ => panic!("dumped a running session, loaded something else"),
@@ -161,7 +161,7 @@ fn monty_run_round_trip_comprehension_closure() {
 #[test]
 fn static_interns_deserialize_as_unknown_text() {
     let runner = MontyRun::new("'partial'".to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
-    let mut bytes = postcard::to_allocvec(&runner).unwrap();
+    let mut bytes = minicbor_serde::to_vec(&runner).unwrap();
     let positions: Vec<_> = bytes
         .windows(b"partial".len())
         .enumerate()
@@ -170,7 +170,7 @@ fn static_interns_deserialize_as_unknown_text() {
     assert_eq!(positions.len(), 2, "expected interner text and source text");
     bytes[positions[0]..positions[0] + b"mystery".len()].copy_from_slice(b"mystery");
 
-    let mut loaded: MontyRun = postcard::from_bytes(&bytes).unwrap();
+    let mut loaded: MontyRun = minicbor_serde::from_slice(&bytes).unwrap();
     assert_eq!(
         loaded.run_no_limits(vec![]).unwrap(),
         MontyObject::string("mystery".to_owned()),
@@ -237,7 +237,7 @@ fn execution_interns_module_static_strings() {
         CompileOptions::default(),
     )
     .unwrap();
-    let bytes = postcard::to_allocvec(&runner).unwrap();
+    let bytes = minicbor_serde::to_vec(&runner).unwrap();
     assert_eq!(
         bytes
             .windows(b"partial".len())
@@ -245,7 +245,7 @@ fn execution_interns_module_static_strings() {
             .count(),
         0
     );
-    let mut loaded: MontyRun = postcard::from_bytes(&bytes).unwrap();
+    let mut loaded: MontyRun = minicbor_serde::from_slice(&bytes).unwrap();
     assert_eq!(loaded.run_no_limits(vec![]).unwrap(), MontyObject::int(1));
     assert_eq!(loaded.run_no_limits(vec![]).unwrap(), MontyObject::int(1));
 }
@@ -341,6 +341,70 @@ fn run_progress_round_trip_at_external_call() {
     assert_eq!(result.into_complete().unwrap(), MontyObject::int(101)); // 100 + 1
 }
 
+/// Interned integer roots retain their identities and interner references across suspension and restore.
+#[test]
+fn run_progress_round_trip_interned_integers() {
+    let code = "
+def literal():
+    return 18446744073709551616
+n = literal()
+identity = id(n)
+d = {n: 'value'}
+ext_fn(n)
+assert literal() is n
+assert id(n) == identity
+assert d[1 << 64] == 'value'
+assert 2 * n == 1 << 65
+n
+";
+    let runner = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let progress = runner
+        .start(vec![], ResourceTracker::default(), PrintWriter::Disabled)
+        .unwrap();
+    let progress = resolve_name_lookups(progress).unwrap();
+    let loaded = round_trip_progress(&progress);
+    for progress in [progress, loaded] {
+        let call = progress.into_function_call().expect("should be at function call");
+        let expected = call.args.args().next().unwrap().to_owned();
+        let result = call.resume(MontyObject::none(), PrintWriter::Disabled).unwrap();
+        assert_eq!(result.into_complete().unwrap(), expected);
+    }
+}
+
+/// A dump keeps a deleted entry's tombstone, so an iterator dumped past one
+/// resumes on the entry it would have read next. Compacting the table would
+/// renumber its slots and skip `2`.
+#[test]
+fn run_progress_round_trip_iterators_past_a_tombstone() {
+    let code = "
+d = {i: i for i in range(4)}
+d.pop(0)
+di = iter(d)
+next(di)
+s = {0, 1, 2, 3}
+s.discard(0)
+si = iter(s)
+next(si)
+ext_fn()
+str((list(di), list(si)))
+";
+    let runner = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let progress = runner
+        .start(vec![], ResourceTracker::default(), PrintWriter::Stdout)
+        .unwrap();
+    let progress = resolve_name_lookups(progress).unwrap();
+    let loaded = round_trip_progress(&progress);
+
+    // Both are resumed, as in the itertools test below: an unresumed
+    // `RunProgress` leaves its globals' refs unreleased.
+    let expected = MontyObject::string("([2, 3], [2, 3])");
+    for progress in [progress, loaded] {
+        let call = progress.into_function_call().expect("should be at function call");
+        let result = call.resume(MontyObject::none(), PrintWriter::Stdout).unwrap();
+        assert_eq!(result.into_complete().unwrap(), expected);
+    }
+}
+
 #[test]
 fn run_progress_round_trip_multiple_calls() {
     // Test multiple external calls with a round-trip between each
@@ -380,7 +444,7 @@ fn run_progress_round_trip_multiple_calls() {
 
 /// Live `itertools` iterators on the heap survive a round-trip with their state
 /// intact — the only coverage that carries `HeapData::Itertools` through
-/// postcard, since a `MontyRun` dump holds compiled code and no heap at all.
+/// the dump codec, since a `MontyRun` dump holds compiled code and no heap at all.
 #[test]
 fn run_progress_round_trip_preserves_itertools_iterators() {
     let code = r"
@@ -427,7 +491,7 @@ ext_fn(0)
 
 /// A live `functools.partial` on the heap survives a round-trip with its bound
 /// callable, positionals and keywords intact — the only coverage that carries
-/// `HeapData::Partial` through postcard.
+/// `HeapData::Partial` through the dump codec.
 #[test]
 fn run_progress_round_trip_preserves_partial() {
     let code = r"
@@ -474,7 +538,7 @@ ext_fn(0)
 
 /// A live `types.GenericAlias` on the heap survives a round-trip with its
 /// origin and `__args__` tuple intact — the only coverage that carries
-/// `HeapData::GenericAlias` through postcard.
+/// `HeapData::GenericAlias` through the dump codec.
 #[test]
 fn run_progress_round_trip_preserves_generic_alias() {
     let code = r"
@@ -516,7 +580,7 @@ ext_fn(0)
 }
 
 /// A live `typing.Union` on the heap survives a round-trip with its members
-/// intact — the only coverage that carries `HeapData::Union` through postcard.
+/// intact — the only coverage that carries `HeapData::Union` through the dump codec.
 #[test]
 fn run_progress_round_trip_preserves_union() {
     let code = r"

@@ -10,13 +10,13 @@
 //! supports coroutine external functions.
 
 mod async_dispatch;
-mod auto_os_calls;
 mod build;
 mod callback_context;
 pub mod exceptions;
 mod external;
 mod limits;
 mod mount;
+mod os_policy;
 mod pool;
 mod print_target;
 mod snapshot;
@@ -27,7 +27,7 @@ use std::sync::OnceLock;
 
 pub use exceptions::{
     MontyConversionError, MontyCrashedError, MontyDisconnectError, MontyError, MontyRuntimeError, MontyShutdown,
-    MontySyntaxError, MontyTypingError, PyFrame,
+    MontySyntaxError, MontyTypingError, PyFrame, PySourceRange,
 };
 pub use mount::PyMountDir;
 pub use pool::{PyAsyncMonty, PyAsyncMontySession, PyAsyncMontyWebsocket, PyMonty, PyMontySession};
@@ -75,7 +75,7 @@ pub(crate) fn get_not_handled(py: Python<'_>) -> PyResult<&Py<PyAny>> {
     NOT_HANDLED.get_or_try_init(py, || Py::new(py, NotHandledSentinel).map(Py::into_any))
 }
 
-/// Monty - A sandboxed Python interpreter written in Rust.
+/// Monty - a secure Python sandbox written in Rust.
 #[pymodule]
 mod _monty {
     // `MontyFileHandle` is produced by the value-conversion layer (in
@@ -84,13 +84,18 @@ mod _monty {
     // `MontyClassProxy` / `MontyClassTypeProxy` are the read-only proxies the
     // conversion layer builds for class instances and classes with no original
     // host object (sandbox-defined, or returned after a session restore into a
-    // fresh session).
+    // fresh session); `MontyStdTypeProxy` stands in for builtin functions and
+    // type objects the host never materialises from sandbox output.
+    #[pymodule_export]
+    use monty_proto::python::PyExternalModule as ExternalModule;
     #[pymodule_export]
     use monty_proto::python::PyMontyClassProxy as MontyClassProxy;
     #[pymodule_export]
     use monty_proto::python::PyMontyClassTypeProxy as MontyClassTypeProxy;
     #[pymodule_export]
     use monty_proto::python::PyMontyFileHandle as MontyFileHandle;
+    #[pymodule_export]
+    use monty_proto::python::PyMontyStdTypeProxy as MontyStdTypeProxy;
     use pyo3::prelude::*;
 
     #[pymodule_export]
@@ -142,14 +147,18 @@ mod _monty {
     #[pymodule_export]
     use super::PyNameLookupSnapshot as NameLookupSnapshot;
     #[pymodule_export]
+    use super::PySourceRange as SourceRange;
+    #[pymodule_export]
     use super::telemetry::_install_telemetry;
-    use super::{get_not_handled, get_version};
+    use super::{get_not_handled, get_version, pool::binary_finder};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let py = m.py();
         m.add("__version__", get_version())?;
         m.add("NOT_HANDLED", get_not_handled(py)?.clone_ref(py))?;
+        // cache the binary resolver now so pool construction never imports
+        binary_finder(py)?;
         Ok(())
     }
 }

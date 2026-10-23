@@ -13,7 +13,7 @@ Python and JavaScript packages — drives `monty subprocess` children over
 framed stdio (or a WebSocket), and a dead child is simply replaced. This crate
 defines the protocol both sides speak.
 
-The protocol is protobuf (rather than Monty's internal postcard format) so a
+The protocol is protobuf (rather than Monty's internal CBOR dump format) so a
 parent or child can be implemented in any language — see
 [`proto/monty/v1/monty.proto`](https://github.com/pydantic/monty/blob/main/crates/monty-proto/proto/monty/v1/monty.proto)
 for the schema and the protocol rules documented alongside it.
@@ -32,7 +32,12 @@ for the schema and the protocol rules documented alongside it.
   nodes carry host-generated uuids, and `FunctionCall.object_id` /
   `NameLookup.object_id` route their method calls and lazy attribute lookups
   back to the parent's per-session instance store; sandbox-defined classes and
-  instances carry worker-generated uuids that never reach that store.
+  instances carry worker-generated uuids that never reach that store. Calling a
+  host-backed instance arrives as a `__call__` method call on its uuid.
+- Host modules: `OsCall.import` requests a missing top-level module; answer with its value or `not_found`.
+  Dotted imports read further components as attributes of that value.
+  Before type checking, `import_stubs` requests host stubs once per module per session.
+  Answer with a dict of dotted module paths to `.pyi` source or `None`.
 - `PROTOCOL_VERSION` / `MIN_SUPPORTED_PROTOCOL_VERSION` — the wire schema
   version a parent declares in `Configure`, and the range a child serves.
   Versioned independently of the monty package: peers on different releases

@@ -4,8 +4,13 @@
 //! runs against both interpreters. Here is the boundary: what a generator body
 //! may not contain, and what the saved frame survives.
 
+use std::mem;
+
 use monty::{Dump, MontyRepl, MontyRun, RunProgress, Session, SessionRef, dump};
-use monty_types::{CompileOptions, ExtFunctionResult, MontyObject, NameLookupResult, PrintWriter, ResourceTracker};
+use monty_types::{
+    CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter,
+    ResourceTracker,
+};
 
 fn session() -> MontyRepl {
     MontyRepl::new("gen.py", ResourceTracker::default(), CompileOptions::default())
@@ -166,7 +171,7 @@ fn a_suspended_generator_survives_dump_and_load() {
     assert_eq!(feed(&mut repl, "next(g) == 0"), t(true));
     assert_eq!(feed(&mut repl, "next(g) == 1"), t(true));
 
-    let bytes = dump("gen.py", None, SessionRef::Idle(&repl)).unwrap();
+    let bytes = dump("gen.py", None, &[], SessionRef::Idle(&repl)).unwrap();
     let mut back = match Dump::load(&bytes).unwrap().state {
         Session::Idle(repl) => *repl,
         _ => panic!("dumped an idle session, loaded something else"),
@@ -189,7 +194,7 @@ fn a_delegating_generator_survives_dump_and_load() {
     feed(&mut repl, "def outer():\n    yield from inner()\ng = outer()");
     assert_eq!(feed(&mut repl, "next(g) == 1"), t(true));
 
-    let bytes = dump("gen.py", None, SessionRef::Idle(&repl)).unwrap();
+    let bytes = dump("gen.py", None, &[], SessionRef::Idle(&repl)).unwrap();
     let mut back = match Dump::load(&bytes).unwrap().state {
         Session::Idle(repl) => *repl,
         _ => panic!("dumped an idle session, loaded something else"),
@@ -275,11 +280,17 @@ fn answer(mut progress: RunProgress, dumping: bool) -> (MontyObject, Vec<i64>) {
     let mut asked = Vec::new();
     loop {
         if dumping && matches!(progress, RunProgress::FunctionCall(_)) {
-            let bytes = dump("gen.py", None, SessionRef::Running(&progress)).unwrap();
+            let bytes = dump("gen.py", None, &[], SessionRef::Running(&progress)).unwrap();
             let Session::Running(back) = Dump::load(&bytes).unwrap().state else {
                 panic!("dumped a run, loaded something else")
             };
-            progress = *back;
+            // end the dumped original, which releases its heap; the restored copy carries on
+            let original = mem::replace(&mut progress, *back);
+            original
+                .into_function_call()
+                .unwrap()
+                .abort(MontyException::new(ExcType::RuntimeError, None), PrintWriter::Disabled)
+                .unwrap_err();
         }
         progress = match progress {
             RunProgress::NameLookup(lookup) => {

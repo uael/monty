@@ -29,10 +29,6 @@ pub struct MontyException {
     /// Stack trace of the exception, first is the outermost frame shown first in the traceback
     traceback: Vec<StackFrame>,
     /// Structured payload for exception types that carry more than a message.
-    /// No `skip_serializing_if`: exceptions round-trip through
-    /// non-self-describing snapshot formats where skipped fields break
-    /// deserialization.
-    #[serde(default)]
     data: ExcData,
 }
 
@@ -356,6 +352,9 @@ pub enum ExcType {
     /// Subclass of ValueError for invalid JSON syntax in `json.loads()`.
     #[strum(serialize = "json.JSONDecodeError")]
     JsonDecodeError,
+    /// Subclass of ValueError for invalid TOML in `tomllib.loads()` / `tomllib.load()`.
+    #[strum(serialize = "tomllib.TOMLDecodeError")]
+    TomlDecodeError,
 
     // --- ImportError hierarchy ---
     /// Import-related errors (module not found, name not in module).
@@ -427,6 +426,13 @@ pub enum ExcType {
     #[strum(serialize = "binascii.Incomplete")]
     BinasciiIncomplete,
 
+    // --- csv module ---
+    /// `csv.Error` - raised by the `csv` readers and writers for malformed data
+    /// and unknown dialect names.
+    ///
+    /// A direct `Exception` subclass, named `_csv.Error` as in CPython.
+    #[strum(serialize = "_csv.Error")]
+    CsvError,
     /// `GeneratorExit`, thrown into a generator by `close()`.
     ///
     /// A direct `BaseException` subclass like `SystemExit`, so `except
@@ -491,6 +497,7 @@ impl ExcType {
                 Self::UnicodeDecodeError
                     | Self::UnicodeEncodeError
                     | Self::JsonDecodeError
+                    | Self::TomlDecodeError
                     | Self::BinasciiError
                     | Self::UnsupportedOperation
             ),
@@ -586,7 +593,7 @@ pub struct UnicodeErrorData {
 #[derive(Debug, Clone, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum UnicodeErrorObject {
     /// A decode error's input `bytes`.
-    Bytes(Vec<u8>),
+    Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
     /// An encode error's input `str`.
     Str(String),
 }
@@ -635,7 +642,8 @@ impl UnicodeErrorData {
 }
 
 /// Structured fields of a `json.JSONDecodeError`, mirroring CPython's `msg` /
-/// `doc` / `pos` / `lineno` / `colno` exception attributes.
+/// `doc` / `pos` / `lineno` / `colno` exception attributes. `tomllib.TOMLDecodeError`
+/// defines the same five attributes, so it carries this payload too.
 ///
 /// As with [`UnicodeErrorData`], the payload exists so host bindings can
 /// construct a real `json.JSONDecodeError` instead of falling back to a plain
@@ -793,8 +801,10 @@ impl fmt::Display for StackFrame {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CodeLoc {
     /// Line number (1-based).
+    #[serde(rename = "L")]
     pub line: u32,
     /// Column number (1-based), counted in characters (not bytes).
+    #[serde(rename = "C")]
     pub column: u32,
 }
 
@@ -817,6 +827,55 @@ impl CodeLoc {
         Self {
             line: line.saturating_add(1),
             column: column.saturating_add(1),
+        }
+    }
+}
+
+/// The source range of the expression that suspended execution, carried by
+/// every suspension.
+///
+/// `start` and `end` are UTF-8 byte offsets into the named source, `end`
+/// exclusive: slice the source's bytes (in Python, `source.encode()[start:end]`)
+/// rather than indexing the string. A peer that sends no position reads as
+/// [`Self::unknown`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SourceRange {
+    /// The source the range indexes, named as a traceback frame names it: an
+    /// in-process one-shot run's script name, `<python-input-N>` for a feed,
+    /// `<string>` in `eval()` / `exec()`.
+    pub filename: String,
+    /// Byte offset where the expression starts.
+    pub start: u32,
+    /// Byte offset where the expression ends (exclusive).
+    pub end: u32,
+}
+
+impl SourceRange {
+    /// Longest `filename` a range carries, in bytes, so a peer cannot make hosts copy a huge name.
+    pub const MAX_FILENAME_LEN: usize = 256;
+
+    /// Builds a range, cutting `filename` on a char boundary.
+    #[must_use]
+    pub fn new(filename: &str, start: u32, end: u32) -> Self {
+        let mut len = filename.len().min(Self::MAX_FILENAME_LEN);
+        while !filename.is_char_boundary(len) {
+            len -= 1;
+        }
+        Self {
+            filename: filename[..len].to_owned(),
+            start,
+            end,
+        }
+    }
+
+    /// The range a host reports when its peer sent no position: an empty
+    /// filename and an empty range at offset zero.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            filename: String::new(),
+            start: 0,
+            end: 0,
         }
     }
 }

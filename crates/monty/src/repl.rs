@@ -13,8 +13,8 @@ use std::{mem, sync::Arc};
 
 use ahash::AHashMap;
 use monty_types::{
-    AutoOsCalls, CallArgs, ExcType, InvalidInputError, MontyException, MontyObject, MontyUuid, NamedValues,
-    OsFunctionCall, PrintWriter, ResourceTracker,
+    CallArgs, ExcType, InvalidInputError, MontyException, MontyObject, MontyUuid, NamedValues, OsFunctionCall,
+    OsPolicy, PrintWriter, ResourceTracker, SOURCE_SCAN_THRESHOLD, SourceRange,
     unstable::{self, MontyGraph, NodeId},
 };
 use ruff_python_ast::token::TokenKind;
@@ -30,11 +30,13 @@ use crate::{
     modules::table::ModuleTable,
     name_map::NameMap,
     object_bridge::{MontyGraphExt, MontyObjectExt},
+    parse::source_nesting_exception,
     run::{CompileOptions, DEFAULT_CWD, Executor, Program, ReplSession, SessionTables},
     run_progress::{
         ConvertedExit, ExtFunctionResult, LookupAnswer, LookupScope, NameLookupResult, convert_frame_exit,
         resume_lookup, resume_with_result,
     },
+    source_nesting::source_within_nesting_bound,
     types::{SessionRandom, tuple::allocate_tuple},
     value::Value,
     virtual_path::canonical_cwd,
@@ -74,16 +76,13 @@ pub struct MontyRepl {
     /// `CodeRange` byte offsets that index into snippet M's source, so the
     /// diagnostic pass must be able to look that source up by filename —
     /// the current snippet's `Executor.code` is not sufficient.
-    #[serde(default)]
     sources: AHashMap<String, Arc<str>>,
     /// [`CompileOptions`] applied to every snippet fed to this session, fixed
     /// at construction so all snippets compile consistently.
-    #[serde(default)]
     options: CompileOptions,
     /// OS-call policies shared with each snippet's executor.
-    /// See [`with_auto_os_calls`](Self::with_auto_os_calls).
-    #[serde(default)]
-    auto_os_calls: Arc<AutoOsCalls>,
+    /// See [`with_os_policy`](Self::with_os_policy).
+    os_policy: Arc<OsPolicy>,
     /// Sandbox working directory the next snippet starts in: what
     /// [`set_cwd`](Self::set_cwd) chose, then whatever `os.chdir` left the
     /// last snippet in — the directory is session state, like the globals.
@@ -125,7 +124,7 @@ impl MontyRepl {
             interns: Interns::default(),
             sources: AHashMap::new(),
             options,
-            auto_os_calls: Arc::new(AutoOsCalls::default()),
+            os_policy: Arc::new(OsPolicy::default()),
             cwd: Arc::from(DEFAULT_CWD),
             random: SessionRandom::default(),
             modules: ModuleTable::default(),
@@ -134,12 +133,33 @@ impl MontyRepl {
         }
     }
 
+    /// The [`CompileOptions`] every snippet fed to this session compiles with.
+    #[must_use]
+    pub fn options(&self) -> CompileOptions {
+        self.options
+    }
+
+    /// Rejects a snippet whose nesting would let the parser grow its stack past
+    /// the limit, with the `SyntaxError` compiling it would raise.
+    ///
+    /// For hosts that want the verdict before doing other work on the snippet
+    /// (the worker type-checks after it); the returned [`CheckedSource`] lets
+    /// [`feed_start_checked`](Self::feed_start_checked) skip the scan. Plain
+    /// feeds scan for themselves (see `limitations/language.md`).
+    ///
+    /// # Errors
+    /// The `SyntaxError: Source is too deeply nested` located in the snippet.
+    pub fn check_source<'a>(&self, code: &'a str) -> Result<CheckedSource<'a>, MontyException> {
+        source_nesting_exception(code, &self.script_name, self.options.source_scan_threshold)?;
+        Ok(CheckedSource(code))
+    }
+
     /// Replaces the default clock, sleep and random initialization policies
     /// on every path, including [`feed_start`](Self::feed_start). See
-    /// [`MontyRun::with_auto_os_calls`](crate::MontyRun::with_auto_os_calls).
+    /// [`MontyRun::with_os_policy`](crate::MontyRun::with_os_policy).
     #[must_use]
-    pub fn with_auto_os_calls(mut self, auto_os_calls: AutoOsCalls) -> Self {
-        self.auto_os_calls = Arc::new(auto_os_calls);
+    pub fn with_os_policy(mut self, os_policy: OsPolicy) -> Self {
+        self.os_policy = Arc::new(os_policy);
         self
     }
 
@@ -216,6 +236,9 @@ impl MontyRepl {
     /// returned inside [`ReplStartError`] so the caller can continue feeding
     /// subsequent snippets against the same heap and namespace state.
     ///
+    /// The snippet is scanned for nesting first; [`feed_start_checked`](Self::feed_start_checked)
+    /// takes one [`check_source`](Self::check_source) already vetted.
+    ///
     /// # Errors
     /// Returns a boxed [`ReplStartError`] for syntax, compile-time, or runtime
     /// failures — the REPL session is always preserved inside the error.
@@ -225,6 +248,24 @@ impl MontyRepl {
         inputs: impl Into<NamedValues>,
         print: PrintWriter<'_>,
     ) -> Result<ReplProgress, Box<ReplStartError>> {
+        match self.check_source(code) {
+            Ok(checked_code) => self.feed_start_checked(checked_code, inputs, print),
+            Err(error) => Err(Box::new(ReplStartError { repl: self, error })),
+        }
+    }
+
+    /// [`feed_start`](Self::feed_start) for a snippet [`check_source`](Self::check_source)
+    /// already vetted, so the scan is not repeated.
+    ///
+    /// # Errors
+    /// As [`feed_start`](Self::feed_start).
+    pub fn feed_start_checked(
+        self,
+        code: CheckedSource<'_>,
+        inputs: impl Into<NamedValues>,
+        print: PrintWriter<'_>,
+    ) -> Result<ReplProgress, Box<ReplStartError>> {
+        let code = code.0;
         let mut this = self;
         if code.is_empty() {
             return Ok(ReplProgress::Complete {
@@ -243,7 +284,7 @@ impl MontyRepl {
         let session = ReplSession {
             script_name: &this.script_name,
             cwd: &this.cwd,
-            auto_os_calls: &this.auto_os_calls,
+            os_policy: &this.os_policy,
         };
         let mut executor = match Executor::new_repl_snippet(
             code,
@@ -311,6 +352,8 @@ impl MontyRepl {
     /// partially mutating globals, those mutations remain visible in later feeds,
     /// matching Python REPL semantics.
     ///
+    /// The snippet is scanned for nesting first.
+    ///
     /// # Errors
     /// Returns [`MontyException`] for syntax/compile/runtime failures.
     pub fn feed_run(
@@ -322,6 +365,7 @@ impl MontyRepl {
         if code.is_empty() {
             return Ok(MontyObject::none());
         }
+        source_nesting_exception(code, &self.script_name, self.options.source_scan_threshold)?;
 
         let (input_values, names) = unstable::into_named_values_parts(inputs.into());
         let (input_names, input_ids): (Vec<_>, Vec<_>) = names.into_iter().unzip();
@@ -336,7 +380,7 @@ impl MontyRepl {
         let session = ReplSession {
             script_name: &self.script_name,
             cwd: &self.cwd,
-            auto_os_calls: &self.auto_os_calls,
+            os_policy: &self.os_policy,
         };
         let mut executor = Executor::new_repl_snippet(
             code,
@@ -441,7 +485,7 @@ impl MontyRepl {
             ReplSession {
                 script_name: &self.script_name,
                 cwd: &self.cwd,
-                auto_os_calls: &self.auto_os_calls,
+                os_policy: &self.os_policy,
             },
         )?;
         self.sources.insert(input_script_name, executor.program.code.clone());
@@ -487,7 +531,7 @@ impl MontyRepl {
                                     vm.run_external()
                                 }
                                 Ok(exit) => {
-                                    let error = vm.unsupported_frame_exit("MontyRepl::call_function", exit);
+                                    let error = vm.unsupported_frame_exit(exit);
                                     vm.resume_with_exception(error)
                                 }
                                 Err(error) => {
@@ -580,15 +624,38 @@ impl MontyRepl {
         }
     }
 
-    /// Returns the generated filename for the next interactive execution.
+    /// The filename the next snippet will run as, which a host can name in a
+    /// [`SourceRange`] it reports ahead of that snippet.
     ///
     /// CPython labels interactive inputs as `<python-input-N>`. Snippets and
     /// host function calls share this sequence so every traceback call site
     /// can be correlated with the session's execution history.
+    #[must_use]
+    pub fn next_script_name(&self) -> String {
+        format!("<python-input-{}>", self.next_input_id)
+    }
+
+    /// Takes the next interactive execution's filename; see [`Self::next_script_name`].
     fn next_input_script_name(&mut self) -> String {
-        let input_id = self.next_input_id;
+        let name = self.next_script_name();
         self.next_input_id += 1;
-        format!("<python-input-{input_id}>")
+        name
+    }
+}
+
+/// A snippet [`MontyRepl::check_source`] found within the nesting bound,
+/// which [`MontyRepl::feed_start_checked`] therefore need not scan again.
+///
+/// The verdict used the checking REPL's `source_scan_threshold`, so feed it
+/// to that REPL (or one configured alike), as the worker does.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckedSource<'a>(&'a str);
+
+impl<'a> CheckedSource<'a> {
+    /// The checked snippet, for the type checker and import scan that run before the feed.
+    #[must_use]
+    pub fn code(&self) -> &'a str {
+        self.0
     }
 }
 
@@ -721,6 +788,18 @@ impl ReplProgress {
             Self::Returned { call, .. } => call.snapshot.repl.tracker(),
         }
     }
+
+    /// Returns the mutable tracker so hosts can tighten restored limits before resuming execution.
+    pub fn tracker_mut(&mut self) -> &mut ResourceTracker {
+        match self {
+            Self::FunctionCall(call) => call.snapshot.repl.tracker_mut(),
+            Self::OsCall(call) => call.snapshot.repl.tracker_mut(),
+            Self::Returned { call, .. } => call.snapshot.repl.tracker_mut(),
+            Self::ResolveFutures(state) => state.repl.tracker_mut(),
+            Self::NameLookup(lookup) => lookup.snapshot.repl.tracker_mut(),
+            Self::Complete { repl, .. } => repl.tracker_mut(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -745,6 +824,8 @@ pub struct ReplFunctionCall {
     pub object_id: Option<MontyUuid>,
     /// The host may await a coroutine and answer with [`Self::resume_eager`].
     pub allow_eager_await: bool,
+    /// Where the call expression is in the source.
+    pub position: SourceRange,
     /// Internal REPL execution snapshot.
     snapshot: ReplSnapshot,
 }
@@ -764,7 +845,7 @@ impl ReplFunctionCall {
         result: impl Into<ExtFunctionResult>,
         print: PrintWriter<'_>,
     ) -> Result<ReplProgress, Box<ReplStartError>> {
-        self.snapshot.run(result, print)
+        self.snapshot.run(result.into(), print)
     }
 
     /// Resumes execution by pushing an `ExternalFuture` for async resolution.
@@ -834,6 +915,7 @@ impl ReplFunctionCall {
             call_id,
             object_id,
             allow_eager_await,
+            position,
             mut snapshot,
         } = self;
         snapshot.waiting.push(Waiting {
@@ -842,6 +924,7 @@ impl ReplFunctionCall {
             call_id,
             object_id,
             allow_eager_await,
+            position,
         });
         snapshot.step(print, |vm| {
             let callable = match callable.to_value(vm) {
@@ -868,6 +951,7 @@ struct Waiting {
     call_id: u32,
     object_id: Option<MontyUuid>,
     allow_eager_await: bool,
+    position: SourceRange,
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +970,8 @@ pub struct ReplOsCall {
     /// The host may await its wait and answer with [`Self::resume_eager`];
     /// see [`OsCall::allow_eager_await`](crate::OsCall::allow_eager_await).
     pub allow_eager_await: bool,
+    /// Where the call expression is in the source.
+    pub position: SourceRange,
     /// Internal REPL execution snapshot.
     snapshot: ReplSnapshot,
 }
@@ -959,6 +1045,8 @@ impl ReplOsCall {
 pub struct ReplNameLookup {
     /// The name being looked up.
     pub name: String,
+    /// Where the name (or attribute access) is in the source.
+    pub position: SourceRange,
     /// Where the resolved value lands (namespace slot or host attribute).
     scope: LookupScope,
     /// Internal REPL execution snapshot.
@@ -994,7 +1082,9 @@ impl ReplNameLookup {
     /// `AttributeError`. `Error` raises the host's exception in the sandbox,
     /// bypassing any `hasattr()` / `getattr()` default.
     pub fn resume(self, result: NameLookupResult, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
-        let Self { name, scope, snapshot } = self;
+        let Self {
+            name, scope, snapshot, ..
+        } = self;
         snapshot.step(print, |vm| {
             // Resolve the name lookup result with the VM alive
             let answer = LookupAnswer::new(result, vm);
@@ -1021,6 +1111,8 @@ pub struct ReplResolveFutures {
     vm_state: VMSnapshot,
     /// Pending call IDs expected by this snapshot.
     pending_call_ids: Vec<u32>,
+    /// Where the main task's blocked `await` is in the source.
+    position: SourceRange,
 }
 
 impl ReplResolveFutures {
@@ -1055,6 +1147,12 @@ impl ReplResolveFutures {
         &self.pending_call_ids
     }
 
+    /// Returns where the main task's blocked `await` is in the source.
+    #[must_use]
+    pub fn position(&self) -> &SourceRange {
+        &self.position
+    }
+
     /// Aborts with an uncatchable exception and abandons pending futures.
     pub fn abort(self, exc: MontyException, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
         let Self {
@@ -1084,6 +1182,7 @@ impl ReplResolveFutures {
             mut executor,
             vm_state,
             pending_call_ids,
+            ..
         } = self;
 
         let invalid_call_id = results
@@ -1164,6 +1263,10 @@ pub enum ReplContinuationMode {
 ///   syntax error that should be shown immediately).
 #[must_use]
 pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
+    // Complete because feeding it raises the SyntaxError; parsing it here would grow the stack unguarded.
+    if !source_within_nesting_bound(source, SOURCE_SCAN_THRESHOLD) {
+        return ReplContinuationMode::Complete;
+    }
     let Err(error) = parse_module(source) else {
         return ReplContinuationMode::Complete;
     };
@@ -1386,6 +1489,7 @@ impl ReplSnapshot {
                     call_id,
                     object_id,
                     allow_eager_await,
+                    position,
                 } = waiting
                     .pop()
                     .expect("a call of the host returns to the call it came before");
@@ -1395,6 +1499,7 @@ impl ReplSnapshot {
                     call_id,
                     object_id,
                     allow_eager_await,
+                    position,
                     snapshot: Self {
                         repl,
                         executor,
@@ -1500,25 +1605,32 @@ fn build_repl_progress(
             call_id,
             object_id,
             allow_eager_await,
+            position,
         } => Ok(ReplProgress::FunctionCall(ReplFunctionCall {
             function_name,
             args,
             call_id,
             object_id,
             allow_eager_await,
+            position,
             snapshot: new_repl_snapshot!(),
         })),
         ConvertedExit::OsCall {
             function_call,
             call_id,
             allow_eager_await,
+            position,
         } => Ok(ReplProgress::OsCall(ReplOsCall {
             function_call,
             call_id,
             allow_eager_await,
+            position,
             snapshot: new_repl_snapshot!(),
         })),
-        ConvertedExit::ResolveFutures(pending_call_ids) => {
+        ConvertedExit::ResolveFutures {
+            pending_call_ids,
+            position,
+        } => {
             // A call of the host cannot await, so no task blocks under one.
             assert!(waiting.is_empty(), "tasks blocked under a call of the host");
             Ok(ReplProgress::ResolveFutures(ReplResolveFutures {
@@ -1526,10 +1638,12 @@ fn build_repl_progress(
                 executor,
                 vm_state: vm_state.expect("snapshot should exist for ResolveFutures"),
                 pending_call_ids,
+                position,
             }))
         }
-        ConvertedExit::NameLookup { name, scope } => Ok(ReplProgress::NameLookup(ReplNameLookup {
+        ConvertedExit::NameLookup { name, scope, position } => Ok(ReplProgress::NameLookup(ReplNameLookup {
             name,
+            position,
             scope,
             snapshot: new_repl_snapshot!(),
         })),

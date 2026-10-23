@@ -1,6 +1,6 @@
 # Limitations
 
-Monty is not a Python implementation aiming for completeness.
+Monty is a sandbox, not a Python implementation aiming for completeness.
 It implements enough Python for a model to express what it wants to do, and deliberately stops there.
 Everything it does implement is meant to behave exactly like CPython 3.14; everywhere it does not, the divergence is
 written down.
@@ -23,27 +23,28 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - `def`, `async def`, nested functions, closures, `lambda`
 - Decorators on functions, classes and methods
 - Simple classes: instance methods, `__init__`, `__repr__`/`__str__`, `__eq__`/`__hash__`, `__iter__`/`__next__`,
-    `__contains__`, `__index__`, class variables, read-only `@property`, and single inheritance from another
-    sandbox class, a builtin exception or `str`
-- `@dataclass`, with the `eq=` and `frozen=` options only (every other option raises `NotImplementedError`, and
-    there is no `field()` or `asdict()`), plus host class instances passed in and out (and host classes the
-    sandbox may instantiate when granted)
+    `__contains__`, `__index__`, `__int__`/`__float__`, `__abs__`, `__round__`, `__floor__`/`__ceil__`/`__trunc__`,
+    `__call__`, `__getitem__`/`__setitem__`, unary `+`/`-`/`~`, binary arithmetic and reflected operators, class
+    variables, read-only `@property`, and single inheritance from another sandbox class, a builtin exception or `str`
+- `@dataclass`, with the `eq=` and `frozen=` options only (every other option raises `NotImplementedError`),
+    `field()` (with `default=...` / `default_factory=...`), `__post_init__` and `fields()`, but no `asdict()`, plus
+    host class instances passed in and out (and host classes the sandbox may instantiate when granted)
 - List, dict and set comprehensions
 - `try` / `except` / `else` / `finally`, `raise ... from ...`
 - `for`, `while`, `if` / `elif` / `else`, `break`, `continue`, `pass`, `assert`, `global`, `nonlocal`, `return`
 - `with` statements, for files and for classes implementing `__enter__` / `__exit__`
+- `match` statements with every PEP 634 pattern kind and guards, see [match.md](match.md)
 - f-strings (including the `=` debug form), `str.format()` and `format()`, with `!r` / `!s` / `!a` conversions,
     format specs and nested replacement fields
 - `async` / `await`, and the five functions of `asyncio`, see [asyncio.md](asyncio.md)
 - Generators: `def` with `yield`, `yield from`, generator expressions, and the
     `send` / `close` / `throw` surface, see [generators.md](generators.md)
-- `import x`, `import x.y`, `from x import y, z as w`
+- `import x`, `import x.y`, `from x import y, z as w`; a module the sandbox does not have is requested from the host,
+    see [modules.md](modules.md#host-modules)
 - Starred unpacking everywhere CPython allows it
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)
-- PEP 634 `match` statements, see [language.md](language.md)
 - PEP 695 `type X = ...` aliases, see [typing.md](typing.md)
-- Slice assignment and deletion (`lst[i:j] = xs`, `del lst[i:j]`)
-- `del`, including `del obj.attr` and `del d[k]`
+- `del`, including `del obj.attr`, `del d[k]` and `del lst[i:j]`
 - PEP 750 `t'...'` template strings, see [string_templatelib.md](string_templatelib.md)
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
@@ -52,7 +53,6 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - `try*` / `except*` exception groups
 - `async with`, `async for` and async comprehensions
 - Wildcard imports (`from m import *`)
-- Complex literals (`1j`)
 
 **Missing in other ways:**
 
@@ -73,34 +73,41 @@ The following modules are present:
 | `ast`             | [ast.md](ast.md)                 |
 | `asyncio`         | [asyncio.md](asyncio.md)         |
 | `base64`          | [base64.md](base64.md)           |
-| `builtins`        | [builtins.md](builtins.md)       |
 | `binascii`        | [base64.md](base64.md)           |
+| `bisect`          | [bisect.md](bisect.md)           |
+| `builtins`        | [builtins.md](builtins.md)       |
 | `collections`     | [collections.md](collections.md) |
 | `collections.abc` | [collections.md](collections.md) |
 | `contextvars`     | [contextvars.md](contextvars.md) |
 | `copy`            | [copy.md](copy.md)               |
+| `csv`             | [csv.md](csv.md)                 |
 | `dataclasses`     | [dataclasses.md](dataclasses.md) |
 | `datetime`        | [datetime.md](datetime.md)       |
 | `functools`       | [functools.md](functools.md)     |
+| `hashlib`         | [hashlib.md](hashlib.md)         |
 | `itertools`       | [itertools.md](itertools.md)     |
 | `json`            | [json.md](json.md)               |
 | `math`            | [math.md](math.md)               |
 | `os`              | [os.md](os.md)                   |
+| `os.path`         | [os.md](os.md)                   |
 | `pathlib`         | [pathlib.md](pathlib.md)         |
+| `posixpath`       | [os.md](os.md)                   |
 | `random`          | [random.md](random.md)           |
 | `re`              | [re.md](re.md)                   |
 | `sys`             | [sys.md](sys.md)                 |
 | `time`            | [time.md](time.md)               |
+| `tomllib`         | [tomllib.md](tomllib.md)         |
 | `typing`          | [typing.md](typing.md)           |
 | `unicodedata`     | [unicodedata.md](unicodedata.md) |
 
-Each covers only part of its CPython surface — often a small part. `itertools`
-is the exception: every name it exports is implemented.
+Each covers only part of its CPython surface — often a small part. `itertools`,
+`hashlib` and `tomllib` are the exceptions: `itertools` implements every name it exports, `hashlib` every guaranteed
+algorithm, and `tomllib` its whole three-name surface.
 The absent names are missing from the module namespace rather than stubbed, so they fail type checking as well as
 raising `AttributeError` at runtime.
 
 Notably absent: `enum`, `contextlib`, `io`, `string`, `struct`, `operator`,
-`inspect`, `logging`, `traceback`, `hashlib`, `uuid`, `urllib`.
+`inspect`, `logging`, `traceback`, `uuid`, `urllib`.
 Some of those are absent by design — `socket`, `subprocess`, `multiprocessing`, `threading` and `ctypes` would breach
 the sandbox — and others are simply not implemented yet.
 
@@ -120,9 +127,11 @@ Each links to the page that owns it, which is where the full account lives:
     ([builtins.md](builtins.md)).
 - **`re` is backed by Rust's `fancy-regex`**, not CPython's engine: no `bytes` patterns, no `VERBOSE` flag, and some
     error messages differ ([re.md](re.md)).
-- **Only the class dunders listed above are dispatched.** `__lt__`, `__len__`, `__getitem__`, `__call__` and the
-    arithmetic dunders raise `TypeError` as if undefined, while `__bool__` and the `__getattr__` family are ignored
-    silently, so an instance is always truthy ([classes.md](classes.md)).
+- **Only the class dunders listed above are dispatched.** `__lt__` and `__len__` raise
+    `TypeError` as if undefined, while in-place arithmetic dunders are skipped in favor of binary arithmetic
+    (`@=` is rejected at compile time).
+    `__bool__` and the `__getattr__` family are ignored silently, so an instance is always truthy
+    ([classes.md](classes.md)).
 - **There is no event loop to schedule with inside the sandbox.** `async` / `await` work, and `asyncio` exposes five
     functions: `run`, `gather`, which runs host calls concurrently, `sleep`, which asks the host to wait,
     `get_running_loop`, whose loop answers only that it is running, and `current_task`, which is always `None`.

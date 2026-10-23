@@ -21,6 +21,7 @@ import sys
 assert vars(sys)['maxsize'] == sys.maxsize
 assert 'argv' in vars(sys)
 
+
 # === vars() with no argument is locals() ===
 def g():
     a = 1

@@ -16,6 +16,7 @@ from ._monty import (
     AsyncNameLookupSnapshot,
     CollectStreams,
     CollectString,
+    ExternalModule,
     Frame,
     FunctionSnapshot,
     FutureSnapshot,
@@ -31,10 +32,12 @@ from ._monty import (
     MontyRuntimeError,
     MontySession,
     MontyShutdown,
+    MontyStdTypeProxy,
     MontySyntaxError,
     MontyTypingError,
     MountDir,
     NameLookupSnapshot,
+    SourceRange,
     __version__,
     _install_telemetry,
 )
@@ -46,15 +49,17 @@ from .os_access import (
     MemoryFile,
     OSAccess,
     OsFunction,
+    ScanEntry,
     StatResult,
 )
 
 __all__ = (
     # this file
     'ResourceLimits',
-    'AutoOSCalls',
+    'OSPolicy',
     'RandomSeed',
     'TimeZone',
+    'TimeCaller',
     'ExternalResult',
     'ExternalSettledResult',
     'ExternalReturnValue',
@@ -78,10 +83,13 @@ __all__ = (
     'AsyncMontyWebsocket',
     'CollectStreams',
     'CollectString',
+    'ExternalModule',
     'Frame',
+    'SourceRange',
     'Monty',
     'MontyClassProxy',
     'MontyClassTypeProxy',
+    'MontyStdTypeProxy',
     'MontyConversionError',
     'MontyCrashedError',
     'MontyDisconnectError',
@@ -103,6 +111,7 @@ __all__ = (
     'AsyncFutureSnapshot',
     # os_access
     'StatResult',
+    'ScanEntry',
     'OsFunction',
     'NOT_HANDLED',
     'AbstractOS',
@@ -170,7 +179,9 @@ class ResourceLimits(TypedDict, total=False):
 
 
 class TimeZone(TypedDict):
-    """A fixed UTC offset and optional name, as in `datetime.timezone`; IANA zones are unsupported."""
+    """A fixed UTC offset and optional name, as in `datetime.timezone`.
+
+    For an IANA zone with DST rules, pass its name (`'Europe/London'`) as `timezone` instead."""
 
     offset_seconds: int
     """Offset from UTC, in seconds."""
@@ -185,20 +196,24 @@ class RandomSeed(TypedDict):
     seed: int | float | str | bytes
 
 
-class AutoOSCalls(TypedDict, total=False):
-    """Clock, sleep and random initialization policies for the session.
+class OSPolicy(TypedDict, total=False):
+    """Clock, sleep, process-clock and random initialization policies for the session.
 
     Omitted keys keep their defaults; `'call_host'` routes calls to the `os=` handler.
     """
 
     datetime: Literal['system', 'call_host'] | datetime.datetime
-    """Clock for `date.today()`, `datetime.now()` and `time.time()`; defaults to the worker's clock.
+    """Clock for `date.today()`, `datetime.now()` and the `time` module's clocks, `monotonic()` and
+    `perf_counter()` included (only `process_time` is separate); defaults to the worker's clock.
     A `datetime` freezes the instant and, unless `timezone` is set, uses its `utcoffset()` and `tzname()`
     (UTC if naive). Naive `datetime.now()` then returns its wall time."""
 
-    timezone: Literal['system', 'call_host'] | TimeZone
-    """Zone for naive `datetime.now()` and `date.today()`; defaults to the worker's local zone.
-    `'call_host'` routes calls requiring the zone to `os=`; a `TimeZone` supplies a fixed offset."""
+    timezone: str | TimeZone
+    """The sandbox's local zone, read by naive `datetime.now()` and `date.today()`, `astimezone()`,
+    `time.timezone`/`time.tzname` and `%Z`; defaults to `'utc'`.
+
+    Any other string is an IANA zone name such as `'Europe/London'`, resolved with its DST rules from the
+    worker's tz database; a `TimeZone` supplies a fixed offset."""
 
     sleep: Literal['system', 'call_host', 'zero']
     """Policy for `time.sleep()` and `asyncio.sleep()`; defaults to `'system'`.
@@ -209,6 +224,11 @@ class AutoOSCalls(TypedDict, total=False):
     """Maximum seconds per `'system'` sleep (default 10; `inf` disables the cap).
     Raises `ValueError` with other sleep modes. Each sleep counts as one suspension and toward
     `max_total_sleep_secs`, but not execution duration limits."""
+
+    process_time: Literal['zero', 'elapsed']
+    """What `time.process_time()` and `time.thread_time()` report; defaults to `'zero'`.
+    `'zero'` keeps elapsed execution time unobservable in the sandbox. `'elapsed'` reports the
+    session's accumulated execution time, which excludes sleeps and time suspended on the host."""
 
     random_start: Literal['system', 'call_host'] | RandomSeed
     """Initial `random` state; defaults to the worker's OS entropy.
@@ -251,6 +271,8 @@ ExcType = Literal[
     'UnicodeDecodeError',
     'UnicodeEncodeError',
     'json.JSONDecodeError',
+    'tomllib.TOMLDecodeError',
+    '_csv.Error',
     'ImportError',
     'ModuleNotFoundError',
     'OSError',
@@ -276,9 +298,9 @@ ExcType = Literal[
 
 Used by `ExternalExceptionData` to identify an exception by name rather than
 passing a concrete Python exception instance. Names match Python's built-in
-exception classes, except for `json.JSONDecodeError`, `re.PatternError`,
-`binascii.Error` and `binascii.Incomplete`, which are dotted to disambiguate
-from their `ValueError` / `Exception` parents.
+exception classes, except for `json.JSONDecodeError`, `tomllib.TOMLDecodeError`,
+`re.PatternError`, `binascii.Error`, `binascii.Incomplete` and `_csv.Error`, which
+are dotted to disambiguate from their `ValueError` / `Exception` parents.
 """
 
 
@@ -327,6 +349,26 @@ SyncSnapshot: TypeAlias = FunctionSnapshot | NameLookupSnapshot | FutureSnapshot
 
 AsyncSnapshot: TypeAlias = AsyncFunctionSnapshot | AsyncNameLookupSnapshot | AsyncFutureSnapshot | MontyComplete
 """What `AsyncMontySession.feed_start` (and each async `resume` / `resume_auto`) yields."""
+
+
+TimeCaller = Literal[
+    'time.time',
+    'time.time_ns',
+    'time.monotonic',
+    'time.monotonic_ns',
+    'time.perf_counter',
+    'time.perf_counter_ns',
+    'time.gmtime',
+    'time.localtime',
+    'time.asctime',
+    'time.ctime',
+    'time.strftime',
+]
+"""The `time` function that asked `AbstractOS.time()` for the clock.
+
+All of them arrive under the one OS function name `'time.time'` and want epoch seconds;
+a handler can answer each differently or ignore the distinction.
+"""
 
 
 class OsHandler(Protocol):

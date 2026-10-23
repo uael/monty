@@ -13,7 +13,7 @@ assert abc.Sequence is Sequence
 # === Annotations name them without evaluating them ===
 
 
-def takes(f: Callable[[int], int], m: Mapping) -> Iterable:
+def takes(f: Callable[[int], int], m: Mapping[str, int]) -> Iterable[object]:
     return [f, m]
 
 

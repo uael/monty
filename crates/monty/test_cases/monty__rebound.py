@@ -1,4 +1,6 @@
-# xfail=cpython
+# /// monty
+# xfail = ['cpython']
+# ///
 # `monty.rebound(x, source, target, memo=None)`: a deep copy of `x` in which
 # what was made under the globals dict `source` is made again under `target`.
 # CPython has no `monty` module, so this runs on Monty alone.
@@ -66,7 +68,10 @@ assert copied['bump']() == 3
 assert a['bump']() == 2
 
 # === a function that names itself names its copy ===
-exec('def outer():\n    def fact(n):\n        return 1 if n < 2 else n * fact(n - 1)\n\n    return fact\n\n\nfact = outer()', a)
+exec(
+    'def outer():\n    def fact(n):\n        return 1 if n < 2 else n * fact(n - 1)\n\n    return fact\n\n\nfact = outer()',
+    a,
+)
 copied = monty.rebound({'fact': a['fact']}, a, b)
 assert copied['fact'](5) == 120
 assert copied['fact'] is not a['fact']

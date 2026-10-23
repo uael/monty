@@ -9,7 +9,7 @@ use crate::{
     namespace::NamespaceId,
     parse::{CodeRange, ParseNode, ParsedSignature, Try},
     tstring::ParsedTemplate,
-    value::{EitherStr, Marker, Value},
+    value::{EitherStr, Marker},
 };
 
 /// Indicates which namespace a variable reference belongs to.
@@ -26,8 +26,10 @@ pub enum NameScope {
     ///
     /// If accessed before assignment, raises `UnboundLocalError`.
     #[default]
+    #[serde(rename = "L")]
     Local,
     /// Variable is in the module-level global namespace.
+    #[serde(rename = "G")]
     Global,
     /// Variable accessed through a cell (heap-allocated container).
     ///
@@ -37,17 +39,20 @@ pub enum NameScope {
     ///
     /// The namespace slot contains `Value::Ref(cell_id)` pointing to a `HeapData::Cell`.
     /// Access requires dereferencing through the cell.
+    #[serde(rename = "C")]
     Cell,
     /// Comprehension target stored in isolated operand-stack storage.
     ///
     /// The namespace ID is a comprehension-local slot ID. The compiler stores
     /// uncaptured targets directly and gives captured targets a stable cell.
+    #[serde(rename = "V")]
     CompVar,
     /// Top-level name of an `eval()` / `exec()` snippet that runs with a locals
     /// dict or dict globals: resolved by name at runtime through the frame's
     /// namespace. The namespace ID is the session global slot for the name (a
     /// scratch slot under dict globals) so the slot-globals tail of the lookup
     /// reuses the `LoadGlobal` machinery.
+    #[serde(rename = "N")]
     Name,
 }
 
@@ -66,11 +71,15 @@ pub enum CaptureSource {
 /// To get the actual string, look it up in the `Interns` storage.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Identifier {
+    #[serde(rename = "P")]
     pub position: CodeRange,
     /// Interned name ID - look up in Interns to get the actual string.
+    #[serde(rename = "N")]
     pub name_id: StringId,
+    #[serde(rename = "I")]
     opt_namespace_id: Option<NamespaceId>,
     /// Which namespace this identifier refers to (determined at prepare time)
+    #[serde(rename = "S")]
     pub scope: NameScope,
 }
 
@@ -101,15 +110,27 @@ impl Identifier {
     }
 }
 
-/// A single module in an `import` statement (e.g., `sys` in `import sys` or `sys as s`).
-///
-/// Each entry in `import a, b as c` becomes one `ImportName` with its own
-/// module name and binding target.
+/// A dotted-import component and its full path for `ModuleNotFoundError` messages.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct Submodule {
+    /// The attribute name (`b`).
+    pub name: StringId,
+    /// The path through this component (`a.b`).
+    pub path: StringId,
+}
+
+/// One entry of an `import` statement, with its dotted components and binding target.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportName {
-    /// The module name to import (e.g., "sys", "typing").
+    /// The top-level module to load (`a` for `import a.b`).
     pub module_name: StringId,
-    /// The binding target — the alias if provided, otherwise the module name.
+    /// The further components of a dotted name, in order.
+    pub submodules: Vec<Submodule>,
+    /// Whether the statement binds the top-level module (`import a.b` binds
+    /// `a`) rather than the last component (`import a.b as x` binds `a.b`).
+    pub binds_top_level: bool,
+    /// The binding target — the alias if provided, otherwise the module name
+    /// (or its top-level package when dotted).
     /// After the prepare phase, this includes the resolved namespace slot.
     pub binding: Identifier,
 }
@@ -461,6 +482,113 @@ pub enum UnpackTarget {
     },
 }
 
+/// One `case` clause of a [`Node::Match`]: its pattern, optional guard and body.
+///
+/// Generic over the node type so it rides the same Raw -> Prepared pipeline as
+/// [`Try`]. The pattern's capture names are resolved to slots during prepare,
+/// like any other assignment target.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatchCase<N> {
+    pub pattern: Pattern,
+    /// `case PATTERN if GUARD:` - evaluated only after the pattern matches and
+    /// its names are bound, so a failing guard still leaves the captures bound.
+    pub guard: Option<ExprLoc>,
+    pub body: Vec<N>,
+    /// Source range of the pattern (the `case` header's caret range).
+    pub position: CodeRange,
+}
+
+/// A structural pattern inside a `case` clause (PEP 634).
+///
+/// The shapes mirror `ast.pattern`; the compiler lowers them following
+/// CPython's `codegen_pattern_*` so capture bindings happen only once the whole
+/// pattern has matched.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum Pattern {
+    /// `case 1:` / `case 'x':` / `case Color.RED:` - matches when `subject == value`.
+    Value(ExprLoc),
+    /// `case None:` / `case True:` / `case False:` - matches by identity.
+    Singleton(ExprLoc),
+    /// `case [a, *rest, b]:` - matches a sequence (not `str`/`bytes`) of the right length.
+    Sequence {
+        /// Sub-patterns in order; at most one may be [`Pattern::Star`].
+        patterns: Vec<Self>,
+        position: CodeRange,
+    },
+    /// `case {'k': v, **rest}:` - matches a mapping containing every key.
+    Mapping {
+        /// Key expressions (literals or dotted names), paired with `patterns`.
+        keys: Vec<ExprLoc>,
+        /// One sub-pattern per key, matched against the looked-up values.
+        patterns: Vec<Self>,
+        /// `**rest`: bound to a new `dict` of the entries the keys did not consume.
+        rest: Option<Identifier>,
+        position: CodeRange,
+    },
+    /// `case Point(0, y=1):` - `isinstance` check plus attribute sub-patterns.
+    Class {
+        /// Expression evaluating to the class (a name or dotted name).
+        cls: ExprLoc,
+        /// Positional sub-patterns, resolved through the class's `__match_args__`.
+        patterns: Vec<Self>,
+        /// Keyword attribute names, paired with `kwd_patterns`.
+        kwd_attrs: Vec<StringId>,
+        kwd_patterns: Vec<Self>,
+        position: CodeRange,
+    },
+    /// `*name` / `*_` inside a sequence pattern; captures the surplus items as a `list`.
+    Star {
+        name: Option<Identifier>,
+        position: CodeRange,
+    },
+    /// `case x:` (capture), `case _:` (wildcard) or `case PATTERN as x:`.
+    ///
+    /// `pattern: None` is the bare capture/wildcard form; `name: None` with no
+    /// pattern is the `_` wildcard.
+    As {
+        pattern: Option<Box<Self>>,
+        name: Option<Identifier>,
+        position: CodeRange,
+    },
+    /// `case 1 | 2 | x:` - alternatives tried left to right; all must bind the same names.
+    Or { patterns: Vec<Self>, position: CodeRange },
+}
+
+impl Pattern {
+    /// The source range of the pattern, for diagnostics and traceback carets.
+    #[must_use]
+    pub fn position(&self) -> CodeRange {
+        match self {
+            Self::Value(expr) | Self::Singleton(expr) => expr.position,
+            Self::Sequence { position, .. }
+            | Self::Mapping { position, .. }
+            | Self::Class { position, .. }
+            | Self::Star { position, .. }
+            | Self::As { position, .. }
+            | Self::Or { position, .. } => *position,
+        }
+    }
+
+    /// Whether this is the bare `_` wildcard, which matches anything and binds nothing.
+    #[must_use]
+    pub fn is_wildcard(&self) -> bool {
+        matches!(
+            self,
+            Self::As {
+                pattern: None,
+                name: None,
+                ..
+            }
+        )
+    }
+
+    /// Whether this is `*_`: a starred wildcard inside a sequence pattern.
+    #[must_use]
+    pub fn is_star_wildcard(&self) -> bool {
+        matches!(self, Self::Star { name: None, .. })
+    }
+}
+
 /// Target of a single assignment step within a chained assignment.
 ///
 /// Chained assignments (`a = b[i] = obj.x = expr`) evaluate `expr` once and
@@ -565,6 +693,10 @@ pub enum Literal {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// An imaginary literal such as `2j`, holding its imaginary part (the real
+    /// part is always zero). It has no constant-pool form: the compiler emits a
+    /// `complex()` constructor call, since a complex value lives on the heap.
+    Complex(f64),
     /// An interned string literal. The StringId references the string in the Interns table.
     Str(StringId),
     /// An interned bytes literal. The BytesId references the bytes in the Interns table.
@@ -574,26 +706,6 @@ pub enum Literal {
     LongInt(LongIntId),
     /// A marker value (e.g., typing constructs like Any, Optional, etc.).
     Marker(Marker),
-}
-
-impl From<Literal> for Value {
-    /// Converts the literal into its runtime `Value` counterpart.
-    ///
-    /// This is the only place parse-time data crosses the boundary into runtime
-    /// semantics, ensuring every literal follows the same conversion path.
-    fn from(literal: Literal) -> Self {
-        match literal {
-            Literal::Ellipsis => Self::Ellipsis,
-            Literal::None => Self::None,
-            Literal::Bool(b) => Self::Bool(b),
-            Literal::Int(v) => Self::Int(v),
-            Literal::Float(v) => Self::Float(v),
-            Literal::Str(string_id) => Self::InternString(string_id),
-            Literal::Bytes(bytes_id) => Self::InternBytes(bytes_id),
-            Literal::LongInt(long_int_id) => Self::InternLongInt(long_int_id),
-            Literal::Marker(marker) => Self::Marker(marker),
-        }
-    }
 }
 
 /// An expression with its source location.
@@ -800,25 +912,6 @@ pub enum Node<F> {
         /// Source position of the `class` statement (for error reporting).
         position: CodeRange,
     },
-    /// PEP 634 `match` statement.
-    ///
-    /// The subject is evaluated once into a hidden local, which every case's
-    /// test reads back: keeping it on the operand stack instead would leave the
-    /// stack unbalanced on a `return`/`break` out of a case body.
-    Match {
-        /// Evaluated once, before any pattern is tried.
-        subject: ExprLoc,
-        /// The hidden local the subject lives in for the duration. Its name is
-        /// not writable from source, so nothing can collide with it; one per
-        /// scope is enough, because a nested `match` can only appear in a case
-        /// *body*, by which point the outer subject has done its work.
-        slot: Identifier,
-        /// In source order; the first whose pattern matches (and whose guard
-        /// passes) runs, and the rest are skipped.
-        cases: Vec<MatchCase<F>>,
-        /// Source position of the `match` statement (for error reporting).
-        position: CodeRange,
-    },
     /// `del a, b.c, d[k]` — the targets are unbound left to right.
     Delete(Vec<DeleteTarget>),
     /// PEP 695 `type X = <value>`.
@@ -858,6 +951,17 @@ pub enum Node<F> {
     /// Executes body, catches matching exceptions with handlers, runs else if no exception,
     /// and always runs finally.
     Try(Try<Self>),
+    /// `match SUBJECT:` with one or more `case` clauses (PEP 634).
+    ///
+    /// The subject is evaluated once; cases are tried top to bottom and the
+    /// first whose pattern matches (and whose guard, if any, is truthy) runs.
+    /// Nothing happens when no case matches. See `limitations/match.md`.
+    Match {
+        subject: ExprLoc,
+        cases: Vec<MatchCase<Self>>,
+        /// Source position of the `match` statement, for caret placement.
+        position: CodeRange,
+    },
     /// `with EXPR [as TARGET]: BODY` — runs BODY with a context manager.
     ///
     /// Semantics match CPython: `EXPR` is evaluated, `__enter__` is called on
@@ -894,8 +998,10 @@ pub enum Node<F> {
     ///
     /// Imports specific names from a module into the current namespace.
     ImportFrom {
-        /// The module name to import from (e.g., "typing").
+        /// The top-level module to load (`a` for `from a.b import c`).
         module_name: StringId,
+        /// The further components of a dotted module name, in order.
+        submodules: Vec<Submodule>,
         /// Names to import: (import_name, binding) pairs.
         /// The import_name is the name in the module, the binding is the local name
         /// (alias if provided, otherwise the import name) with resolved namespace slot.
@@ -964,70 +1070,6 @@ pub struct PreparedFunctionDef {
 
 /// Type alias for prepared AST nodes (output of prepare phase).
 pub type PreparedNode = Node<PreparedFunctionDef>;
-
-/// One `case` of a [`Node::Match`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MatchCase<F> {
-    /// What the subject is tested against.
-    pub pattern: Pattern,
-    /// `case p if cond:` — evaluated only after the pattern matched, so it can
-    /// read the names the pattern bound.
-    pub guard: Option<ExprLoc>,
-    /// Runs when the pattern matched and the guard (if any) passed.
-    pub body: Vec<Node<F>>,
-}
-
-/// A PEP 634 pattern.
-///
-/// Every variant either *tests* the subject, *binds* a name, or both. Only
-/// [`Wildcard`](Self::Wildcard), [`Capture`](Self::Capture) and an
-/// [`As`](Self::As) over one of them are irrefutable, which is what the
-/// unreachable-case check in the parser turns on.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum Pattern {
-    /// `_`: matches anything and binds nothing.
-    Wildcard,
-    /// `x`: matches anything and binds it.
-    Capture(Identifier),
-    /// A literal or a dotted name (`1`, `'a'`, `Color.RED`), compared with `==`.
-    Value(ExprLoc),
-    /// `None`, `True`, `False`, compared with `is` as CPython does.
-    Singleton(Literal),
-    /// `[a, b]` / `(a, *rest)`: matches a sequence that is not a `str` or
-    /// `bytes`. At most one element is a [`Star`](Self::Star).
-    Sequence(Vec<Self>),
-    /// `*rest` inside a sequence pattern; `None` for `*_`.
-    Star(Option<Identifier>),
-    /// `{k: p, **rest}`: matches a mapping that has every key.
-    Mapping {
-        /// Key expressions, in source order; each is a literal or a dotted name.
-        keys: Vec<ExprLoc>,
-        /// The pattern each key's value must match, parallel to `keys`.
-        patterns: Vec<Self>,
-        /// `**rest`, bound to a new dict of the keys the pattern did not name.
-        rest: Option<Identifier>,
-    },
-    /// `C(p, attr=q)`: matches an instance of `C` whose attributes match.
-    Class {
-        /// The class to test against; anything else is a `TypeError`.
-        cls: ExprLoc,
-        /// Positional sub-patterns, matched against the attributes
-        /// `C.__match_args__` names.
-        positional: Vec<Self>,
-        /// `attr=pattern` pairs, in source order.
-        keywords: Vec<(Identifier, Self)>,
-    },
-    /// `p | q`: the first alternative that matches wins, and every alternative
-    /// binds the same names.
-    Or(Vec<Self>),
-    /// `p as name`: matches `p`, then binds the subject to `name`.
-    As {
-        /// The pattern that must match first.
-        pattern: Box<Self>,
-        /// The name the whole subject binds to.
-        name: Identifier,
-    },
-}
 
 /// Binary operators for arithmetic, bitwise, and boolean operations.
 ///

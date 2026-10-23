@@ -93,7 +93,7 @@ assert shape.__args__[0].__args__ == ('a', 'b')
 
 # === Errors ===
 try:
-    Literal['a']['b']
+    Literal['a']['b']  # pyright: ignore
     assert False, 'expected TypeError'
 except TypeError as exc:
     assert str(exc) == "typing.Literal['a'] is not a generic class"

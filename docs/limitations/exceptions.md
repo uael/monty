@@ -12,14 +12,15 @@ these built-ins; `raise MyClass()` on a plain user class raises
 `BaseException`, `Exception`, `SystemExit`, `KeyboardInterrupt`,
 `ArithmeticError`, `OverflowError`, `ZeroDivisionError`, `LookupError`,
 `IndexError`, `KeyError`, `RuntimeError`, `NotImplementedError`,
-`RecursionError`, `AttributeError`, `FrozenInstanceError`, `NameError`,
+`RecursionError`, `AttributeError`, `NameError`,
 `UnboundLocalError`, `ValueError`, `UnicodeDecodeError`, `UnicodeEncodeError`,
 `ImportError`, `ModuleNotFoundError`, `OSError`, `FileNotFoundError`, `FileExistsError`,
 `IsADirectoryError`, `NotADirectoryError`, `PermissionError`,
 `AssertionError`, `MemoryError`, `StopIteration`, `GeneratorExit`,
 `SyntaxError`, `TimeoutError`, `TypeError`.
 
-Module-specific: `json.JSONDecodeError` (subclass of `ValueError`),
+Module-specific: `dataclasses.FrozenInstanceError` (a subclass of `AttributeError`, which code imports from
+`dataclasses`, as in CPython), `json.JSONDecodeError` and `tomllib.TOMLDecodeError` (subclasses of `ValueError`),
 `re.PatternError` / `re.error`, `io.UnsupportedOperation` (catchable as
 both `OSError` and `ValueError`, matching CPython's dual parentage),
 `asyncio.CancelledError` (a direct `BaseException` subclass, which nothing
@@ -59,10 +60,9 @@ not supported; passing more than one argument raises an internal error.
     real 5-field constructor (`UnicodeDecodeError('ascii', b'\xff', 0, 1, 'ordinal not in range(128)')`), which Monty
     doesn't track, so Monty's
     `repr()` uses the generic single-message form instead.
-- The dotted exception classes — `json.JSONDecodeError`, `re.PatternError`,
-    `binascii.Error`, `binascii.Incomplete`, `asyncio.CancelledError` — repr
-    under their qualified name: `binascii.Error('bad')` where CPython gives
-    `Error('bad')`.
+- The dotted exception classes — `json.JSONDecodeError`, `tomllib.TOMLDecodeError`, `re.PatternError`,
+    `binascii.Error`, `binascii.Incomplete`, `_csv.Error`, `asyncio.CancelledError` — repr under their qualified name:
+    `binascii.Error('bad')` where CPython gives `Error('bad')`.
     `type(exc).__name__` and `str(type(exc))` match CPython.
 
 **Not implemented:** `__cause__`, `__context__`, `__suppress_context__`,

@@ -9,13 +9,14 @@ import { NativePool } from '../native-addon.js'
 import { findMontyBinary } from './binary.js'
 import {
   type AssertMessageAnnotations,
-  type AutoOsCalls,
-  type EncodedAutoOsCalls,
+  type OsPolicy,
+  type EncodedOsPolicy,
   type TypeCheckFormat,
   encodeAssertMessageAnnotations,
-  encodeAutoOsCalls,
+  encodeOsPolicy,
+  validateMaxCheckouts,
 } from './options.js'
-import { MontySession } from './session.js'
+import { type ExternalModules, HostModules, MontySession } from './session.js'
 import { captureTelemetryContext } from './telemetry.js'
 
 /** Options for [`Monty`]. */
@@ -56,7 +57,8 @@ export interface MontyOptions {
    * `null` disables).
    */
   turnDurationLimitGrace?: number | null
-  /** Recycle a worker (kill and replace) after serving this many sessions. */
+  /** Recycle a worker after this many sessions: an integer from 0 to 4294967295.
+   *  Both 0 and 1 retire after each checkout; omitted means no recycling. */
   maxCheckoutsPerWorker?: number
 }
 
@@ -73,8 +75,14 @@ export interface CheckoutOptions {
   limits?: ResourceLimits
   /** Type-check each fed snippet before executing it (default false). */
   typeCheck?: boolean
-  /** Stub file contents used by type checking. */
+  /** Global type-checking stubs. Supply module stubs through `ExternalModule.stubs` in `externalModules`. */
   typeCheckStubs?: string
+  /**
+   * Importable host modules for every feed of the session (see [`ExternalModules`]); missing
+   * imports raise `ModuleNotFoundError`. The record is read live, each entry validated when a
+   * snippet first imports it, so modules may be added later; a factory runs once per session.
+   */
+  externalModules?: ExternalModules
   /**
    * How `MontyTypingError` diagnostics are rendered (default `'full'`).
    * Chosen here rather than on the thrown error because the checker's
@@ -104,11 +112,11 @@ export interface CheckoutOptions {
    */
   printFlushInterval?: number
   /**
-   * Session clock, sleep and random initialization policies; see `AutoOsCalls`.
-   * Defaults to the worker's clock, local zone and entropy, with pool-managed sleeps capped at ten seconds.
+   * Session clock, sleep, process-clock and random initialization policies; see `OsPolicy`.
+   * Defaults to the worker's clock in UTC and its entropy, with pool-managed sleeps capped at ten seconds.
    * Sleeps count toward suspensions and `maxTotalSleepSecs`, but not execution duration limits.
    */
-  autoOsCalls?: AutoOsCalls
+  osPolicy?: OsPolicy
 }
 
 /**
@@ -166,6 +174,7 @@ export class Monty {
 
   /** Creates the pool and prewarms `minProcesses` workers. */
   static async create(options: MontyOptions = {}): Promise<Monty> {
+    validateMaxCheckouts(options.maxCheckoutsPerWorker)
     const native = new NativePool({
       binaryPath: findMontyBinary(options.binaryPath),
       minProcesses: options.minProcesses ?? 1,
@@ -191,7 +200,8 @@ export class Monty {
       throw new Error('the pool is closed — create a new Monty pool')
     }
     const assertAnnotations = encodeAssertMessageAnnotations(options.assertMessageAnnotations)
-    const autoOsCalls = encodeAutoOsCalls(options.autoOsCalls ?? {})
+    const osPolicy = encodeOsPolicy(options.osPolicy ?? {})
+    const modules = new HostModules(options.externalModules)
     const native = this.native.checkout({
       scriptName: options.scriptName ?? 'main.py',
       ...(options.limits !== undefined ? { limits: options.limits } : {}),
@@ -201,16 +211,16 @@ export class Monty {
       ...(options.typeCheckColor !== undefined ? { typeCheckColor: options.typeCheckColor } : {}),
       ...(assertAnnotations !== undefined ? { assertMessageAnnotations: assertAnnotations } : {}),
       ...(options.printFlushInterval !== undefined ? { printFlushIntervalMs: options.printFlushInterval * 1000 } : {}),
-      ...nativeAutoOsCalls(autoOsCalls),
+      ...nativeOsPolicy(osPolicy),
     })
     const telemetryContext = captureTelemetryContext()
     await native.enter(telemetryContext)
-    return new MontySession(native)
+    return new MontySession(native, modules)
   }
 
   /**
-   * Shuts the pool down: idle workers exit and no new checkouts are
-   * accepted. Sessions still checked out keep their workers until closed.
+   * Shuts the pool down: idle workers exit and pending/new checkouts reject.
+   * Sessions already checked out keep their workers until closed.
    */
   async close(): Promise<void> {
     if (this.closed) {
@@ -234,7 +244,7 @@ function graceMs(key: string, seconds: number | null | undefined): Record<string
 }
 
 /** Flattens normalized options into native binding fields. */
-function nativeAutoOsCalls(calls: EncodedAutoOsCalls): Record<string, unknown> {
+function nativeOsPolicy(calls: EncodedOsPolicy): Record<string, unknown> {
   const fields: Record<string, unknown> = {}
   if (typeof calls.datetime === 'string') {
     fields.datetimeKind = calls.datetime
@@ -243,8 +253,11 @@ function nativeAutoOsCalls(calls: EncodedAutoOsCalls): Record<string, unknown> {
     fields.datetimeUnixSeconds = calls.datetime.unixSeconds
     fields.datetimeMicrosecond = calls.datetime.microsecond
   }
-  if (typeof calls.timezone === 'string') {
-    fields.timezoneKind = calls.timezone
+  if (calls.timezone === 'utc') {
+    fields.timezoneKind = 'utc'
+  } else if (typeof calls.timezone === 'string') {
+    fields.timezoneKind = 'named'
+    fields.timezoneName = calls.timezone
   } else if (calls.timezone !== undefined) {
     fields.timezoneKind = 'fixed'
     fields.timezoneOffsetSeconds = calls.timezone.offsetSeconds
@@ -262,5 +275,6 @@ function nativeAutoOsCalls(calls: EncodedAutoOsCalls): Record<string, unknown> {
     else if ('str' in seed) fields.randomSeedStr = seed.str
     else fields.randomSeedBytes = Buffer.from(seed.bytes)
   }
+  if (calls.processTime !== undefined) fields.processTime = calls.processTime
   return fields
 }

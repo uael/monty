@@ -7,8 +7,8 @@
 use num_bigint::BigInt;
 
 use super::{CallArgs, MontyObject, NamedValues, ObjectRef};
-use crate::file_mode::FileMode;
 pub use crate::graph::{ClassTypeNode, GraphError, MontyGraph, MontyNode, NodeId};
+use crate::{file_mode::FileMode, os::TimeCaller};
 
 /// The owned arena, positional roots and keyword roots of a call.
 pub type CallArgsParts = (MontyGraph, Vec<NodeId>, Vec<(NodeId, NodeId)>);
@@ -186,6 +186,22 @@ impl PushValue for u64 {
     }
 }
 
+impl PushValue for u32 {
+    fn push_into(self, graph: &mut MontyGraph) -> NodeId {
+        graph.push(MontyNode::Int(i64::from(self)))
+    }
+}
+
+/// `None` crosses as Python `None`.
+impl<T: PushValue> PushValue for Option<T> {
+    fn push_into(self, graph: &mut MontyGraph) -> NodeId {
+        match self {
+            Some(value) => value.push_into(graph),
+            None => graph.push(MontyNode::None),
+        }
+    }
+}
+
 impl PushValue for bool {
     fn push_into(self, graph: &mut MontyGraph) -> NodeId {
         graph.push(MontyNode::Bool(self))
@@ -193,6 +209,12 @@ impl PushValue for bool {
 }
 
 impl PushValue for FileMode {
+    fn push_into(self, graph: &mut MontyGraph) -> NodeId {
+        graph.push(MontyNode::String(self.as_str().to_owned()))
+    }
+}
+
+impl PushValue for TimeCaller {
     fn push_into(self, graph: &mut MontyGraph) -> NodeId {
         graph.push(MontyNode::String(self.as_str().to_owned()))
     }

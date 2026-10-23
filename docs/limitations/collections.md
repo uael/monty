@@ -58,7 +58,8 @@ name a type in an annotation, and nothing else:
 ## `deque`
 
 - **`d * 1.5`** raises `TypeError: unsupported operand type(s) for *: 'collections.deque' and 'float'`, where CPython
-    says `can't multiply sequence by non-int of type 'float'`. Shared with `list`.
+    says `can't multiply sequence by non-int of type 'float'`. Shared with `list`, and the same for a `complex`
+    count.
 - **Repeat counts in `[2**63, 2**64)` are accepted** where CPython rejects them:
     Monty's repeat count is a `usize`, CPython's a C `ssize_t`. Only observable
     for a bounded deque, whose result truncates to `maxlen`: `deque([1, 2], maxlen=2) * 2**63` yields

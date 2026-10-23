@@ -9,6 +9,7 @@ use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
     exception_private::RunResult,
+    frozen::{self, FrozenFunctions},
     heap::HeapId,
     intern::StaticStrings,
 };
@@ -17,21 +18,25 @@ pub(crate) mod ast;
 pub(crate) mod asyncio;
 pub(crate) mod base64;
 pub(crate) mod binascii;
+pub(crate) mod bisect;
 pub(crate) mod builtins_module;
 pub(crate) mod collections;
 pub(crate) mod collections_abc;
 pub(crate) mod contextvars;
 pub(crate) mod copy;
+pub(crate) mod csv;
 pub(crate) mod dataclasses;
 pub(crate) mod datetime;
 pub(crate) mod functools;
 #[cfg(feature = "test-hooks")]
 pub(crate) mod gc;
+pub(crate) mod hashlib;
 pub(crate) mod itertools;
 pub(crate) mod json;
 pub(crate) mod math;
 pub(crate) mod monty;
 pub(crate) mod os;
+pub(crate) mod os_path;
 pub(crate) mod pathlib;
 pub(crate) mod random;
 pub(crate) mod re;
@@ -39,6 +44,7 @@ pub(crate) mod string_templatelib;
 pub(crate) mod sys;
 pub(crate) mod table;
 pub(crate) mod time;
+pub(crate) mod tomllib;
 pub(crate) mod typing;
 pub(crate) mod unicodedata;
 
@@ -55,8 +61,10 @@ pub(crate) enum StandardLib {
     Ast,
     /// The `pathlib` module providing object-oriented filesystem paths.
     Pathlib,
-    /// The `os` module providing operating system interface (only `getenv()` implemented).
+    /// The `os` module: environment access, host-mediated filesystem calls and `os.path`.
     Os,
+    /// The `os.path` module (CPython's `posixpath`), also reached as `import posixpath`.
+    OsPath,
     /// The `math` module providing mathematical functions and constants.
     Math,
     /// The `json` module providing JSON parsing and serialization.
@@ -75,7 +83,7 @@ pub(crate) enum StandardLib {
     /// The `collections` module providing container datatypes: `deque`,
     /// `namedtuple`, `defaultdict`, and `Counter`.
     Collections,
-    /// The `functools` module providing `reduce` and `partial`.
+    /// The `functools` module providing reduction, partial application, and caching.
     Functools,
     /// The `base64` module providing the base64/base32/base16 codecs.
     Base64,
@@ -93,9 +101,20 @@ pub(crate) enum StandardLib {
     /// The `string.templatelib` module exposing the PEP 750 `Template` and
     /// `Interpolation` type objects (no functions).
     StringTemplatelib,
+    /// The `string` package, which holds `string.templatelib` alone.
+    String,
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
+    /// The `hashlib` module: the guaranteed algorithms, `new()` and `pbkdf2_hmac()`.
+    Hashlib,
+    /// Binary search and sorted insertion.
+    Bisect,
+    /// The `csv` module: readers, writers, `DictReader` / `DictWriter` and the
+    /// built-in dialects.
+    Csv,
+    /// The `tomllib` module: `loads()`, `load()` and `TOMLDecodeError`.
+    Tomllib,
     /// The `builtins` module: every name a bare identifier resolves to.
     Builtins,
     /// The `contextvars` module exposing `ContextVar` and its `Token`.
@@ -120,6 +139,7 @@ impl StandardLib {
             StaticStrings::Ast => Some(Self::Ast),
             StaticStrings::Pathlib => Some(Self::Pathlib),
             StaticStrings::Os => Some(Self::Os),
+            StaticStrings::OsPath | StaticStrings::Posixpath => Some(Self::OsPath),
             StaticStrings::Math => Some(Self::Math),
             StaticStrings::Json => Some(Self::Json),
             StaticStrings::Re => Some(Self::Re),
@@ -135,7 +155,12 @@ impl StandardLib {
             StaticStrings::Copy => Some(Self::Copy),
             StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
             StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
+            StaticStrings::StringAttr => Some(Self::String),
             StaticStrings::Time => Some(Self::Time),
+            StaticStrings::Hashlib => Some(Self::Hashlib),
+            StaticStrings::Bisect => Some(Self::Bisect),
+            StaticStrings::Csv => Some(Self::Csv),
+            StaticStrings::Tomllib => Some(Self::Tomllib),
             StaticStrings::Contextvars => Some(Self::Contextvars),
             StaticStrings::Builtins => Some(Self::Builtins),
             StaticStrings::Monty => Some(Self::Monty),
@@ -145,8 +170,15 @@ impl StandardLib {
         }
     }
 
+    /// The import names of every built-in module (`os.path` included), so a
+    /// host can keep its own module names clear of them.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        (0..)
+            .map_while(StaticStrings::from_repr)
+            .filter_map(|name| Self::from_static(name).map(|_| <&'static str>::from(name)))
+    }
+
     /// Creates a new instance of this module on the heap.
-    ///
     pub fn create(self, vm: &mut VM<'_>) -> HeapId {
         match self {
             Self::Sys => sys::create_module(vm),
@@ -155,6 +187,7 @@ impl StandardLib {
             Self::Ast => ast::create_module(vm),
             Self::Pathlib => pathlib::create_module(vm),
             Self::Os => os::create_module(vm),
+            Self::OsPath => os_path::create_module(vm),
             Self::Math => math::create_module(vm),
             Self::Json => json::create_module(vm),
             Self::Re => re::create_module(vm),
@@ -170,7 +203,12 @@ impl StandardLib {
             Self::Copy => copy::create_module(vm),
             Self::CollectionsAbc => collections_abc::create_module(vm),
             Self::StringTemplatelib => string_templatelib::create_module(vm),
+            Self::String => string_templatelib::create_package(vm),
             Self::Time => time::create_module(vm),
+            Self::Hashlib => hashlib::create_module(vm),
+            Self::Bisect => bisect::create_module(vm),
+            Self::Csv => csv::create_module(vm),
+            Self::Tomllib => tomllib::create_module(vm),
             Self::Contextvars => contextvars::create_module(vm),
             Self::Builtins => builtins_module::create_module(vm),
             Self::Monty => monty::create_module(vm),
@@ -182,11 +220,8 @@ impl StandardLib {
 
 /// All stdlib module function (but not builtins).
 ///
-/// Serde encodes these by declaration index and every dump reaches them through
-/// `Value::ModuleFunction`, so ALWAYS APPEND new variants, ahead of the gated
-/// block — inserting one misdecodes old dumps into the wrong function instead
-/// of failing. The leading alphabetical run is an accident, not a rule;
-/// reordering needs a `DUMP_VERSION` bump.
+/// Every dump reaches these through `Value::ModuleFunction`, encoded by variant
+/// name, so renaming a variant needs `#[serde(alias)]` (see `DUMP_VERSION`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ModuleFunctions {
     Asyncio(asyncio::AsyncioFunctions),
@@ -194,6 +229,7 @@ pub(crate) enum ModuleFunctions {
     Json(json::JsonFunctions),
     Math(math::MathFunctions),
     Os(os::OsFunctions),
+    OsPath(os_path::OsPathFunctions),
     Re(re::ReFunctions),
     Unicodedata(unicodedata::UnicodedataFunctions),
     Itertools(itertools::ItertoolsFunctions),
@@ -203,7 +239,13 @@ pub(crate) enum ModuleFunctions {
     Binascii(binascii::BinasciiFunctions),
     Random(random::RandomFunctions),
     Copy(copy::CopyFunctions),
+    /// Private primitives passed explicitly to frozen Python implementations.
+    Frozen(FrozenFunctions),
     Time(time::TimeFunctions),
+    Hashlib(hashlib::HashlibFunctions),
+    Bisect(bisect::BisectFunctions),
+    Csv(csv::CsvFunctions),
+    Tomllib(tomllib::TomllibFunctions),
     Monty(monty::MontyFunctions),
     /// `gc` module functions — only present under the `test-hooks` feature.
     /// See [`gc`] for why it is gated; as in [`StandardLib`], the gated block
@@ -226,6 +268,7 @@ impl fmt::Display for ModuleFunctions {
             Self::Json(func) => write!(f, "{func}"),
             Self::Math(func) => write!(f, "{func}"),
             Self::Os(func) => write!(f, "{func}"),
+            Self::OsPath(func) => write!(f, "{func}"),
             Self::Re(func) => write!(f, "{func}"),
             Self::Unicodedata(func) => write!(f, "{func}"),
             Self::Itertools(func) => write!(f, "{func}"),
@@ -235,7 +278,12 @@ impl fmt::Display for ModuleFunctions {
             Self::Binascii(func) => write!(f, "{func}"),
             Self::Random(func) => write!(f, "{func}"),
             Self::Copy(func) => write!(f, "{func}"),
+            Self::Frozen(func) => write!(f, "{func}"),
             Self::Time(func) => write!(f, "{func}"),
+            Self::Hashlib(func) => write!(f, "{func}"),
+            Self::Bisect(func) => write!(f, "{func}"),
+            Self::Csv(func) => write!(f, "{func}"),
+            Self::Tomllib(func) => write!(f, "{func}"),
             Self::Monty(func) => write!(f, "{func}"),
             #[cfg(feature = "test-hooks")]
             Self::Gc(func) => write!(f, "{func}"),
@@ -254,19 +302,25 @@ impl ModuleFunctions {
         match self {
             Self::Asyncio(functions) => asyncio::call(vm, functions, args),
             Self::Collections(functions) => collections::call(vm, functions, args).map(CallResult::Value),
-            Self::Json(functions) => json::call(vm, functions, args).map(CallResult::Value),
+            Self::Json(functions) => json::call(vm, functions, args),
             Self::Math(functions) => math::call(vm, functions, args).map(CallResult::Value),
             Self::Os(functions) => os::call(vm, functions, args),
+            Self::OsPath(functions) => os_path::call(vm, functions, args),
             Self::Re(functions) => re::call(vm, functions, args),
             Self::Unicodedata(functions) => unicodedata::call(vm, functions, args).map(CallResult::Value),
             Self::Itertools(functions) => itertools::call(vm, functions, args).map(CallResult::Value),
             Self::Dataclasses(functions) => dataclasses::call(vm, functions, args).map(CallResult::Value),
-            Self::Functools(functions) => functools::call(vm, functions, args).map(CallResult::Value),
+            Self::Functools(functions) => functools::call(vm, functions, args),
             Self::Base64(functions) => base64::call(vm, functions, args).map(CallResult::Value),
             Self::Binascii(functions) => binascii::call(vm, functions, args).map(CallResult::Value),
             Self::Random(functions) => random::call(vm, functions, args),
             Self::Copy(functions) => copy::call(vm, functions, args).map(CallResult::Value),
+            Self::Frozen(functions) => frozen::call_helper(functions, args, vm),
             Self::Time(functions) => time::call(vm, functions, args),
+            Self::Hashlib(functions) => hashlib::call(vm, functions, args).map(CallResult::Value),
+            Self::Bisect(functions) => bisect::call(vm, functions, args).map(CallResult::Value),
+            Self::Csv(functions) => csv::call(vm, functions, args),
+            Self::Tomllib(functions) => tomllib::call(vm, functions, args),
             Self::Monty(functions) => monty::call(vm, functions, args).map(CallResult::Value),
             #[cfg(feature = "test-hooks")]
             Self::Gc(functions) => gc::call(vm, functions, args).map(CallResult::Value),

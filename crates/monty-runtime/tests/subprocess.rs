@@ -16,8 +16,10 @@ use monty_proto::{
     WireFunctionCall, exceeds_max_frame_len, ext_result_to_proto, named_values_to_proto, pb, write_frame,
 };
 use monty_types::{
-    AutoOsCalls, CallArgs, DateTimeSource, ExtFunctionResult, MontyDate, MontyDateTime, MontyObject, NameLookupResult,
-    NamedValues, RandomSeed, RandomStart, SandboxTimeZone, SleepMode,
+    CallArgs, DateTimeSource, ExtFunctionResult, FileMode, IMPORT_STUBS_CALL_ID, MontyDate, MontyDateTime,
+    MontyFileHandle, MontyObject, NameLookupResult, NamedValues, OsPolicy, RandomSeed, RandomStart, SandboxTimeZone,
+    SleepMode, SourceRange,
+    scan::{EntryInfo, ScanEntry, scan_reply},
     unstable::{self, MontyNode},
 };
 
@@ -40,11 +42,11 @@ fn configure() -> pb::Configure {
 }
 
 /// The clock and the sleeps routed to the parent.
-fn call_host() -> AutoOsCalls {
-    AutoOsCalls {
+fn call_host() -> OsPolicy {
+    OsPolicy {
         datetime: DateTimeSource::CallHost,
         sleep: SleepMode::CallHost,
-        ..AutoOsCalls::default()
+        ..OsPolicy::default()
     }
 }
 
@@ -117,9 +119,9 @@ impl ChildProc {
         self.create_repl_with(configure());
     }
 
-    fn create_repl_with_auto_os_calls(&mut self, auto_os_calls: &AutoOsCalls) {
+    fn create_repl_with_os_policy(&mut self, os_policy: &OsPolicy) {
         self.create_repl_with(pb::Configure {
-            auto_os_calls: Some(auto_os_calls.into()),
+            os_policy: Some(os_policy.into()),
             ..configure()
         });
     }
@@ -415,6 +417,11 @@ fn near_limit_suspension_is_refused_cleanly() {
             1,
             None,
             false,
+            SourceRange {
+                filename: "main.py".to_owned(),
+                start: 0,
+                end: 7,
+            },
         ))),
         ..Default::default()
     };
@@ -594,7 +601,7 @@ asyncio.run(asyncio.sleep(3600, 'woken'))",
 #[test]
 fn fixed_clock_and_seed_are_answered_in_the_worker() {
     let mut child = ChildProc::spawn();
-    child.create_repl_with_auto_os_calls(&AutoOsCalls {
+    child.create_repl_with_os_policy(&OsPolicy {
         datetime: DateTimeSource::Fixed {
             unix_seconds: 1_700_000_000,
             microsecond: 123_456,
@@ -604,7 +611,7 @@ fn fixed_clock_and_seed_are_answered_in_the_worker() {
             name: None,
         },
         random_start: RandomStart::Seed(RandomSeed::Int(42.into())),
-        ..AutoOsCalls::default()
+        ..OsPolicy::default()
     });
 
     let (_, event) = child.feed(
@@ -620,6 +627,22 @@ repr(datetime.now())",
 time.time()",
     );
     assert_eq!(expect_complete(event), MontyObject::float(1_700_000_000.123_456));
+    // the zone is also what `astimezone()`, `%Z` and the `time` constants report
+    let (_, event) = child.feed(
+        "import time
+(datetime.now().astimezone().strftime('%H:%M %Z'), time.timezone, time.tzname)",
+    );
+    assert_eq!(
+        expect_complete(event),
+        MontyObject::tuple([
+            MontyObject::string("00:13 UTC+02:00".to_owned()),
+            MontyObject::int(-7_200),
+            MontyObject::tuple([
+                MontyObject::string("UTC+02:00".to_owned()),
+                MontyObject::string("UTC+02:00".to_owned()),
+            ]),
+        ])
+    );
     // CPython: random.seed(42); random.random()
     let (_, event) = child.feed(
         "import random
@@ -629,13 +652,13 @@ random.random()",
     child.shutdown();
 }
 
-/// Rejecting malformed `AutoOsCalls` leaves the worker usable.
+/// Rejecting malformed `OsPolicy` leaves the worker usable.
 #[test]
-fn invalid_auto_os_calls_is_rejected_on_configure() {
+fn invalid_os_policy_is_rejected_on_configure() {
     let mut child = ChildProc::spawn();
     child.send(pb::parent_request::Kind::Configure(pb::Configure {
-        auto_os_calls: Some(pb::AutoOsCalls {
-            datetime: Some(pb::auto_os_calls::Datetime::Fixed(pb::FixedDateTime {
+        os_policy: Some(pb::OsPolicy {
+            datetime: Some(pb::os_policy::Datetime::Fixed(pb::FixedDateTime {
                 unix_seconds: 0,
                 microsecond: 1_000_000,
             })),
@@ -647,7 +670,7 @@ fn invalid_auto_os_calls_is_rejected_on_configure() {
     assert_eq!(
         error.message.as_deref(),
         Some(
-            "protocol violation: invalid auto_os_calls: invalid value for FixedDateTime.microsecond: 1000000 is not below 1000000"
+            "protocol violation: invalid os_policy: invalid value for FixedDateTime.microsecond: 1000000 is not below 1000000"
         )
     );
     child.create_repl();
@@ -658,7 +681,7 @@ fn invalid_auto_os_calls_is_rejected_on_configure() {
 #[test]
 fn clock_calls_bubble_to_parent_under_call_host() {
     let mut child = ChildProc::spawn();
-    child.create_repl_with_auto_os_calls(&call_host());
+    child.create_repl_with_os_policy(&call_host());
 
     let today = MontyDate {
         year: 2024,
@@ -699,7 +722,12 @@ fn clock_calls_bubble_to_parent_under_call_host() {
     let pb::child_event::Kind::OsCall(call) = event else {
         panic!("expected OsCall, got {event:?}");
     };
-    assert_eq!(call.call, Some(pb::os_call::Call::Time(pb::Unit {})));
+    assert_eq!(
+        call.call,
+        Some(pb::os_call::Call::Time(pb::os_call::TimeCall {
+            caller: "time.time".to_owned(),
+        }))
+    );
     let (_, event) = child.resume_return(call.call_id, MontyObject::float(1_700_000_000.5));
     assert_eq!(expect_complete(event), MontyObject::float(1_700_000_000.5));
 
@@ -710,7 +738,7 @@ fn clock_calls_bubble_to_parent_under_call_host() {
 #[test]
 fn sleep_calls_bubble_to_parent_under_call_host() {
     let mut child = ChildProc::spawn();
-    child.create_repl_with_auto_os_calls(&call_host());
+    child.create_repl_with_os_policy(&call_host());
 
     let (_, event) = child.feed("import time\ntime.sleep(1.5)");
     let pb::child_event::Kind::OsCall(call) = event else {
@@ -981,7 +1009,12 @@ fn large_unnested_format_spec_preserves_the_worker() {
 
 #[test]
 fn numeric_formatting_peak_memory_preserves_the_worker() {
-    for code in ["'{:08000000d}'.format(1)", "'{:.8000000f}'.format(1.0)"] {
+    for code in [
+        "'{:08000000d}'.format(1)",
+        "'{:.8000000f}'.format(1.0)",
+        // Both parts of a complex expand to the precision.
+        "'{:.4000000f}'.format(1 + 1j)",
+    ] {
         let mut child = ChildProc::spawn();
         child.create_repl_with(configure_with_max_memory(10_000_000));
         let (_, event) = child.feed(code);
@@ -989,6 +1022,30 @@ fn numeric_formatting_peak_memory_preserves_the_worker() {
         assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
         child.shutdown();
     }
+}
+
+/// A complex spec that CPython rejects outright must raise its `ValueError`
+/// however large its precision, not the `MemoryError` the precision would cost.
+#[test]
+fn invalid_complex_spec_is_rejected_before_its_precision_is_charged() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(10_000_000));
+    for (code, message) in [
+        (
+            "'{:=.4000000f}'.format(1 + 1j)",
+            "'=' alignment flag is not allowed in complex format specifier",
+        ),
+        (
+            "'{:0.4000000f}'.format(1 + 1j)",
+            "Zero padding is not allowed in complex format specifier",
+        ),
+    ] {
+        let (_, event) = child.feed(code);
+        let error = expect_error(event);
+        assert_eq!(error.exc_type, "ValueError", "{code}");
+        assert_eq!(error.message.as_deref(), Some(message), "{code}");
+    }
+    child.shutdown();
 }
 
 /// Gathers nested as *items* of one another (`g = asyncio.gather(g)`) cost no
@@ -1076,68 +1133,77 @@ fn deep_copy_of_a_near_limit_dict_raises_rather_than_dying() {
 fn large_allocations_are_rejected_before_the_hard_limit() {
     // each case with the allocator usage it should be refused at
     let cases = [
-        ("'x' * 10_000_000", 10_041_930),
+        ("'x' * 10_000_000", 10_043_561),
         // Each formatter builder must fail softly before the worker reaches its hard ceiling.
-        ("s = 'x' * 400_000\n'{0}{0}'.format(s)", 1_242_361),
-        ("s = 'x' * 400_000\n'{0:>1000000}'.format(s)", 1_442_393),
-        ("s = 'é' * 200_000\n'{0!a}'.format(s)", 1_242_398),
+        ("s = 'x' * 400_000\n'{0}{0}'.format(s)", 1_244_019),
+        ("s = 'x' * 400_000\n'{0:>1000000}'.format(s)", 1_444_051),
+        ("s = 'é' * 200_000\n'{0!a}'.format(s)", 1_244_056),
         // `%` formatting: padding, float digits, integer zero-extension and output growth.
-        ("'%*d' % (2_000_000, 1)", 2_042_087),
-        ("'%.*f' % (1_000_000, 1.0)", 1_171_127),
-        ("'%.*d' % (2_000_000, 1)", 2_042_091),
-        ("s = 'x' * 400_000\n'%s%s' % (s, s)", 1_642_547),
-        ("b'%*d' % (2_000_000, 1)", 2_050_309),
-        ("s = b'x' * 400_000\nb'%s%s' % (s, s)", 1_650_770),
-        ("b'x' * 10_000_000", 10_050_164),
-        ("[None] * 1_000_000", 16_042_085),
-        ("2 ** 10_000_000", 10_041_929),
-        ("1 << 10_000_000", 1_291_930),
+        ("'%*d' % (2_000_000, 1)", 2_043_721),
+        ("'%.*f' % (1_000_000, 1.0)", 1_172_760),
+        ("'%.*d' % (2_000_000, 1)", 2_043_725),
+        ("s = 'x' * 400_000\n'%s%s' % (s, s)", 1_644_186),
+        ("b'%*d' % (2_000_000, 1)", 2_051_943),
+        ("s = b'x' * 400_000\nb'%s%s' % (s, s)", 1_652_409),
+        ("b'x' * 10_000_000", 10_051_795),
+        ("[None] * 1_000_000", 16_043_723),
+        ("2 ** 10_000_000", 10_043_560),
+        ("1 << 10_000_000", 1_293_561),
         // `int / int` scales one operand before dividing; both shift directions are
         // preflighted.
-        ("x = 1 << 3_000_000\nx / (x - 1)", 1_542_551),
-        ("x = 1 << 3_000_000\nx / (x >> 100)", 1_542_534),
+        ("x = 1 << 3_000_000\nx / (x - 1)", 1_544_194),
+        ("x = 1 << 3_000_000\nx / (x >> 100)", 1_544_177),
         // `math.factorial`, `comb` and `perm` preflight their product's size.
-        ("import math\nmath.factorial(2_000_000)", 10_547_092),
+        ("import math\nmath.factorial(2_000_000)", 10_549_006),
         // A binomial is bounded by `2**n`, so `comb` needs a larger `n` to trip the check.
-        ("import math\nmath.comb(9_000_000, 4_500_000)", 2_297_109),
-        ("import math\nmath.perm(4_000_000, 2_000_000)", 11_047_109),
+        ("import math\nmath.comb(9_000_000, 4_500_000)", 2_299_020),
+        ("import math\nmath.perm(4_000_000, 2_000_000)", 11_049_020),
         // `math.lcm` of two large coprime ints is a product, preflighted like `*`.
-        ("import math\nx = 1 << 2_000_000\nmath.lcm(x + 1, x - 1)", 1_297_439),
-        ("('a' * 1000).replace('a', 'b' * 2000)", 2_045_422),
+        ("import math\nx = 1 << 2_000_000\nmath.lcm(x + 1, x - 1)", 1_299_367),
+        ("('a' * 1000).replace('a', 'b' * 2000)", 2_047_127),
+        // Every `%Z` copies the zone name into a `StringBuilder`, refused at a
+        // capacity doubling like the formatter cases above: fixed-size pushes
+        // make that step deterministic.
+        (
+            "from datetime import datetime, timezone, timedelta\ntz = timezone(timedelta(0), 'n' * 100_000)\ndatetime(2024, 1, 1, tzinfo=tz).strftime('%Z' * 5_000)",
+            1_256_061,
+        ),
         // Bulk container clones: `+=` preflights the temp clone plus the target
         // growth, `+` preflights each side's clone.
-        ("x = [None] * 40_000\nx += x", 1_962_551),
-        ("t = (None,) * 40_000\nt + t", 1_322_547),
-        ("x = [None] * 40_000\nx.copy()", 1_322_293),
+        ("x = [None] * 40_000\nx += x", 1_964_191),
+        ("t = (None,) * 40_000\nt + t", 1_324_191),
+        ("x = [None] * 40_000\nx.copy()", 1_323_953),
         // `dict | dict` snapshots the left pairs and builds the merged dict
         // while that snapshot is live, so both are preflighted together.
-        ("d = dict.fromkeys(range(12_000))\nd | {}", 1_805_423),
+        ("d = dict.fromkeys(range(12_000))\nd | {}", 1_807_078),
         // The right operand is snapshotted inside the same call, so that copy is
         // preflighted too. Only the copy: see the overlap test below.
-        ("d = dict.fromkeys(range(12_000))\n{} | d", 1_229_423),
+        ("d = dict.fromkeys(range(12_000))\n{} | d", 1_231_078),
         // A partial re-clones its bound arguments on every call, so that clone
         // is preflighted like any other bulk container copy.
         (
             "import functools\ndef f(*a):\n    return 0\np = functools.partial(f, *range(20_000))\njunk = [None] * 40_000\np()",
-            1_326_311,
+            1_328_363,
         ),
         // Reading `p.args` / `p.keywords` rebuilds them in full, so both are
         // preflighted like any other bulk container copy.
         (
             "import functools\ndef f(*a):\n    return 0\np = functools.partial(f, *range(20_000))\njunk = [0] * 40_000\np.args",
-            1_326_311,
+            1_328_363,
         ),
         (
             "import functools\ndef f(**k):\n    return 0\np = functools.partial(f, **{str(i): i for i in range(6_000)})\njunk = [0] * 30_000\np.keywords",
-            1_055_460,
+            1_057_551,
         ),
         // `deque.extend` preflights exact-hint iterators up front.
         (
             "from collections import deque\nd = deque()\nd.extend(range(1_000_000))",
-            16_042_653,
+            16_045_743,
         ),
+        // The json encoder preflights each doubling of its output buffer.
+        ("import json\njson.dumps(['x' * 1000] * 2000)", 1_168_576),
         // `randbytes` charges its word buffer and the byte buffer it fills.
-        ("import random\nrandom.seed(0)\nrandom.randbytes(600_000)", 1_247_167),
+        ("import random\nrandom.seed(0)\nrandom.randbytes(600_000)", 1_249_071),
         // A `range` population can be as long as `i64::MAX` while costing nothing,
         // so `sample` must saturate its size arithmetic and refuse the pick buffer.
         (
@@ -1147,18 +1213,45 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
         // `itertools.batched` preflights one batch, capped at `n`.
         (
             "import itertools\nnext(itertools.batched(range(1_000_000), 1_000_000))",
-            16_044_751,
+            16_046_656,
         ),
         // The two combinatoric iterators whose width is not bounded by their
         // pool preflight that width: `r` repeats of a one-item pool, and
         // `repeat` copies of the argument list.
         (
             "import itertools\nnext(itertools.combinations_with_replacement('a', 1_000_000))",
-            24_044_563,
+            24_046_471,
         ),
         (
             "import itertools\nnext(itertools.product('ab', repeat=1_000_000))",
-            24_044_628,
+            24_046_533,
+        ),
+        // A SHAKE digest preflights its output; `hexdigest` also counts the raw
+        // digest it keeps live while encoding, so a length whose hex alone
+        // would fit is still refused.
+        ("import hashlib\nhashlib.shake_128().digest(2_000_000)", 2_047_467),
+        ("import hashlib\nhashlib.shake_128().hexdigest(400_000)", 1_247_468),
+        // A csv record copies its fields' text into the line, refused at a capacity
+        // doubling like the formatter cases above.
+        (
+            "import csv\nclass S:\n    def write(self, t):\n        pass\ns = 'x' * 400_000\ncsv.writer(S()).writerow([s, s])",
+            1_252_013,
+        ),
+        // A `DictReader` row's dict is sized from `fieldnames` up front, preflighted like a
+        // dict copy.
+        (
+            "import csv\nnames = list(range(30_000))\nnext(csv.DictReader(['x'], fieldnames=names))",
+            1_967_212,
+        ),
+        // A list `fieldnames` is copied per row, and the keys of a row dict are copied for
+        // the `extrasaction='raise'` check: both bulk copies are preflighted.
+        (
+            "import csv\nclass S:\n    def write(self, t):\n        pass\nnames = [None] * 40_000\ncsv.DictWriter(S(), names).writerow({})",
+            1_332_197,
+        ),
+        (
+            "import csv\nclass S:\n    def write(self, t):\n        pass\nrow = {i: None for i in range(10_000)}\ncsv.DictWriter(S(), []).writerow(row)",
+            1_080_668,
         ),
     ];
 
@@ -1173,6 +1266,116 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
         assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
         child.shutdown();
     }
+}
+
+/// `DictWriter.writerows()` on a file keeps one list per row until its single
+/// write, so wide `fieldnames` over many sparse dicts amplify the input: each
+/// row's list is preflighted against the usage so far.
+#[test]
+fn dict_writer_rows_are_rejected_before_the_hard_limit() {
+    let code = "import csv\nf = open('/out.csv', 'w')\ncsv.DictWriter(f, range(20_000)).writerows([{}] * 100)";
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(1024 * 1024));
+    let (_, event) = child.feed(code);
+    let pb::child_event::Kind::OsCall(call) = event else {
+        panic!("expected OsCall, got {event:?}");
+    };
+    let handle = MontyFileHandle {
+        path: "/out.csv".to_owned(),
+        mode: "w".parse::<FileMode>().unwrap(),
+        position: 0,
+    };
+    let (_, event) = child.resume_return(call.call_id, MontyObject::file_handle(handle));
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "MemoryError", "{code}");
+    let message = error.message.expect("MemoryError should have a message");
+    assert_reported_usage(&message, 1_207_889, code);
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
+    child.shutdown();
+}
+
+/// `os.path.expandvars` amplifies its input by the length of the values it
+/// substitutes, so the result's growth is charged like a `StringBuilder`'s:
+/// refused at a capacity doubling, before the worker reaches its hard ceiling.
+#[test]
+fn expandvars_growth_is_rejected_before_the_hard_limit() {
+    let code = "import os\nos.path.expandvars('$V' * 20_000)";
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(1024 * 1024));
+    let (_, event) = child.feed(code);
+    let pb::child_event::Kind::OsCall(call) = event else {
+        panic!("expected OsCall, got {event:?}");
+    };
+    let environ = MontyObject::dict([(MontyObject::string("V"), MontyObject::string("x".repeat(1000)))]);
+    let (_, event) = child.resume_return(call.call_id, environ);
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "MemoryError", "{code}");
+    let message = error.message.expect("MemoryError should have a message");
+    assert_reported_usage(&message, 1_371_652, code);
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
+    child.shutdown();
+}
+
+/// Results built from a `Path.scan` reply are charged before they can grow
+/// past the hard ceiling: a walk's `dirnames` repeating one long name, and a
+/// glob whose matches dwarf the tree they are drawn from.
+#[test]
+fn scan_results_are_charged_before_the_hard_limit() {
+    let entry = |path: &str, is_dir: bool| ScanEntry {
+        path: path.to_owned(),
+        info: EntryInfo {
+            is_dir,
+            is_file: !is_dir,
+            is_symlink: false,
+        },
+    };
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(1024 * 1024));
+    let (_, event) = child.feed("import os\nwalk = os.walk('/d')");
+    let pb::child_event::Kind::OsCall(call) = event else {
+        panic!("expected OsCall, got {event:?}");
+    };
+    let (_, event) = child.resume_return(call.call_id, scan_reply([entry("", true), entry("sub", true)]));
+    expect_complete(event);
+    // every name is copied and joined before the next step; charged as one allocation
+    let (_, event) = child.feed(
+        "dirpath, dirnames, filenames = next(walk)\ndirnames.clear()\ndirnames.extend(['x' * 10_000] * 10_000)\nnext(walk)",
+    );
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "MemoryError");
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
+    child.shutdown();
+
+    // `**/*/**` yields every entry once per ancestor: a chain of 200 directories
+    // is a few hundred reply entries but tens of thousands of matches
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(1024 * 1024));
+    let (_, event) = child.feed("from pathlib import Path\nmatches = Path('/d').glob('**/*/**')");
+    let pb::child_event::Kind::OsCall(call) = event else {
+        panic!("expected OsCall, got {event:?}");
+    };
+    let mut entries = vec![entry("", true)];
+    let mut path = String::new();
+    for _ in 0..200 {
+        path = if path.is_empty() {
+            "d".to_owned()
+        } else {
+            format!("{path}/d")
+        };
+        entries.push(entry(&path, true));
+        entries.push(entry(&format!("{path}/f"), false));
+    }
+    let (_, event) = child.resume_return(call.call_id, scan_reply(entries));
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "MemoryError");
+    // raised as the matches grew, not by a preflight of the finished list
+    let message = error.message.expect("MemoryError should have a message");
+    assert!(
+        reported_usage(&message, "glob") < 1_300_000,
+        "usage reported after collecting every match: {message}"
+    );
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
+    child.shutdown();
 }
 
 /// A merge charges the pairs it copies out, but not room for every one of them
@@ -1323,7 +1526,7 @@ fn iterdir_joins_are_preflighted() {
     let error = expect_error(event);
     assert_eq!(error.exc_type, "MemoryError");
     let message = error.message.expect("MemoryError should have a message");
-    assert_reported_usage(&message, 2_245_291, code);
+    assert_reported_usage(&message, 2_246_109, code);
     assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
     child.shutdown();
 }
@@ -1617,6 +1820,65 @@ fn batched_without_a_size_hint_is_refused_before_the_hard_limit() {
     );
     assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
     child.shutdown();
+}
+
+/// `tomllib` turns a couple of source bytes into a tree node (`[[a]]` into a
+/// whole table), so a document that fits can build a tree that does not. Only
+/// the parser's per-element / per-statement poll stops it, and where that
+/// lands depends on the tree's growth, so this pins the property rather than
+/// a byte figure.
+#[test]
+fn tomllib_documents_are_refused_before_the_hard_limit() {
+    const SOFT_LIMIT: u64 = 1024 * 1024;
+    const HARD_CEILING: u64 = SOFT_LIMIT + 4 * 1024 * 1024;
+
+    for code in [
+        "import tomllib\ntomllib.loads('x = [' + '1,' * 200_000 + ']')",
+        "import tomllib\ntomllib.loads('[[a]]\\n' * 100_000)",
+    ] {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(SOFT_LIMIT));
+        let (_, event) = child.feed(code);
+        let error = expect_error(event);
+        assert_eq!(error.exc_type, "MemoryError", "{code}");
+        let message = error.message.expect("MemoryError should have a message");
+        let used = reported_usage(&message, code);
+        assert!(
+            (SOFT_LIMIT..HARD_CEILING).contains(&used),
+            "{code}: reported {used} bytes, expected a refusal between {SOFT_LIMIT} and {HARD_CEILING}"
+        );
+        assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
+        child.shutdown();
+    }
+}
+
+/// A document of many keys or tables fits under these soft limits until one
+/// insertion doubles a table's (or its namespace flags') buffers by more than
+/// the 4 MiB headroom, which only a growth preflight can refuse softly.
+#[test]
+fn tomllib_table_growth_is_refused_before_the_hard_limit() {
+    for (mib, source) in [
+        (16, "'\\n'.join(f'k{i} = 1' for i in range(100_000))"),
+        (16, "'x = {' + ', '.join(f'k{i} = 1' for i in range(100_000)) + '}'"),
+        (24, "'\\n'.join(f'[t{i}]' for i in range(100_000))"),
+        // Refused deep into a wide table, whose cleanup must not allocate in proportion to it.
+        (64, "'\\n'.join(f'k{i} = 1' for i in range(400_000))"),
+        // Each dotted part queues a namespace flag until the next header.
+        (96, "'\\n'.join(f'a.b.c.d.e.k{i} = 1' for i in range(200_000))"),
+    ] {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(mib * 1024 * 1024));
+        // Built in its own feed so a `MemoryError` can only come from parsing.
+        let (_, event) = child.feed(&format!("import tomllib\ns = {source}\nNone"));
+        assert!(
+            matches!(event, pb::child_event::Kind::Complete(_)),
+            "{source}: {event:?}"
+        );
+        let (_, event) = child.feed("tomllib.loads(s)");
+        assert_eq!(expect_error(event).exc_type, "MemoryError", "{source}");
+        assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{source}");
+        child.shutdown();
+    }
 }
 
 /// A small `n` caps a batch however long the source, so batching a huge
@@ -1979,6 +2241,115 @@ fn loading_a_dump_applies_its_own_memory_limit() {
     );
 }
 
+/// Every `binascii`/`base64` conversion whose output is larger than its input
+/// can be handed a buffer that fits under the soft limit and encodes to one
+/// that clears the allocator's hard ceiling, which kills the worker rather
+/// than raising. Each preflights its output, so the session survives.
+///
+/// The sizes matter: the input must fit under the soft limit while the
+/// expansion clears soft + `BASE_HEADROOM`, which needs a limit above 2 MiB.
+/// `a85decode` is here rather than among the decoders because Ascii85's `z`
+/// stands for a whole zero word, so a buffer of them quadruples.
+#[test]
+fn expanding_codecs_fail_softly() {
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    // smallest expansion here is base64's 4/3, so 5 MB covers every case
+    const SETUP: &str = "import binascii, base64\nsrc = {FILL} * 5_000_000\n";
+    let cases = [
+        ("b'\\xff'", "binascii.hexlify(src)"),
+        ("b'\\xff'", "binascii.b2a_base64(src)"),
+        ("b'\\xff'", "binascii.b2a_qp(src)"),
+        ("b'\\xff'", "base64.b64encode(src)"),
+        ("b'\\xff'", "base64.b32encode(src)"),
+        ("b'\\xff'", "base64.b16encode(src)"),
+        ("b'\\xff'", "base64.b85encode(src)"),
+        ("b'\\xff'", "base64.a85encode(src)"),
+        ("b'\\xff'", "base64.encodebytes(src)"),
+        ("b'z'", "base64.a85decode(src)"),
+    ];
+
+    for (fill, call) in cases {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(LIMIT));
+        let (_, event) = child.feed(&format!("{}{call}", SETUP.replace("{FILL}", fill)));
+        assert_eq!(expect_error(event).exc_type, "MemoryError", "{call}");
+        // the worker raised rather than exiting, so it is still serving
+        assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{call}");
+        child.shutdown();
+    }
+}
+
+/// A conversion that appends to, or frames, a buffer it filled exactly must
+/// reserve that room before filling it. `Vec` doubles when it grows, so one
+/// appended byte charges the session a second copy of the encoded output —
+/// a burst the preflight never accounted for, and past the allocator's hard
+/// ceiling with it.
+///
+/// Each size sits in the window where the preflight passes but the doubling
+/// would not, so before the reservations every case exited the worker and the
+/// parent saw EOF instead of a turn-ending event.
+#[test]
+fn expanding_codecs_reserve_what_they_preflight() {
+    // (max_memory, code, the length CPython gives for the same call)
+    let cases = [
+        // the Ascii85 `z` word, which is sized from the input's content
+        (
+            30 * 1024 * 1024,
+            "import base64\nsrc = b'z' * 5_000_000\nlen(base64.a85decode(src))",
+            20_000_000,
+        ),
+        // the trailing newline appended to an exactly filled base64 buffer
+        (
+            32 * 1024 * 1024,
+            "import binascii\nsrc = b'\\xff' * 12_000_000\nlen(binascii.b2a_base64(src))",
+            16_000_001,
+        ),
+        // quoted-printable, whose bound is not a fixed ratio of its input
+        (
+            48 * 1024 * 1024,
+            "import binascii\nsrc = b'\\xff' * 11_000_000\nlen(binascii.b2a_qp(src))",
+            33_879_998,
+        ),
+        // the `<~` / `~>` framing spliced onto both ends of the encoded output
+        (
+            32 * 1024 * 1024,
+            "import base64\nsrc = b'\\xff' * 9_000_000\nlen(base64.a85encode(src, adobe=True))",
+            11_250_004,
+        ),
+    ];
+
+    for (limit, code, encoded_len) in cases {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(limit));
+        assert_eq!(child.feed_complete(code), MontyObject::int(encoded_len), "{code}");
+        child.shutdown();
+    }
+}
+
+/// `b2a_qp`'s buffer is sized from what the input actually quotes, not from
+/// the worst case every byte escaping.
+///
+/// Plain text encodes to a little over its own length, so bounding it at the
+/// 3.125 bytes per byte that `b'\xff'` reaches would reject, at a third of the
+/// budget it needs, an input the session has ample room for. Dots and newlines
+/// expand only in position, so text full of them must not be charged as if
+/// every one did.
+#[test]
+fn quoted_printable_is_sized_from_what_it_quotes() {
+    let cases = [
+        ("b'a' * 10_000_000", 10_266_666),
+        // every dot starts a line and escapes; no newline expands
+        ("b'.\\n' * 4_000_000", 16_000_000),
+    ];
+    for (src, encoded_len) in cases {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(32 * 1024 * 1024));
+        let code = format!("import binascii\nsrc = {src}\nlen(binascii.b2a_qp(src))");
+        assert_eq!(child.feed_complete(&code), MontyObject::int(encoded_len), "{src}");
+        child.shutdown();
+    }
+}
+
 /// A `Configure` carrying `max_memory`, which is what limits the worker.
 fn configure_with_max_memory(bytes: u64) -> pb::Configure {
     pb::Configure {
@@ -2019,6 +2390,109 @@ fn install_dependencies_is_rejected_but_session_survives() {
 // =============================================================================
 // Type checking
 // =============================================================================
+
+/// Stubs reach ty with every feed and nothing else scans them, so a
+/// `Configure` carrying deeply nested stubs is refused up front — whether the
+/// parser would recurse on them or they merely build a deep AST.
+#[test]
+fn deeply_nested_type_check_stubs_are_rejected_on_configure() {
+    let mut child = ChildProc::spawn();
+    for stubs in [
+        format!("x: '{}1{}'", "(".repeat(5000), ")".repeat(5000)),
+        format!("x: {}", vec!["int"; 5000].join(" | ")),
+    ] {
+        child.send(pb::parent_request::Kind::Configure(pb::Configure {
+            type_check: true,
+            type_check_stubs: Some(stubs),
+            ..configure()
+        }));
+        let error = expect_error(child.recv());
+        assert_eq!(
+            error.message.as_deref(),
+            Some("protocol violation: invalid type_check_stubs: Source is too deeply nested")
+        );
+    }
+    child.create_repl();
+    child.feed_complete("1 + 1");
+    child.shutdown();
+}
+
+/// A script named like the worker's stubs file used to overwrite them and crash
+/// the worker on a span underflow (#717); the feed now ends in an error instead.
+#[test]
+fn type_checked_script_named_like_stubs_file_is_rejected() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(pb::Configure {
+        script_name: "repl_type_stubs.pyi".to_owned(),
+        type_check: true,
+        type_check_stubs: Some("x: int\n".to_owned()),
+        ..configure()
+    });
+    let (_, event) = child.feed("from typing import TypeVar\nT = TypeVar('T");
+    let error = expect_error(event);
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "protocol violation: type checker failed: \
+             script `repl_type_stubs.pyi` collides with the type stubs file `repl_type_stubs.pyi`"
+        )
+    );
+    child.shutdown();
+}
+
+/// The type checker parses with no nesting limit, so a source the compiler
+/// will reject as too deeply nested must bypass it: the feed ends in the
+/// compiler's SyntaxError, not a crash, and the session survives.
+#[test]
+fn type_checked_session_skips_the_checker_for_deeply_nested_source() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(pb::Configure {
+        script_name: "main.py".to_owned(),
+        limits: None,
+        type_check: true,
+        type_check_stubs: None,
+        monty_version: env!("CARGO_PKG_VERSION").to_owned(),
+        protocol_version: PROTOCOL_VERSION,
+        assert_message_annotations: None,
+        ..Default::default()
+    });
+
+    let (_, event) = child.feed(&format!("{}1{}", "(".repeat(200_000), ")".repeat(200_000)));
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "SyntaxError");
+    assert_eq!(error.message.as_deref(), Some("Source is too deeply nested"));
+
+    assert_eq!(child.feed_complete("1"), MontyObject::int(1));
+    child.shutdown();
+}
+
+/// ty recurses once per AST level, and ruff builds arbitrarily deep ASTs from
+/// flat source without recursing itself — annotations the compiler drops and
+/// string annotations included. Each such feed ends in a SyntaxError before ty
+/// runs, and the session survives.
+#[test]
+fn type_checked_session_rejects_deep_asts_from_flat_source() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(pb::Configure {
+        type_check: true,
+        ..configure()
+    });
+
+    for source in [
+        format!("x = {}", vec!["1"; 20_000].join("+")),
+        format!("y = a{}", ".x".repeat(20_000)),
+        format!("def f(a: {}) -> None: ...", vec!["int"; 5000].join(" | ")),
+        format!("x: '{}' = 1", vec!["int"; 5000].join(" | ")),
+    ] {
+        let (_, event) = child.feed(&source);
+        let error = expect_error(event);
+        assert_eq!(error.exc_type, "SyntaxError");
+        assert_eq!(error.message.as_deref(), Some("Source is too deeply nested"));
+    }
+
+    assert_eq!(child.feed_complete("1"), MontyObject::int(1));
+    child.shutdown();
+}
 
 #[test]
 fn type_checked_session_rejects_bad_snippets_and_remembers_good_ones() {
@@ -2127,7 +2601,12 @@ fn reset_scrubs_type_check_state_from_the_next_session() {
             ..Default::default()
         });
         let mut probe = |code: String| {
-            let (_, event) = child.feed(&code);
+            let (_, mut event) = child.feed(&code);
+            // a host module name is asked about once; the stubs are declined here
+            if matches!(&event, pb::child_event::Kind::OsCall(call) if call.call_id == IMPORT_STUBS_CALL_ID) {
+                let reply = pb::ext_function_result::Kind::NotHandled(pb::Unit {});
+                event = child.resume_call(IMPORT_STUBS_CALL_ID, reply).1;
+            }
             let pb::child_event::Kind::TypingError(typing) = event else {
                 panic!("expected TypingError for {code:?} after {script_name:?}, got {event:?}");
             };
@@ -2565,4 +3044,16 @@ fn reset_returns_child_to_idle_for_reuse() {
 fn drop_stdin(_child: &mut ChildProc) {
     // ChildProc owns ChildStdin; nothing to do — the test just stops
     // writing. Present for readability at call sites.
+}
+
+#[test]
+fn slice_assignment_rejects_large_replacement_without_killing_worker() {
+    for code in ["a = []\na[:] = range(1_000_000)", "a = [None] * 40_000\na[:0] = a"] {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(1024 * 1024));
+        let (_, event) = child.feed(code);
+        assert_eq!(expect_error(event).exc_type, "MemoryError", "{code}");
+        assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
+        child.shutdown();
+    }
 }

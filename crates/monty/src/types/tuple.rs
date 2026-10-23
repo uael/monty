@@ -68,9 +68,11 @@ pub(crate) type TupleVec = SmallVec<[Value; TUPLE_INLINE_CAPACITY]>;
 /// tuple contains only primitive values (ints, bools, None, etc.).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Tuple {
+    #[serde(rename = "I")]
     items: TupleVec,
     /// True if any item in the tuple is a `Value::Ref`. Set at creation time
     /// since tuples are immutable.
+    #[serde(rename = "C")]
     contains_refs: bool,
     /// Lazily-computed Python hash. Tuples are immutable so this is
     /// computed on first `py_hash` and reused thereafter. Skipped on
@@ -303,8 +305,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Tuple> {
         Type::Tuple
     }
 
-    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
-        Ok(TupleIterator::from_tuple(self.id(), vm))
+    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
+        Ok(CallResult::Value(TupleIterator::from_tuple(self.id(), vm)))
     }
 
     fn py_len(&self, vm: &VM<'h>) -> Option<usize> {
@@ -500,7 +502,14 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Tuple> {
             return Ok(());
         }
 
-        repr_sequence_fmt('(', ')', |heap, i| self.get(heap).as_slice().get(i), f, vm, heap_ids)
+        repr_sequence_fmt(
+            '(',
+            ')',
+            |heap, i| self.get(heap).as_slice().get(i).map(|item| item.clone_with_heap(heap)),
+            f,
+            vm,
+            heap_ids,
+        )
     }
 }
 
@@ -665,8 +674,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, TupleIterator> {
         Ok(None)
     }
 
-    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
-        Ok(self.clone_value(vm.heap))
+    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
+        Ok(CallResult::Value(self.clone_value(vm.heap)))
     }
 
     fn py_next(&mut self, vm: &mut VM<'h>) -> RunResult<Option<Value>> {

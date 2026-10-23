@@ -80,11 +80,13 @@ export function encodeAssertMessageAnnotations(value: AssertMessageAnnotations |
 export type DateTimeSource = 'system' | 'call_host' | Date
 
 /**
- * Zone for naive `datetime.now()` and `date.today()`; defaults to the worker's local zone.
- * `'call_host'` delegates calls requiring the zone to `os`; an object supplies a fixed UTC offset
- * and optional name, as in `datetime.timezone`. IANA zones are unsupported.
+ * The sandbox's local zone, read by naive `datetime.now()` and `date.today()`, `astimezone()`,
+ * `time.timezone`/`time.tzname` and `%Z`; defaults to `'utc'`.
+ * Any other string is an IANA zone name such as `'Europe/London'`, resolved with its DST rules from
+ * the worker's tz database; an object supplies a fixed UTC offset and optional name, as in
+ * `datetime.timezone`.
  */
-export type TimeZone = 'system' | 'call_host' | { offsetSeconds: number; name?: string }
+export type TimeZone = 'utc' | (string & {}) | { offsetSeconds: number; name?: string }
 
 /**
  * Sleep policy: `'system'` (default) waits in the pool, capped per call by `sleepSystemMax`;
@@ -101,9 +103,17 @@ export type SleepMode = 'system' | 'call_host' | 'zero'
 export type RandomStart = 'system' | 'call_host' | { seed: number | bigint | string | Uint8Array }
 
 /**
- * Session clock, sleep and random initialization policies. Omitted fields retain their defaults.
+ * What `time.process_time()` and `time.thread_time()` report: `'zero'` (default) keeps elapsed
+ * execution time unobservable in the sandbox; `'elapsed'` reports the session's accumulated
+ * execution time, which excludes sleeps and time suspended on the host.
  */
-export interface AutoOsCalls {
+export type ProcessTime = 'zero' | 'elapsed'
+
+/**
+ * Session clock, sleep, process-clock and random initialization policies. Omitted fields retain their
+ * defaults.
+ */
+export interface OsPolicy {
   datetime?: DateTimeSource
   timezone?: TimeZone
   sleep?: SleepMode
@@ -113,6 +123,7 @@ export interface AutoOsCalls {
    */
   sleepSystemMax?: number
   randomStart?: RandomStart
+  processTime?: ProcessTime
 }
 
 /** A frozen clock reading, as the wire carries it. */
@@ -134,17 +145,21 @@ export type EncodedRandomSeed = { int: Uint8Array } | { float: number } | { str:
  * The options normalized to their wire shapes, shared by the napi binding
  * and the wasm transport. An absent field is the worker's default.
  */
-export interface EncodedAutoOsCalls {
+export interface EncodedOsPolicy {
   datetime?: 'system' | 'call_host' | FixedDateTime
-  timezone?: 'system' | 'call_host' | FixedTimeZone
+  /** `'utc'`, an IANA zone name, or a fixed offset. */
+  timezone?: string | FixedTimeZone
   sleep?: SleepMode
   /** Seconds; `Infinity` lifts the cap. */
   sleepSystemMaxSecs?: number
   /** Absent means `'system'`. */
   randomStart?: 'call_host' | { seed: EncodedRandomSeed }
+  /** Absent means `'zero'`. */
+  processTime?: ProcessTime
 }
 
 const SLEEP_MODES: readonly SleepMode[] = ['system', 'call_host', 'zero']
+const PROCESS_TIMES: readonly ProcessTime[] = ['zero', 'elapsed']
 
 /** Mirrors monty-types' `SleepMode::DEFAULT_MAX`: the cap on one `'system'` sleep, in seconds. */
 const DEFAULT_SLEEP_SYSTEM_MAX_SECS = 10
@@ -159,19 +174,19 @@ const MAX_WIRE_SECS = 18_446_744_073_709
  * Host-enforced cap in seconds, applied even when a restored dump requests system sleeps.
  * The worker's own cap cannot be trusted at this boundary.
  */
-export function systemSleepCapOf(calls: EncodedAutoOsCalls): number {
+export function systemSleepCapOf(calls: EncodedOsPolicy): number {
   return calls.sleepSystemMaxSecs ?? DEFAULT_SLEEP_SYSTEM_MAX_SECS
 }
 
 /**
  * Validates options at runtime before wire encoding; callers need not obey TypeScript types.
  */
-export function encodeAutoOsCalls(options: AutoOsCalls): EncodedAutoOsCalls {
-  const encoded: EncodedAutoOsCalls = {}
+export function encodeOsPolicy(options: OsPolicy): EncodedOsPolicy {
+  const encoded: EncodedOsPolicy = {}
   if (options.datetime !== undefined) {
     encoded.datetime = encodeDateTime(options.datetime)
-    // a Date is read as UTC unless the zone is given explicitly
-    if (options.datetime instanceof Date) encoded.timezone = { offsetSeconds: 0 }
+    // a Date is read in the UTC default unless the zone is given explicitly
+    if (options.datetime instanceof Date) encoded.timezone = { offsetSeconds: 0, name: 'UTC' }
   }
   if (options.timezone !== undefined) {
     encoded.timezone = encodeTimeZone(options.timezone)
@@ -201,6 +216,14 @@ export function encodeAutoOsCalls(options: AutoOsCalls): EncodedAutoOsCalls {
   } else if (options.randomStart !== undefined && options.randomStart !== 'system') {
     encoded.randomStart = { seed: encodeRandomSeed(options.randomStart) }
   }
+  if (options.processTime !== undefined) {
+    if (!PROCESS_TIMES.includes(options.processTime)) {
+      throw new RangeError(
+        `unknown processTime '${String(options.processTime)}', expected one of: ${PROCESS_TIMES.join(', ')}`,
+      )
+    }
+    encoded.processTime = options.processTime
+  }
   return encoded
 }
 
@@ -214,9 +237,9 @@ function encodeDateTime(datetime: DateTimeSource): 'system' | 'call_host' | Fixe
   return { unixSeconds: BigInt(seconds), microsecond: (ms - seconds * 1000) * 1000 }
 }
 
-function encodeTimeZone(timezone: TimeZone): 'system' | 'call_host' | FixedTimeZone {
-  if (timezone === 'system' || timezone === 'call_host') return timezone
-  const shape = "timezone must be 'system', 'call_host' or { offsetSeconds: number, name?: string }"
+function encodeTimeZone(timezone: TimeZone): string | FixedTimeZone {
+  if (typeof timezone === 'string') return timezone
+  const shape = "timezone must be 'utc', an IANA zone name or { offsetSeconds: number, name?: string }"
   if (typeof timezone !== 'object' || timezone === null || !Object.hasOwn(timezone, 'offsetSeconds')) {
     throw new TypeError(shape)
   }
@@ -242,8 +265,15 @@ function encodeRandomSeed(start: RandomStart): EncodedRandomSeed {
     return Number.isInteger(seed) ? { int: bigintToSignedLeBytes(BigInt(seed)) } : { float: seed }
   }
   if (typeof seed === 'string') return { str: seed }
-  if (seed instanceof Uint8Array) return { bytes: seed }
+  if (seed instanceof Uint8Array) return { bytes: Uint8Array.from(seed) }
   throw new TypeError("randomStart must be 'system', 'call_host' or { seed: number | bigint | string | Uint8Array }")
+}
+
+/** Rejects recycle counts that native integer conversion would truncate or wrap. */
+export function validateMaxCheckouts(value: number | undefined): void {
+  if (value !== undefined && (!Number.isInteger(value) || value < 0 || value > 0xffffffff)) {
+    throw new TypeError('maxCheckoutsPerWorker must be an integer between 0 and 4294967295')
+  }
 }
 
 /** Two's-complement little-endian bytes of `n`, as `BigInt::from_signed_bytes_le` reads them. */

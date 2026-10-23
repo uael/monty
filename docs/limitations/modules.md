@@ -1,9 +1,11 @@
 # Standard library modules
 
-Monty ships a fixed set of built-in stdlib modules. `import` of a name that is
-neither one of them nor bound in `sys.modules` raises `ModuleNotFoundError`:
-there is no `sys.path`, no site-packages, and nothing reads a file, so a module
-of your own reaches the sandbox only by being put in `sys.modules`.
+Monty provides a fixed set of stdlib modules. Other imports read `sys.modules` first, then request
+[host modules](#host-modules), and raise `ModuleNotFoundError` if neither has one.
+There is no `sys.path` or site-packages; sandboxed code cannot load additional modules itself, so a module of
+your own reaches the sandbox by being put in `sys.modules` or served as a host module.
+
+`os.path` (also importable as `posixpath`) is the only submodule.
 
 `sys.modules` is the session's own table, and `import` answers from it first, as
 in CPython. So a module is built once and every later import of that name finds
@@ -14,7 +16,7 @@ makes `import <name>` work for anything else: `sys.modules['x'] = obj` then
 `import` is the only thing that reads the table. `__import__` and `importlib`
 are absent, a dotted name is not split into parent packages, and nothing else
 (a `from x import y`, a submodule, a reload) consults or writes it.
-Module attributes still cannot be set (`sys.x = 1` raises `AttributeError`), so
+Assigning a bundled module's attributes raises `AttributeError`, as in `sys.x = 1`, so
 state is shared through a module a program built itself rather than through a
 stdlib one.
 
@@ -25,25 +27,31 @@ stdlib one.
 | `ast`                | [ast.md](ast.md)                               |
 | `asyncio`            | [asyncio.md](asyncio.md)                       |
 | `base64`             | [base64.md](base64.md)                         |
-| `builtins`           | [builtins.md](builtins.md)                     |
 | `binascii`           | [base64.md](base64.md)                         |
+| `bisect`             | [bisect.md](bisect.md)                         |
+| `builtins`           | [builtins.md](builtins.md)                     |
 | `collections`        | [collections.md](collections.md)               |
 | `collections.abc`    | [collections.md](collections.md)               |
 | `contextvars`        | [contextvars.md](contextvars.md)               |
 | `copy`               | [copy.md](copy.md)                             |
+| `csv`                | [csv.md](csv.md)                               |
 | `dataclasses`        | [dataclasses.md](dataclasses.md)               |
 | `datetime`           | [datetime.md](datetime.md)                     |
 | `functools`          | [functools.md](functools.md)                   |
+| `hashlib`            | [hashlib.md](hashlib.md)                       |
 | `itertools`          | [itertools.md](itertools.md)                   |
 | `json`               | [json.md](json.md)                             |
 | `math`               | [math.md](math.md)                             |
 | `os`                 | [os.md](os.md)                                 |
+| `os.path`            | [os.md](os.md)                                 |
 | `pathlib`            | [pathlib.md](pathlib.md)                       |
+| `posixpath`          | [os.md](os.md)                                 |
 | `random`             | [random.md](random.md)                         |
 | `re`                 | [re.md](re.md)                                 |
 | `string.templatelib` | [string_templatelib.md](string_templatelib.md) |
 | `sys`                | [sys.md](sys.md)                               |
 | `time`               | [time.md](time.md)                             |
+| `tomllib`            | [tomllib.md](tomllib.md)                       |
 | `typing`             | [typing.md](typing.md)                         |
 | `unicodedata`        | [unicodedata.md](unicodedata.md)               |
 
@@ -58,9 +66,9 @@ production sandboxes never see it.
 ## Notable modules NOT available
 
 Common modules that are *not* importable in Monty (non-exhaustive):
-`abc`, `argparse`, `array`, `bisect`, `contextlib`, `csv`,
+`abc`, `argparse`, `array`, `contextlib`,
 `ctypes`, `decimal`, `enum`, `fractions`,
-`hashlib`, `heapq`, `hmac`, `http`, `inspect`, `io`,
+`heapq`, `hmac`, `http`, `inspect`, `io`,
 `logging`, `multiprocessing`, `operator`, `pickle`, `queue`,
 `socket`, `string`, `struct`, `subprocess`, `tempfile`, `threading`,
 `traceback`, `unittest`, `urllib`, `uuid`, `warnings`, `weakref`,
@@ -71,15 +79,42 @@ excluded because they would breach the sandbox. Others (`enum`, `operator`)
 are unimplemented and may appear over time.
 
 Some available modules cover only part of their CPython surface: `functools`
-implements only `reduce` and `partial`, `copy` only `copy()` and `deepcopy()`,
-`time` only `time()` and `sleep()`, and `collections` only the four types above.
+implements only `reduce`, `partial`, `lru_cache`, and `cache`, `copy` only `copy()` and `deepcopy()`,
+`time` everything but `tzset` and the `clock_*` family, `hashlib` everything but `file_digest()` and `scrypt()`,
+and `collections` only the four types above; `tomllib` all three of its names, with the argument and exception differences listed in [tomllib.md](tomllib.md).
 The absent names are missing from
 the module namespace rather than stubbed, so they fail type checking as well as
 raising `AttributeError` at runtime; see each module's page for the specifics.
 
 ## Modules the type checker resolves but the runtime does not
 
-`abc`, `types`, `typing_extensions`, `_collections_abc` and `_typeshed` back
-the vendored stubs (e.g. `@abstractmethod` on protocol members), so they have
-to resolve during type checking. Importing them therefore type-checks clean but
-still raises `ModuleNotFoundError` at runtime.
+`abc`, `enum`, `types`, `typing_extensions`, `_collections_abc` and `_typeshed` support the vendored stubs, so their
+imports pass type checking.
+At runtime, the host must provide them or the import raises `ModuleNotFoundError`.
+The worker never requests host stubs for vendored typeshed modules: a host-provided `abc` is checked against
+typeshed's `abc` declarations.
+
+## Host modules
+
+Unknown imports request the top-level name through the `import` OS call; `__import__` is undefined.
+Dotted imports such as `import a.b.c` request `a`, then read `b` and `c` as successive attributes.
+Bundled modules that are not packages never request host submodules: `import os.x` raises
+`ModuleNotFoundError: No module named 'os.x'; 'os' is not a package`.
+The host's answer becomes the imported `module` object, with these differences from CPython:
+
+- Dunder attributes, including `m.__name__` and `m.__dict__`, raise `AttributeError`.
+- Every `import` requests the module again, including imports inside functions.
+    Two imports bind distinct objects: `import m as a; import m as b` leaves `a is not b`.
+- Assigning an attribute raises `AttributeError`, as on a bundled module; a function call runs the host's current
+    attribute, and the next import binds the module afresh.
+- Host exceptions are raised at the `import`.
+- Host modules are packages: a missing submodule, or `import m.x` for an attribute `x` that is not a module, raises
+    `ModuleNotFoundError: No module named 'm.x'`.
+- `from m import x` reads the module's attributes; missing names raise
+    `ImportError: cannot import name 'x' from 'm' (unknown location)`.
+- Python classes among a module's attrs become host functions: `m.X()` constructs on the host, but
+    `isinstance(v, m.X)` raises `TypeError`.
+    Wrap a class in `ClassType` to send it as a type.
+- Imports with more than 32 dotted components raise `SyntaxError`; `import a.b.c` has three.
+
+With no host to answer, `monty file.py` included, every unknown module raises `ModuleNotFoundError`.

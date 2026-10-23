@@ -18,13 +18,13 @@ class Template:
 class Interpolation:
     value: Any
     expression: str
-    conversion: Literal["a", "r", "s"] | None
+    conversion: Literal['a', 'r', 's'] | None
     format_spec: str
 
     def __new__(
         cls,
         value: Any,
-        expression: str = "",
-        conversion: Literal["a", "r", "s"] | None = None,
-        format_spec: str = "",
+        expression: str = '',
+        conversion: Literal['a', 'r', 's'] | None = None,
+        format_spec: str = '',
     ) -> Interpolation: ...

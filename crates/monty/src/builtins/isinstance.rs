@@ -97,7 +97,7 @@ fn abc_instance(obj: &Value, marker: StaticStrings, vm: &mut VM<'_>) -> RunResul
     Ok(match marker {
         // The same answer `callable()` gives, which leaves out an instance of
         // a class with a `__call__`: Monty dispatches none.
-        StaticStrings::Callable => obj.is_callable(vm.heap),
+        StaticStrings::Callable => obj.is_callable(vm),
         StaticStrings::CoroutineType => held == Type::Coroutine,
         StaticStrings::Generator => held == Type::Generator,
         StaticStrings::Iterable => obj.py_is_iterable(vm),

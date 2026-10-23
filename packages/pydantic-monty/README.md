@@ -1,6 +1,6 @@
 # pydantic-monty
 
-Python bindings for the Monty sandboxed Python interpreter.
+Python bindings for Monty, a sandbox for Python code written by AI.
 
 Execution always happens in a pool of `monty` worker subprocesses: a monty
 process can never be made fully crash-proof against memory errors (stack
@@ -124,6 +124,31 @@ with Monty() as pool:
         )
     print(result)
     #> 11
+```
+
+### Host modules
+
+`external_modules` on `checkout()` maps import names to `ExternalModule` values containing the module's public items
+and a `.pyi` stub, for every feed of the session.
+Callables become host functions.
+Type checking fetches the stub when a feed first imports the module.
+
+```python
+from pydantic_monty import ExternalModule, Monty
+
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+tools = ExternalModule({'add': add}, stubs='def add(a: int, b: int) -> int: ...\n')
+modules = {'tools': tools}
+code = 'from tools import add\nadd(1, 2)'
+
+with Monty() as pool:
+    with pool.checkout(external_modules=modules) as session:
+        print(session.feed_run(code))
+        #> 3
 ```
 
 ### Host objects and classes
@@ -284,7 +309,7 @@ By default, clock calls read the worker's clock, and unseeded `random` generator
 The pool handles sleeps without an `os=` handler, capping each at `sleep_system_max` (10 seconds).
 Gathered `asyncio.sleep()` calls overlap.
 Suspending sleeps count against `max_suspensions` and `max_total_sleep_secs`, but not the execution-time limits.
-Set `checkout(auto_os_calls=...)` to change these defaults for the session:
+Set `checkout(os_policy=...)` to change these defaults for the session:
 
 ```python
 from datetime import datetime
@@ -299,13 +324,13 @@ f'{datetime.now():%Y-%m-%d %H:%M} {random.random():.4f}'
 """
 
 # datetime: 'system' (default), 'call_host' or a datetime
-# timezone: 'system' (default), 'call_host' or {'offset_seconds': int, 'name': str}
+# timezone: 'utc' (default), an IANA name like 'Europe/London' or {'offset_seconds': int, 'name': str}
 # sleep: 'system' (default), 'call_host' or 'zero'
 # sleep_system_max: seconds per 'system' sleep; float('inf') for no cap
 # random_start: 'system' (default), 'call_host' or {'seed': int | float | str | bytes}
 with Monty() as pool:
     with pool.checkout(
-        auto_os_calls={
+        os_policy={
             'datetime': datetime(2026, 1, 1, 9, 30),
             'timezone': {'offset_seconds': 3600, 'name': 'CET'},
             'sleep': 'system',
@@ -319,7 +344,9 @@ with Monty() as pool:
 
 A `datetime` freezes the clock and, unless `timezone` is explicit, sets the zone from its `utcoffset()` and
 `tzname()` (UTC for a naive value).
-`timezone` is a fixed offset used by naive `datetime.now()` and `date.today()`, with no IANA zone rules.
+`timezone` shifts naive `datetime.now()` and `date.today()`, and is what `astimezone()`, `strftime('%Z')` and the
+`time.timezone` / `time.tzname` constants report: an IANA name is resolved with its DST rules from the worker's tz
+database, a mapping is a fixed offset.
 `'zero'` skips both sleeps.
 `{'seed': s}` initializes the module generator as `random.seed(s)` would; unseeded `random.Random()` instances
 receive deterministic states derived from it.

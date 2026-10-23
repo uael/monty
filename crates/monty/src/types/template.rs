@@ -276,7 +276,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Template> {
         true
     }
 
-    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
+    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         let items = self.iteration_items(vm);
         let Value::Ref(items_id) = &items else {
             unreachable!("allocate_tuple always returns a Ref")
@@ -284,7 +284,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Template> {
         // `from_tuple` takes its own reference, so this function's is released.
         let iterator = TupleIterator::from_tuple(*items_id, vm);
         items.drop_with(vm);
-        Ok(iterator)
+        Ok(CallResult::Value(iterator))
     }
 }
 

@@ -15,7 +15,6 @@ Usage:
 """
 
 import sys
-from pathlib import Path
 
 # `update.py` is this script's sibling, so the interpreter's script directory
 # resolves it. It owns the definition of what the vendored tree should hold, so
@@ -61,18 +60,16 @@ def expected_files() -> set[str]:
         'stdlib/VERSIONS',
         GENERATED_FROM_UPSTREAM,
         *(f'stdlib/{name}' for name in update.COPY_FILES),
-        *(f'stdlib/{custom_path(stub)}' for stub in custom_stubs()),
+        *(f'stdlib/{stub}' for stub in custom_stubs()),
     }
 
 
-def custom_stubs() -> list[Path]:
-    """The `custom/**/*.pyi` overrides, in a stable order, as `update.py` copies them: inside their package."""
-    return sorted(update.CUSTOM_DIR.rglob('*.pyi'))
-
-
-def custom_path(stub: Path) -> str:
-    """Where an override lands under `stdlib/`, package directories included."""
-    return stub.relative_to(update.CUSTOM_DIR).as_posix()
+def custom_stubs() -> list[str]:
+    """The `custom/` overrides as custom-relative POSIX paths, in a stable
+    order; package stubs (`os/path.pyi`) keep their directory like `update.py`
+    copies them.
+    """
+    return sorted(stub.relative_to(update.CUSTOM_DIR).as_posix() for stub in update.CUSTOM_DIR.rglob('*.pyi'))
 
 
 def check_custom_stubs() -> list[str]:
@@ -81,9 +78,10 @@ def check_custom_stubs() -> list[str]:
     Absent copies are left to `check_tree_contents` so they report once.
     """
     return [
-        f'custom/{custom_path(stub)} differs from stdlib/{custom_path(stub)}'
+        f'custom/{stub} differs from stdlib/{stub}'
         for stub in custom_stubs()
-        if (vendored := read_vendored(f'stdlib/{custom_path(stub)}')) is not None and vendored != stub.read_bytes()
+        if (vendored := read_vendored(f'stdlib/{stub}')) is not None
+        and vendored != (update.CUSTOM_DIR / stub).read_bytes()
     ]
 
 
@@ -110,6 +108,8 @@ def check_versions() -> list[str]:
     Upstream stubs vendored only as internal dependencies of another stub (e.g.
     `enum`, reached from `dataclasses`) are deliberately unlisted, so the
     listing is only required for `custom/` — the modules monty itself exposes.
+    A submodule (`os.path`) counts as listed through its package, as typeshed
+    itself resolves it.
     """
     listed = parse_versions(update.VERSIONS)
     return [
@@ -119,23 +119,25 @@ def check_versions() -> list[str]:
             if not resolves(module)
         ),
         *(
-            f'custom/{custom_path(stub)} is missing from VERSIONS, so the type checker ignores it'
+            f'custom/{stub} is missing from VERSIONS, so the type checker ignores it'
             for stub in custom_stubs()
-            if not any(parent in listed for parent in lineage(custom_module(stub)))
+            if not any(package in listed for package in enclosing_modules(module_name(stub)))
         ),
     ]
 
 
-def custom_module(stub: Path) -> str:
-    """The module an override describes: its path as a dotted name, a package by its `__init__`."""
-    return custom_path(stub).removesuffix('.pyi').removesuffix('/__init__').replace('/', '.')
+def module_name(stub: str) -> str:
+    """The dotted module a custom-relative stub path describes (`os/path.pyi` -> `os.path`)."""
+    parts = stub.removesuffix('.pyi').split('/')
+    if parts[-1] == '__init__':
+        parts.pop()
+    return '.'.join(parts)
 
 
-def lineage(module: str) -> list[str]:
-    """The module and every package above it, since the type checker takes a listed package as word for
-    the modules inside it."""
+def enclosing_modules(module: str) -> list[str]:
+    """A module and each package above it: `os.path` -> `['os.path', 'os']`."""
     parts = module.split('.')
-    return ['.'.join(parts[:n]) for n in range(len(parts), 0, -1)]
+    return ['.'.join(parts[:end]) for end in range(len(parts), 0, -1)]
 
 
 def parse_versions(versions: str) -> set[str]:

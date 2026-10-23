@@ -10,5 +10,5 @@ use crate::{args::ArgValues, bytecode::VM, defer_drop, exception_private::RunRes
 pub(crate) fn builtin_callable(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     let value = args.get_one_arg("callable", vm.heap)?;
     defer_drop!(value, vm);
-    Ok(Value::Bool(value.is_callable(vm.heap)))
+    Ok(Value::Bool(value.is_callable(vm)))
 }

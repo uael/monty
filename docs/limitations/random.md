@@ -17,7 +17,7 @@ platform (see the note on floats below).
 ## Entropy
 
 An unseeded generator seeds itself on its first draw from the session's `random_start`
-(`auto_os_calls` on `checkout()` in the bindings, `AutoOsCalls::random_start` in Rust):
+(`os_policy` on `checkout()` in the bindings, `OsPolicy::random_start` in Rust):
 
 - `'system'` reads 2496 bytes of OS entropy, the 624 32-bit words of an MT19937 state vector.
     If entropy is unavailable, the run ends with an uncatchable `OSError: OS entropy source unavailable: <reason>`.
@@ -46,7 +46,7 @@ it is included in a dump, as is the session's `random_start`.
 - **No `SystemRandom`**, and `random.Random` cannot be subclassed (Monty has no class inheritance, see
     [classes.md](classes.md)).
     `random.Random.VERSION` on the class raises `AttributeError`; on an instance it is `3`.
-    Instances have no `gauss_next` attribute.
+    Reading an instance's `gauss_next` raises `AttributeError: 'Random' object has no attribute 'gauss_next'`.
 - **Copying an unseeded generator gives two independent streams.** `copy.copy(rng)` and `copy.deepcopy(rng)` rebuild
     a generator at the same point in the same sequence, but one that has never been seeded has no state to carry, so
     each copy takes its own first state on its first draw.

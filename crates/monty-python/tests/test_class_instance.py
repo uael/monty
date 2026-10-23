@@ -320,18 +320,28 @@ def test_private_method_not_dispatched(monty_run: RunMonty):
 
 
 def test_instance_call_method_dunder_call_rejected():
-    """`__call__` routes only to `ClassType` construction; on an instance
-    wrapper a (necessarily forged) `__call__` frame is denied even under
-    `allowed_methods='all'`, so the wrapped instance can never be invoked."""
+    """Only `ClassType` permits `__call__`, even with `allowed_methods='all'`."""
 
     class Invocable:
         def __call__(self) -> str:
             return 'invoked'
 
     wrapper = ClassInstance(Invocable(), allowed_methods='all')
-    with pytest.raises(AttributeError) as exc_info:
+    with pytest.raises(TypeError) as exc_info:
         wrapper.call_method('__call__', (), {})
-    assert str(exc_info.value) == snapshot("'Invocable' object has no attribute '__call__'")
+    assert str(exc_info.value) == snapshot("'Invocable' object is not callable")
+
+
+def test_calling_an_instance_in_the_sandbox_is_not_callable(monty_run: RunMonty):
+    """The wrapper rejects `__call__` requests from the sandbox."""
+
+    class Invocable:
+        def __call__(self) -> str:
+            return 'invoked'
+
+    with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
+        monty_run('c()', inputs={'c': ClassInstance(Invocable(), allowed_methods='all')})
+    assert str(exc_info.value) == snapshot("TypeError: 'Invocable' object is not callable")
 
 
 # === Policy validation and the scope of 'all' ===
@@ -557,8 +567,13 @@ def test_frozen_dataclass_setattr_mutates_sandbox_copy(monty_run: RunMonty):
 
 
 def test_frozen_instance_error_from_external_function(monty_run: RunMonty):
-    """FrozenInstanceError raised by an external function is properly converted."""
+    """FrozenInstanceError raised by an external function is properly converted.
+
+    The sandbox imports the name, as CPython code must: it is no builtin there.
+    """
     code = """
+from dataclasses import FrozenInstanceError
+
 try:
     fail()
 except FrozenInstanceError:
@@ -652,14 +667,13 @@ def test_is_dataclass_in_sandbox(monty_run: RunMonty):
 
 
 def test_dataclass_helpers_raise_on_host_instance(monty_run: RunMonty):
-    """`fields()` / `asdict()` are not importable in the sandbox, so neither
-    works on a host instance (see `limitations/dataclasses.md`)."""
+    """`fields()` refuses a host instance as it refuses a plain class, since a host
+    instance has no `Field` objects, and `asdict()` is not importable in the
+    sandbox, so neither works on a host instance (see `limitations/dataclasses.md`)."""
     p = ClassInstance(Person(name='Alice', age=30), eager_attrs='all')
     with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
         monty_run('from dataclasses import fields\nfields(p)', inputs={'p': p})
-    assert str(exc_info.value) == snapshot(
-        "ImportError: cannot import name 'fields' from 'dataclasses' (unknown location)"
-    )
+    assert str(exc_info.value) == snapshot('TypeError: must be called with a dataclass type or instance')
     with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
         monty_run('from dataclasses import asdict\nasdict(p)', inputs={'p': p})
     assert str(exc_info.value) == snapshot(

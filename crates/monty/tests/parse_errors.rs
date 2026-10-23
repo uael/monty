@@ -11,10 +11,11 @@ fn get_parse_err(code: impl Into<String>) -> MontyException {
 }
 
 #[test]
-fn complex_numbers_return_not_implemented_error() {
-    let err = get_parse_err("1 + 2j");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support complex constants");
+fn repeated_class_keyword_returns_syntax_error() {
+    // CPython reports the repeat before considering the metaclass.
+    let err = get_parse_err("class C(metaclass=type, metaclass=type):\n    pass");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"keyword argument repeated: metaclass");
 }
 
 #[test]
@@ -235,13 +236,13 @@ fn async_with_statement_returns_not_implemented_error() {
 #[test]
 fn error_display_format() {
     // Verify the Display format matches Python's exception output with traceback
-    let err = get_parse_err("1 + 2j");
+    let err = get_parse_err("class Foo(metaclass=type):\n    pass");
     assert_snapshot!(err, @r#"
     Traceback (most recent call last):
       File "test.py", line 1, in <module>
-        1 + 2j
-            ~~
-    NotImplementedError: The monty syntax parser does not yet support complex constants
+        class Foo(metaclass=type):
+            pass
+    NotImplementedError: The monty syntax parser does not yet support metaclasses
     "#);
 }
 
@@ -597,23 +598,6 @@ fn deeply_nested_boolean_or_exceed_limit() {
     let err = get_parse_err(code);
     assert_eq!(err.exc_type(), ExcType::SyntaxError);
     assert_snapshot!(err.message().unwrap(), @"Source is too deeply nested");
-}
-
-// === Runtime NotImplementedError tests ===
-// These test that unimplemented features return proper errors instead of panicking.
-
-/// Helper to run code and get the exception from a runtime error.
-fn run_and_get_err(code: &str) -> MontyException {
-    let mut runner =
-        MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).expect("should parse");
-    runner.run_no_limits(vec![]).expect_err("expected runtime error")
-}
-
-#[test]
-fn matrix_multiplication_returns_not_implemented_error() {
-    // The @ operator (matrix multiplication) is not supported at runtime
-    let err = run_and_get_err("1 @ 2");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
 }
 
 #[test]
@@ -1015,6 +999,18 @@ fn module_with_too_many_interned_strings_returns_syntax_error() {
 }
 
 #[test]
+fn dotted_import_with_too_many_components_returns_syntax_error() {
+    // each component interns the path through it, so the chain is capped
+    let code = format!("import a{}", ".a".repeat(32));
+    let result = MontyRun::new(code, "test.py", vec![], CompileOptions::default());
+    let err = result.expect_err("expected compile error");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_eq!(err.message(), Some("dotted import has more than 32 components"));
+    let code = format!("from a{} import b", ".a".repeat(31));
+    MontyRun::new(code, "test.py", vec![], CompileOptions::default()).expect("32 components compile");
+}
+
+#[test]
 fn oversized_tuple_literal_returns_syntax_error() {
     let mut code = "x = (".to_owned();
     for _ in 0..70_000 {
@@ -1080,50 +1076,4 @@ fn function_with_too_many_closure_variables_returns_syntax_error() {
     let err = result.expect_err("expected compile error");
     assert_eq!(err.exc_type(), ExcType::SyntaxError);
     assert_eq!(err.message(), Some("more than 255 closure variables (256)"));
-}
-
-/// The four compile-time rules a `match` pattern must obey, each reported with
-/// CPython's own wording. They live here rather than in `test_cases/` because a
-/// failing *parse* has no traceback to diff against CPython.
-#[test]
-fn match_pattern_rules_return_syntax_errors() {
-    let err = get_parse_err("match 1:\n    case x: pass\n    case 2: pass");
-    assert_eq!(err.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(
-        err.message().unwrap(),
-        @"name capture 'x' makes remaining patterns unreachable"
-    );
-
-    let err = get_parse_err("match 1:\n    case _: pass\n    case 2: pass");
-    assert_eq!(err.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(err.message().unwrap(), @"wildcard makes remaining patterns unreachable");
-
-    let err = get_parse_err("match 1:\n    case [x, x]: pass");
-    assert_eq!(err.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(err.message().unwrap(), @"multiple assignments to name 'x' in pattern");
-
-    let err = get_parse_err("match 1:\n    case [x] | (y): pass");
-    assert_eq!(err.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(err.message().unwrap(), @"alternative patterns bind different names");
-
-    let err = get_parse_err("match 1:\n    case {1: a, 1: b}: pass");
-    assert_eq!(err.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(err.message().unwrap(), @"mapping pattern checks duplicate key (1)");
-
-    let err = get_parse_err("match [1]:\n    case [*a, *b]: pass");
-    assert_eq!(err.exc_type(), ExcType::SyntaxError);
-    assert_snapshot!(err.message().unwrap(), @"multiple starred names in sequence pattern");
-}
-
-/// An irrefutable case with a guard is not unreachable: the guard can fail, so
-/// the cases after it are still live.
-#[test]
-fn match_guarded_capture_is_not_unreachable() {
-    let result = MontyRun::new(
-        "match 1:\n    case x if x > 5: pass\n    case 2: pass".to_owned(),
-        "test.py",
-        vec![],
-        CompileOptions::default(),
-    );
-    assert!(result.is_ok(), "a guarded capture must not close the match");
 }

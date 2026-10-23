@@ -28,7 +28,7 @@ Reading a name it does not carry raises `AttributeError`.
 
 ## Implemented type constructors (also builtins)
 
-`bool`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `object`,
+`bool`, `bytes`, `complex`, `dict`, `float`, `frozenset`, `int`, `list`, `object`,
 `property`, `range`, `set`, `slice`, `str`, `tuple`. Exception classes
 (`ValueError`, `TypeError`, etc.) are also names in the builtin namespace.
 
@@ -41,7 +41,7 @@ These raise `NameError`:
 - **Interactive**: `input`, `breakpoint`, `help`, and the other names the `site` module adds:
     `exit`, `quit`, `copyright`, `credits`, `license`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`.
-- **Construction / coercion**: `bytearray`, `complex`, `memoryview`, `ascii`.
+- **Construction / coercion**: `bytearray`, `memoryview`, `ascii`.
 - **Other**: `delattr`, `aiter`, `anext`, and the aliases of `OSError`: `IOError`, `EnvironmentError`,
     `WindowsError`.
 
@@ -66,12 +66,16 @@ Monty has no `UnicodeError`.
     `AttributeError`, so `[1].append`, `'a'.upper`, `{}.get`, `dict.fromkeys`
     and `list.__class_getitem__` cannot be assigned, passed as a callback or
     reached through `getattr`. Call them directly (`list.__class_getitem__(int)`).
+- **Large integer literal identity** — separate occurrences of the same literal outside the `i64` range are not
+    deduplicated, so `a = 18446744073709551616; b = 18446744073709551616; a is b` is `False` where CPython may reuse a
+    single constant and return `True`.
+    Repeated loads of one literal share its identity; use `==` to compare numeric values.
 - **`callable()` reports what Monty can call** — an instance of a sandbox class
     that defines `__call__` answers `False`, because `__call__` is not dispatched
     (see [classes.md](classes.md)), and calling it raises `TypeError`.
-- **`hash(x)`** — Monty hashes `str`, `bytes`, `float` and every container with
-    its own algorithm, so the values differ from CPython's. Only `bool` and
-    small `int` agree: an `int` hashes to itself, which is what CPython does
+- **`hash(x)`** — Monty hashes `str`, `bytes`, `float`, `complex` and every container with
+    its own algorithm, so the values differ from CPython's. Only `bool`,
+    small `int`, and a `float` or `complex` equal to one of them agree: an `int` hashes to itself, which is what CPython does
     while `abs(x) < 2**61 - 1`, but CPython reduces modulo `2**61 - 1` from
     there up (`hash(2**62)` is `2` in CPython, `4611686018427387904` in Monty)
     and Monty hashes an `int` too large for an `i64` differently again. Monty's
@@ -79,15 +83,15 @@ Monty has no `UnicodeError`.
     no hash randomisation), but never persist one or compare one against a
     CPython hash. `sys.hash_info` is not exposed, so the parameters CPython
     publishes are unavailable (see [sys.md](sys.md)).
-- **`repr` of a dict being mutated by its own elements** — Monty iterates the
-    live entries like CPython, but deletion compacts Monty's dense entry storage
-    where CPython leaves a tombstone in place: a key deleted from inside a user
-    `__repr__` running *during that dict's repr* shifts later entries down, so
-    the entry after the deleted one can be skipped from the output where CPython
-    would still print it. Insertions during repr match CPython (appended and
-    printed), as do list (live length, mid-repr pops truncate / appends extend),
-    `set`, `collections.deque` and `collections.Counter` (all snapshot, like
-    CPython).
+- **a set iterated while it is mutated may yield a newly added element** —
+    Monty's sets keep insertion order, so an element added during iteration is
+    appended after the cursor and gets yielded. CPython places it by hash, which
+    can put it behind the cursor and out of that walk's reach. Both engines raise
+    `RuntimeError: Set changed size during iteration` when the size changes; this
+    is only about which walk sees a same-size replacement.
+    Monty also stops a set walk once it has yielded the set's starting length,
+    where CPython keeps going: replacing each element as it is visited yields
+    every replacement in CPython but only the original elements in Monty.
 - **copying a dict or rebuilding a set re-hashes the keys** — CPython copies the
     hash table, so `d.copy()`, `dict(d)`, `{**d}`, `defaultdict.copy()`,
     `Counter.copy()`, `set(s)` and `frozenset(s)` never call a key's `__hash__`.
@@ -174,6 +178,8 @@ Monty has no `UnicodeError`.
     all work. A count above `i64` (`bytes(2**70)`) raises the same shape of `TypeError`
     (`cannot convert 'int' object to bytes`), not CPython's
     `OverflowError: cannot fit 'int' into an index-sized integer`.
+- **`slice`** — `start`, `stop` and `step` are readable, but `slice.indices(length)` is not implemented and
+    raises `AttributeError: 'slice' object has no attribute 'indices'`.
 - **`isinstance(obj, T)`** — `T` must be a built-in type (`int`, `str`,
     `list`, ...), `type` itself, a built-in exception class, a sandbox-defined
     class (see [classes.md](classes.md)), an abstract base class of
@@ -189,7 +195,6 @@ Monty has no `UnicodeError`.
     in CPython. Only a module, a class and an instance carry a namespace; every
     other object raises
     `TypeError: vars() argument must have __dict__ attribute`.
-
 - **`type` is a built-in function, not the class `type`.** `repr(type)` reads
     `<built-in function type>` and `type(type)` reads
     `<class 'builtin_function_or_method'>`, where CPython reads
@@ -197,13 +202,11 @@ Monty has no `UnicodeError`.
     is a class, which is what the question is for, so only `type` itself
     answers `False` where CPython answers `True`.
 - **`iter()`** — see [iter.md](iter.md) for iterator and `iter(callable, sentinel)` divergences.
-- **`pow(base, exp, mod)`** — the three-argument form requires all integers and
-    rejects negative exponents with `ValueError` instead of computing a modular
-    inverse. Non-modular exponents whose result cannot be materialized raise
+- **`pow(base, exp, mod)` with integer operands** rejects negative exponents with `ValueError`
+    instead of computing a modular inverse. Non-modular exponents whose result cannot be materialized raise
     `OverflowError` (see [resource_limits.md](resource_limits.md)).
-- **`pow(base, exp)` and `**` with a negative float base and a fractional
-    exponent** — gives `nan` where CPython returns a `complex` (Monty has no
-    complex type). Overflow raises `OverflowError` like CPython, always worded
+- **`pow(base, exp)` and `**` with float operands and a real result** — overflow raises
+    `OverflowError` like CPython, always worded
     `(34, 'Numerical result out of range')` (glibc's `strerror(ERANGE)`; CPython
     on macOS and Windows says `(34, 'Result too large')`), and `exc.args` is that
     text as one string rather than CPython's `(34, '...')` tuple.

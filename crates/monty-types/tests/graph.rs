@@ -89,6 +89,7 @@ fn corpus() -> Vec<MontyObject> {
             [pair("x", MontyObject::int(1))],
         ),
         MontyObject::function("fetch".to_owned(), Some("doc".to_owned())),
+        MontyObject::module("tools", MontyUuid::from_u128(3), [pair("VERSION", MontyObject::int(3))]),
         MontyObject::repr("<object>".to_owned()),
         MontyObject::cycle("[...]".to_owned()),
     ]
@@ -100,8 +101,12 @@ fn corpus() -> Vec<MontyObject> {
 fn every_kind_copies_and_serializes_equal() {
     for value in corpus() {
         assert_eq!(value.as_ref().to_owned(), value, "{value:?}");
-        let bytes = postcard::to_allocvec(&value).unwrap();
-        assert_eq!(postcard::from_bytes::<MontyObject>(&bytes).unwrap(), value, "{value:?}");
+        let bytes = minicbor_serde::to_vec(&value).unwrap();
+        assert_eq!(
+            minicbor_serde::from_slice::<MontyObject>(&bytes).unwrap(),
+            value,
+            "{value:?}"
+        );
     }
 }
 
@@ -111,7 +116,7 @@ fn unstable_graph_access_preserves_storage() {
     for value in corpus() {
         let (graph, root) = unstable::graph_parts(&value);
         let nodes = graph.nodes().as_ptr();
-        let bytes = postcard::to_allocvec(&value).unwrap();
+        let bytes = minicbor_serde::to_vec(&value).unwrap();
         assert_eq!(graph.node(root), unstable::root_node(&value));
         assert_eq!(unstable::node(value.as_ref()), graph.node(root));
         assert_eq!(unstable::child(value.as_ref(), root), value.as_ref());
@@ -123,7 +128,7 @@ fn unstable_graph_access_preserves_storage() {
         assert_eq!(owned_root, root);
         assert_eq!(graph.nodes().as_ptr(), nodes);
         let rebuilt = unstable::object_from_graph(graph, owned_root).unwrap();
-        assert_eq!(postcard::to_allocvec(&rebuilt).unwrap(), bytes);
+        assert_eq!(minicbor_serde::to_vec(&rebuilt).unwrap(), bytes);
     }
 }
 
@@ -162,6 +167,14 @@ fn shared_nodes_equal_their_copies() {
         ])
     );
     assert_eq!(value.to_string(), "[[1], [1]]");
+}
+
+#[test]
+fn module_repr_quotes_its_name() {
+    let module = |name: &str| MontyObject::module(name, MontyUuid::from_u128(3), []).to_string();
+    assert_eq!(module("pkg.sub"), "<module 'pkg.sub'>");
+    // a worker-supplied name is untrusted, so it is quoted as a Python str
+    assert_eq!(module("it's"), "<module \"it's\">");
 }
 
 #[test]
@@ -330,11 +343,11 @@ fn unstable_call_parts_preserve_storage() {
     let call = unstable::call_args_from_parts(graph, vec![value, value], vec![(key, value)]).unwrap();
     let (graph, args, kwargs) = unstable::call_args_parts(&call);
     let pointers = (graph.nodes().as_ptr(), args.as_ptr(), kwargs.as_ptr());
-    let bytes = postcard::to_allocvec(&call).unwrap();
+    let bytes = minicbor_serde::to_vec(&call).unwrap();
     let (graph, args, kwargs) = unstable::into_call_args_parts(call);
     assert_eq!((graph.nodes().as_ptr(), args.as_ptr(), kwargs.as_ptr()), pointers);
     let call = unstable::call_args_from_parts(graph, args, kwargs).unwrap();
-    assert_eq!(postcard::to_allocvec(&call).unwrap(), bytes);
+    assert_eq!(minicbor_serde::to_vec(&call).unwrap(), bytes);
     let (_, args, kwargs) = unstable::call_args_parts(&call);
     assert_eq!(args, [value, value]);
     assert_eq!(kwargs, [(key, value)]);
@@ -352,11 +365,11 @@ fn unstable_named_parts_preserve_storage() {
     let named = unstable::named_values_from_parts(graph, names).unwrap();
     let (graph, names) = unstable::named_values_parts(&named);
     let pointers = (graph.nodes().as_ptr(), names.as_ptr());
-    let bytes = postcard::to_allocvec(&named).unwrap();
+    let bytes = minicbor_serde::to_vec(&named).unwrap();
     let (graph, names) = unstable::into_named_values_parts(named);
     assert_eq!((graph.nodes().as_ptr(), names.as_ptr()), pointers);
     let named = unstable::named_values_from_parts(graph, names).unwrap();
-    assert_eq!(postcard::to_allocvec(&named).unwrap(), bytes);
+    assert_eq!(minicbor_serde::to_vec(&named).unwrap(), bytes);
     assert_eq!(named.len(), 2);
     assert_eq!(named.iter().len(), 2);
     assert!(named.iter().all(|(_, value)| value.as_int() == Some(42)));
@@ -433,8 +446,8 @@ fn arena_round_trips_through_serde() {
     let value = doubling_ladder(2);
     let json = serde_json::to_string(&value).unwrap();
     assert_eq!(serde_json::from_str::<MontyObject>(&json).unwrap(), value);
-    let bytes = postcard::to_allocvec(&value).unwrap();
-    assert_eq!(postcard::from_bytes::<MontyObject>(&bytes).unwrap(), value);
+    let bytes = minicbor_serde::to_vec(&value).unwrap();
+    assert_eq!(minicbor_serde::from_slice::<MontyObject>(&bytes).unwrap(), value);
 }
 
 /// A list nested `depth` times around `1`, built without recursion.
