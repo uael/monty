@@ -1606,6 +1606,8 @@ pub enum StaticStrings {
     Monotonic,
     /// `time.monotonic_ns()` function.
     MonotonicNs,
+    /// `sys.modules`, the session's table of imported modules.
+    Modules,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
     /// Value of `sys.platform`.

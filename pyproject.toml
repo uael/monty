@@ -109,6 +109,9 @@ extra-standard-library = ["tomllib"]
     "F506", # mixed positional and named placeholders - tests CPython's argument consumption order
     "F507", # placeholder/argument count mismatch - the point of the argument-count tests
 ]
+"crates/monty/test_cases/modules__sys_modules.py" = [
+    "S102", # use of `exec` - building a module from source is what the test is about
+]
 "crates/monty/test_cases/*.py" = [
     "E722", # bare except - needed for testing try/except with bare except clauses
     "E711", # Comparison to `None` should be `cond is None`

@@ -36,6 +36,7 @@ pub(crate) mod pathlib;
 pub(crate) mod random;
 pub(crate) mod re;
 pub(crate) mod sys;
+pub(crate) mod table;
 pub(crate) mod time;
 pub(crate) mod tomllib;
 pub(crate) mod typing;
