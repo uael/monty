@@ -89,7 +89,8 @@ pub struct PoolConfig {
     pub feed_duration_limit_grace: Option<Duration>,
     /// [`feed_duration_limit_grace`](Self::feed_duration_limit_grace) for the
     /// `ResourceLimits::max_turn_duration` backstop: each turn is bounded by
-    /// that whole limit plus this, the turn clock starting at zero.
+    /// twice that limit plus this, since the turn clock starts at zero and
+    /// once more for the handlers of its first excess, which the code may catch.
     pub turn_duration_limit_grace: Option<Duration>,
     /// Recycle (kill and respawn) a worker after this many checkouts, to
     /// bound the impact of any slow leak in a long-lived child.

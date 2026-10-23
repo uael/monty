@@ -456,10 +456,13 @@ export class WorkerTransport {
     })
   }
 
-  /** Bounds each turn by the remaining feed budget and the full turn budget, plus grace. */
+  /**
+   * Bounds each turn by the remaining feed budget, and by twice the turn budget, plus grace: the handlers of the
+   * first excess of the turn budget, which the code may catch, run on a turn clock that restarts once.
+   */
   private backstopMs(): number | undefined {
     const feed = remainingDeadline(this.feedBudgetMs, this.feedExecutionMs, this.graces.feedDurationLimitGraceMs)
-    const turn = remainingDeadline(this.turnBudgetMs, 0, this.graces.turnDurationLimitGraceMs)
+    const turn = remainingDeadline(this.turnBudgetMs && this.turnBudgetMs * 2, 0, this.graces.turnDurationLimitGraceMs)
     const deadline = Math.min(feed, turn)
     return Number.isFinite(deadline) ? deadline : undefined
   }

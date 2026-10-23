@@ -53,8 +53,9 @@ export interface MontyOptions {
   feedDurationLimitGrace?: number | null
   /**
    * As `feedDurationLimitGrace`, but for `maxTurnDurationSecs`: the host kills the
-   * worker this long after the current turn's budget expires (default 1,
-   * `null` disables).
+   * worker this long after twice the current turn's budget expires, since the
+   * handlers of its first excess get a restarted clock (default 1, `null`
+   * disables).
    */
   turnDurationLimitGrace?: number | null
   /** Recycle a worker after this many sessions: an integer from 0 to 4294967295.

@@ -181,13 +181,15 @@ fn estimate_bits_to_bytes(bits: u64) -> usize {
 
 /// Converts a resource error to its host-visible Python exception.
 ///
-/// Recursion errors remain catchable for CPython compatibility; terminal
-/// memory and time errors cannot be suppressed by sandboxed code.
+/// Recursion errors remain catchable for CPython compatibility, and so does
+/// the first excess of the turn budget, so the code restores its state; the
+/// terminal memory and time errors cannot be suppressed by sandboxed code.
 impl From<ResourceError> for RunError {
     fn from(err: ResourceError) -> Self {
         let (exc_type, catchable) = match &err {
             ResourceError::Memory { .. } => (ExcType::MemoryError, false),
             ResourceError::Time { .. } => (ExcType::TimeoutError, false),
+            ResourceError::TurnTimeout { .. } => (ExcType::TimeoutError, true),
             ResourceError::Recursion { .. } => (ExcType::RecursionError, true),
         };
         let exc = SimpleException::new_msg(exc_type, err).into();
