@@ -1098,6 +1098,8 @@ pub enum StaticStrings {
     /// `namedtuple(field_names=...)` keyword argument.
     #[strum(serialize = "field_names")]
     FieldNames,
+    /// `fields` parameter of `monty.instance()`.
+    Fields,
     /// `csv.field_size_limit()` function.
     FieldSizeLimit,
     /// `fieldnames` parameter and attribute of `csv.DictReader` / `csv.DictWriter`.
@@ -1306,6 +1308,8 @@ pub enum StaticStrings {
     InsortLeft,
     /// `insort_right` in the bisect module.
     InsortRight,
+    /// `monty.instance()` function.
+    Instance,
     /// `sys.flags.inspect` field.
     Inspect,
     /// `sys.flags.int_max_str_digits` field.
@@ -1614,7 +1618,8 @@ pub enum StaticStrings {
     MonotonicNs,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
-    /// Value of `sys.platform`.
+    /// Value of `sys.platform`, and the `monty` module: what this interpreter
+    /// does that CPython does not.
     Monty,
     /// The value of `sys.copyright`.
     #[strum(serialize = "Copyright (c) Pydantic Services Inc. 2026 to present")]
@@ -1882,6 +1887,8 @@ pub enum StaticStrings {
     Real,
     /// `os.path.realpath()` function.
     Realpath,
+    /// `monty.rebound()` function.
+    Rebound,
     /// Kwarg name `recurse_symlinks` — `Path.glob(recurse_symlinks=...)`.
     RecurseSymlinks,
     /// `functools.reduce()` function.
@@ -2177,7 +2184,8 @@ pub enum StaticStrings {
     Tan,
     /// `math.tanh()` function.
     Tanh,
-    /// Destination keyword for Path.rename and Path.replace.
+    /// Destination keyword for Path.rename and Path.replace, and the parameter
+    /// `target` of `monty.rebound()`.
     Target,
     /// `math.tau` constant
     Tau,
