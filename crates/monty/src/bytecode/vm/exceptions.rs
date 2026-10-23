@@ -26,6 +26,15 @@ pub(super) enum CaughtException {
 }
 
 impl CaughtException {
+    /// The exception object alone, as a generator keeps what it was handling
+    /// while it waits: no internal handler runs a `yield`, so nothing a frozen
+    /// one kept is lost.
+    pub(super) fn into_value(self) -> Value {
+        match self {
+            Self::Value(value) | Self::Frozen { value, .. } => value,
+        }
+    }
+
     /// Borrows the exception object without exposing its internal traceback metadata.
     fn value(&self) -> &Value {
         match self {
@@ -111,7 +120,7 @@ impl VM<'_> {
     /// Borrows the value so callers that already own one can keep it — the
     /// `raise`/`Reraise` paths reuse it as the raised object itself.
     /// The `is_raise` flag indicates if this is from a `raise` statement (hide caret).
-    pub(super) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
+    pub(crate) fn make_exception(&mut self, exc_value: &Value, is_raise: bool) -> RunError {
         let simple_exc = match exc_value {
             // Exception instance on heap
             Value::Ref(heap_id) => {
@@ -433,9 +442,17 @@ impl VM<'_> {
             // This is where the caller invoked the function that's failing.
             let call_offset = this.current_frame().call_offset;
 
+            // A generator whose body raises is finished, exactly as one that
+            // returned is: the next resume must report exhaustion rather than
+            // find it still running.
+            let generator = this.current_frame().generator;
+
             // Synchronous evaluation stops unwinding here, but its caller still
             // belongs in the traceback when the error crosses that boundary.
             let should_return = this.pop_frame();
+            if let Some(gen_id) = generator {
+                this.finish_generator(gen_id);
+            }
 
             // Add caller frame info to traceback (if we have a call site).
             // Resolve the offset now — against the caller, which is the current
@@ -464,8 +481,12 @@ impl VM<'_> {
         while !self.suspended_frames.is_empty() {
             // Get the caller's call-site offset before popping frame
             let call_offset = self.current_frame().call_offset;
+            let generator = self.current_frame().generator;
 
             let should_return = self.pop_frame();
+            if let Some(gen_id) = generator {
+                self.finish_generator(gen_id);
+            }
 
             // Add caller frame info to traceback. Resolve the offset against the
             // caller, which is the current frame after the pop above.

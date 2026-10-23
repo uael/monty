@@ -396,6 +396,15 @@ pub enum ExcType {
     /// A direct `Exception` subclass, named `_csv.Error` as in CPython.
     #[strum(serialize = "_csv.Error")]
     CsvError,
+
+    /// `GeneratorExit`, thrown into a generator by `close()`.
+    ///
+    /// A direct `BaseException` subclass like `SystemExit`, so `except
+    /// Exception:` does not swallow it and a generator cannot refuse to close
+    /// by catching broadly; only `finally` and an explicit
+    /// `except GeneratorExit:` see it. Appended out of its grouping because
+    /// this enum is postcard-encoded by variant index, so it grows at its end.
+    GeneratorExit,
 }
 impl ExcType {
     /// Checks if this exception type is a subclass of another exception type.
@@ -415,8 +424,12 @@ impl ExcType {
         match handler_type {
             // BaseException catches all exceptions
             Self::BaseException => true,
-            // Exception catches everything except BaseException, and direct subclasses: KeyboardInterrupt, SystemExit
-            Self::Exception => !matches!(self, Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit),
+            // Exception catches everything except BaseException and its direct
+            // subclasses: KeyboardInterrupt, SystemExit, GeneratorExit
+            Self::Exception => !matches!(
+                self,
+                Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit | Self::GeneratorExit
+            ),
             // LookupError catches KeyError and IndexError
             Self::LookupError => matches!(self, Self::KeyError | Self::IndexError),
             // ArithmeticError catches ZeroDivisionError and OverflowError
