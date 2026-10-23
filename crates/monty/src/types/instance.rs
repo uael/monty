@@ -1,6 +1,7 @@
 use std::{borrow::Cow, fmt::Write};
 
 use monty_types::MontyUuid;
+use smallvec::SmallVec;
 
 use super::{Dict, LazyHeapSet, PyTrait, Type, attribute_name_value};
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
         copy::{Memo, PyDeepCopy, deep_copy, deep_copy_attrs},
         dataclasses,
     },
+    types::class::class_default,
     value::{EitherStr, Value},
 };
 
@@ -883,11 +885,14 @@ pub(crate) fn class_defines_not_none(class_id: HeapId, dunder: &str, vm: &VM<'_>
 /// `None` member apart from an absent one — CPython's `has_explicit_hash` does
 /// — want this rather than either check.
 pub(crate) fn class_dunder<'v>(class_id: HeapId, dunder: &str, vm: &'v VM<'_>) -> Option<&'v Value> {
-    namespace_member(class_id, dunder, vm.heap, vm.interns)
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| namespace_member(id, dunder, vm.heap, vm.interns))
 }
 
-/// [`class_dunder`] from a bare heap and interns, for a dump upgrade that runs
-/// before any VM exists.
+/// The member `name` of the namespace of `class_id` alone, from a bare heap and
+/// interns, for a dump upgrade that runs before any VM exists. A dump that
+/// needs the upgrade predates inheritance, so no base holds the member.
 pub(crate) fn namespace_member<'v>(
     class_id: HeapId,
     name: &str,
@@ -952,15 +957,52 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 }
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
-fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
-    match vm.heap.get(class_id) {
-        HeapData::Class(class) => class
-            .namespace()
-            .get_by_str(name, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap)),
-        _ => None,
-    }
+///
+/// A class attribute Monty synthesizes rather than keeping in a namespace is
+/// read last, as CPython reads one the class itself binds first; see
+/// [`class_default`].
+pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| match vm.heap.get(id) {
+            HeapData::Class(class) => class
+                .namespace()
+                .get_by_str(name, vm.heap, vm.interns)
+                .map(|v| v.clone_with_heap(vm.heap)),
+            _ => None,
+        })
+        .or_else(|| class_default(name, vm))
 }
+
+/// A class and its bases, derived class first.
+///
+/// The single point every member, dunder, `isinstance` and `issubclass` lookup
+/// walks, so none of them can disagree about what a class inherits. The chain
+/// is acyclic by construction: a base must already exist when the class naming
+/// it is created, so it can never reach forward to the class itself. The depth
+/// cap is a belt-and-braces bound against a chain rebuilt from crafted snapshot
+/// data.
+pub(crate) fn class_chain(class_id: HeapId, vm: &VM<'_>) -> SmallVec<[HeapId; 4]> {
+    let mut chain = SmallVec::new();
+    let mut next = Some(class_id);
+    while let Some(id) = next {
+        if chain.len() >= MAX_CLASS_CHAIN {
+            break;
+        }
+        chain.push(id);
+        next = match vm.heap.get(id) {
+            HeapData::Class(class) => class.bases().first().copied(),
+            _ => None,
+        };
+    }
+    chain
+}
+
+/// How far a class chain is walked before it is treated as broken.
+///
+/// Unreachable from Python: a chain is built one base at a time from classes
+/// that already exist, so it is as deep as the source says and no deeper.
+const MAX_CLASS_CHAIN: usize = 100;
 
 /// Returns a class object's name for error messages / repr.
 ///

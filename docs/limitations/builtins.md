@@ -154,10 +154,16 @@ These raise `NameError`:
 - **`slice`** — `start`, `stop` and `step` are readable, but `slice.indices(length)` is not implemented and
     raises `AttributeError: 'slice' object has no attribute 'indices'`.
 - **`isinstance(obj, T)`** — `T` must be a built-in type (`int`, `str`,
-    `list`, ...), a built-in exception class, a sandbox-defined class (see
-    [classes.md](classes.md)), a `|` union of those (see [typing.md](typing.md)),
-    or a tuple of those. Passing a host-supplied dataclass / namedtuple as the
-    second argument raises `TypeError`.
+    `list`, ...), `type` itself, a built-in exception class, a sandbox-defined
+    class (see [classes.md](classes.md)), a `|` union of those (see
+    [typing.md](typing.md)), or a tuple of those. Passing a host-supplied
+    dataclass / namedtuple as the second argument raises `TypeError`.
+- **`type` is a built-in function, not the class `type`.** `repr(type)` reads
+    `<built-in function type>` and `type(type)` reads
+    `<class 'builtin_function_or_method'>`, where CPython reads
+    `<class 'type'>` for both. `isinstance(x, type)` still answers whether `x`
+    is a class, which is what the question is for, so only `type` itself
+    answers `False` where CPython answers `True`.
 - **`iter()`** — see [iter.md](iter.md) for iterator and `iter(callable, sentinel)` divergences.
 - **`pow(base, exp, mod)` with integer operands** rejects negative exponents with `ValueError`
     instead of computing a modular inverse. Non-modular exponents whose result cannot be materialized raise
