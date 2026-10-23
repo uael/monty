@@ -684,6 +684,11 @@ pub struct VMSnapshot {
     cwd: String,
     /// The session's `random` state at the pause.
     random: SessionRandom,
+    /// The compiled patterns of the run, carried to the VM that resumes it, so a
+    /// pattern used in a loop that calls the host compiles once. A pure performance
+    /// cache: never serialized, and a deserialized snapshot starts with none.
+    #[serde(skip)]
+    re_pattern_cache: RePatternCache,
 }
 
 impl VMSnapshot {
@@ -850,8 +855,9 @@ pub struct VM<'h> {
     /// charge before returning a suspending `CallResult`. Checked by [`Self::snapshot`].
     run_reentry_depth: u8,
 
-    /// Per-run cache of compiled patterns for module-level `re.*` calls. Not
-    /// snapshotted (a pure performance cache), so default-initialized on restore.
+    /// Per-run cache of compiled patterns for module-level `re.*` calls. A pure
+    /// performance cache: a snapshot carries it to the VM that resumes the run, and
+    /// never serializes it.
     pub(crate) re_pattern_cache: RePatternCache,
 
     /// Module generator and state for initializing unseeded generators.
@@ -969,7 +975,7 @@ impl<'h> VM<'h> {
             namespace_scratch: Vec::new(),
             // Always default value at a restore boundary — see the `run_reentry_depth` field doc.
             run_reentry_depth: recursion::MAX_RUN_REENTRY_DEPTH,
-            re_pattern_cache: RePatternCache::default(),
+            re_pattern_cache: snapshot.re_pattern_cache,
             random: snapshot.random,
             env: {
                 let mut env = program.vm_env();
@@ -1027,6 +1033,7 @@ impl<'h> VM<'h> {
             // string), so a later `take_changed_cwd` on this VM stays honest.
             cwd: mem::replace(&mut self.env.cwd, Cow::Borrowed(self.env.initial_cwd)).into_owned(),
             random: mem::take(&mut self.random),
+            re_pattern_cache: mem::take(&mut self.re_pattern_cache),
         }
     }
 
