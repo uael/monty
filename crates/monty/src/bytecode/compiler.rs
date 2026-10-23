@@ -301,10 +301,15 @@ struct ScopeFlags {
     /// `NAME_GLOBAL_ONLY`) because the running frame's globals are an explicit
     /// `exec()` / `eval()` dict.
     globals_by_name: bool,
-    /// Rejects `await` at snippet top level and in its class bodies.
-    /// Nested function bodies reset this restriction.
-    forbid_await: bool,
+    /// Why `await` cannot appear in the body being compiled, or `None` where it
+    /// can, with CPython's message: at the top level of a snippet and in any
+    /// class body, `await` is outside a function, and in a `def` or a `lambda`
+    /// it is outside an async function.
+    await_refusal: Option<&'static str>,
 }
+
+/// CPython's message for an `await` that is not inside a function.
+const AWAIT_OUTSIDE_FUNCTION: &str = "'await' outside function";
 
 /// Jump targets needed to compile `break` and `continue`.
 struct LoopInfo {
@@ -568,7 +573,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         let flags = ScopeFlags {
             assert_message_annotations: options.assert_message_annotations.enabled(),
             globals_by_name: snippet.unwrap_or(false),
-            forbid_await: snippet.is_some(),
+            await_refusal: snippet.is_some().then_some(AWAIT_OUTSIDE_FUNCTION),
         };
         let mut compiler = Compiler::new(interns, true, 0, flags);
 
@@ -599,7 +604,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // comp-var load/store opcodes use `num_locals + offset` to skip past
         // the locals region into the operand-stack region.
         let flags = ScopeFlags {
-            forbid_await: false,
+            await_refusal: (!func_def.is_async).then_some("'await' outside async function"),
             ..flags
         };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
@@ -1050,6 +1055,10 @@ impl<'a, 'i> Compiler<'a, 'i> {
         num_locals: u16,
         flags: ScopeFlags,
     ) -> Result<Code, CompileError> {
+        let flags = ScopeFlags {
+            await_refusal: Some(AWAIT_OUTSIDE_FUNCTION),
+            ..flags
+        };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
         compiler.compile_block(body)?;
 
@@ -1403,8 +1412,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
             }
 
             Expr::Await(value) => {
-                if self.flags.forbid_await {
-                    return Err(CompileError::new("'await' outside function", expr_loc.position));
+                if let Some(refusal) = self.flags.await_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
                 }
                 // Await expressions: compile the inner expression, then emit Await
                 // Await handles ExternalFuture, Coroutine, and GatherFuture
