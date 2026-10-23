@@ -423,6 +423,28 @@ impl Type {
         }
     }
 
+    /// Every name [`Self::from_builtin_name`] answers, for a caller that must
+    /// walk them rather than ask about one.
+    pub const BUILTIN_NAMES: &'static [&'static str] = &[
+        "bool",
+        "int",
+        "float",
+        "complex",
+        "str",
+        "bytes",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "range",
+        "slice",
+        "iter",
+        "type",
+        "property",
+        "object",
+    ];
+
     /// Resolves a bare Python name to a builtin type, if it is one.
     ///
     /// Only matches names that are true Python builtins — accessible without any import.

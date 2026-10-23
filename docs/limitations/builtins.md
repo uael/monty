@@ -12,6 +12,19 @@ Python.
 `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
 `eval`, `exec` and `locals` are described in [eval_exec.md](eval_exec.md).
 
+## The `builtins` module
+
+`import builtins` gives a module of every name a bare identifier resolves to:
+the functions and type constructors listed here, every builtin exception, and
+`None`, `True` and `False`.
+`builtins.len is len`, so looking a name up by text finds the same object
+writing it out does.
+
+It carries those names and no others, where CPython's module also holds
+`__name__`, `__doc__`, `__build_class__`, `__import__`, `Ellipsis`,
+`NotImplemented` and every builtin Monty does not implement.
+Reading a name it does not carry raises `AttributeError`.
+
 ## Implemented type constructors (also builtins)
 
 `bool`, `bytes`, `complex`, `dict`, `float`, `frozenset`, `int`, `list`, `range`,
