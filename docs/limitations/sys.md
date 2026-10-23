@@ -15,8 +15,8 @@ access raises `AttributeError`.
     directory component stripped (`['main.py']`), so `sys.argv[0]` is what
     `__file__` places under the working directory. Monty runs no command line,
     so there is never an argument after `argv[0]`; passing arguments from the
-    host is not supported yet. The list is mutable as in CPython, but `import`
-    builds a fresh module every time, so edits to it do not survive a second
+    host is not supported yet. The list is mutable as in CPython, and `import`
+    finds the module that `sys.modules` holds, so an edit survives a second
     `import sys` (see [modules.md](modules.md)).
 - `sys.platform` — the string `"monty"`, not `"linux"` / `"darwin"` /
     `"win32"`. Code that branches on the host OS will not work; the sandbox
@@ -65,9 +65,15 @@ access raises `AttributeError`.
     which routes output to that stream through the host print callback (see
     [print.md](print.md)).
 
+`sys.modules` is the session's table of imported modules, live: `import` reads
+it first and a write to it is what the next `import` of that name finds. It
+holds what this session imported and nothing else, where CPython's is seeded
+with every module the interpreter loaded at startup. See
+[modules.md](modules.md).
+
 ## Not implemented
 
-`path`, `modules`, `exit`, `exc_info`, `getrecursionlimit`,
+`path`, `exit`, `exc_info`, `getrecursionlimit`,
 `getsizeof`, `getrefcount`, `intern`, `displayhook`, `excepthook`,
 `settrace`, `setprofile`, `stdin`, `__stdout__`, `_getframe`, `audit`.
 
