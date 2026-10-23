@@ -1,4 +1,4 @@
-use std::{cell::Cell, fmt::Write, ops};
+use std::{borrow::Cow, cell::Cell, fmt::Write, ops};
 
 use monty_types::{ResourceError, ResourceTracker};
 pub use monty_types::{StringRepr, string_repr_fmt};
@@ -25,6 +25,7 @@ use crate::{
     string_builder::StringBuilder,
     types::{
         LazyHeapSet, Type,
+        instance::{call_member_bound, class_attr, class_member, class_name},
         long_int::repeat_count,
         py_trait::PyObjectIdentity,
         slice::{optional_sequence_bound, slice_collect_iterator},
@@ -39,15 +40,80 @@ use crate::{
 ///
 /// Carries an inline `cached_hash` field so a `Str` only computes its Python
 /// hash once.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub(crate) struct Str(Box<str>, #[serde(skip)] Cell<Option<HashValue>>);
+///
+/// An instance of a `class ...(str)` is one of these too, holding the class it
+/// was built from: it *is* a string, so every string operation reads it without
+/// knowing, and the class only adds methods and type identity. See
+/// `limitations/classes.md`.
+#[derive(Debug, Default)]
+pub(crate) struct Str {
+    value: Box<str>,
+    /// The `class ...(str)` this string is an instance of, as an OWNED
+    /// reference, or `None` for a plain `str`. Serialized, so a restored
+    /// instance is still one.
+    class: Option<HeapId>,
+    cached_hash: Cell<Option<HashValue>>,
+}
+
+/// What a dump holds of a `Str`: a plain string stays a bare string, as it was before an instance of a class could be
+/// one, and only an instance of a class that inherits `str` is a map with its class.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StrDump {
+    Plain(Box<str>),
+    Instance {
+        #[serde(rename = "V")]
+        value: Box<str>,
+        #[serde(rename = "C")]
+        class: HeapId,
+    },
+}
+
+#[derive(serde::Serialize)]
+struct InstanceDump<'a> {
+    #[serde(rename = "V")]
+    value: &'a str,
+    #[serde(rename = "C")]
+    class: HeapId,
+}
+
+impl serde::Serialize for Str {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.class {
+            None => serializer.serialize_str(&self.value),
+            Some(class) => InstanceDump {
+                value: &self.value,
+                class,
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Str {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match StrDump::deserialize(deserializer)? {
+            StrDump::Plain(value) => Self {
+                value,
+                class: None,
+                cached_hash: Cell::new(None),
+            },
+            StrDump::Instance { value, class } => Self {
+                value,
+                class: Some(class),
+                cached_hash: Cell::new(None),
+            },
+        })
+    }
+}
 
 impl PartialEq for Str {
-    /// Compares only the string content — the `cached_hash` field is a pure
-    /// optimisation and must not affect equality.
+    /// Compares only the string content — neither the `cached_hash` field,
+    /// which is a pure optimisation, nor the class, since an instance of a
+    /// class that inherits `str` equals the plain string of the same
+    /// characters, as in CPython.
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.value == other.value
     }
 }
 
@@ -57,13 +123,39 @@ impl Str {
     /// Private — use [`allocate_string`] or [`allocate_string_no_interning`] instead.
     #[must_use]
     fn new(s: impl Into<Box<str>>) -> Self {
-        Self(s.into(), Cell::new(None))
+        Self {
+            value: s.into(),
+            class: None,
+            cached_hash: Cell::new(None),
+        }
+    }
+
+    /// Creates a string that is an instance of `class_id`, a class that
+    /// inherits `str`.
+    ///
+    /// The caller MUST have already incremented the class's refcount: the
+    /// string takes ownership of that reference and releases it in
+    /// [`py_dec_ref_ids`](HeapItem::py_dec_ref_ids).
+    #[must_use]
+    fn with_class(s: impl Into<Box<str>>, class_id: HeapId) -> Self {
+        Self {
+            value: s.into(),
+            class: Some(class_id),
+            cached_hash: Cell::new(None),
+        }
+    }
+
+    /// The class this string is an instance of, for an instance of a class
+    /// that inherits `str`; `None` for a plain string.
+    #[must_use]
+    pub fn class(&self) -> Option<HeapId> {
+        self.class
     }
 
     /// Returns a reference to the inner string.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.value
     }
 
     /// Creates a string from the `str()` constructor call.
@@ -164,6 +256,8 @@ impl<'h> PyTrait<'h> for PyStr<'h> {
     fn py_str(&self, vm: &mut VM<'h>) -> RunResult<Value> {
         Ok(match self {
             Self::Interned(id) => Value::InternString(*id),
+            // An instance of a class that inherits `str` gives the plain string it is.
+            Self::Heap(value) if value.get(vm.heap).class().is_some() => return value.py_str(vm),
             Self::Heap(value) => value.clone_value(vm.heap),
         })
     }
@@ -288,6 +382,16 @@ pub fn allocate_string_no_interning(s: impl Into<Box<str>>, heap: &Heap) -> Valu
     Value::Ref(heap_id)
 }
 
+/// Allocates a string that is an instance of `class_id`, a class that inherits
+/// `str`.
+///
+/// Never interned, however short: an instance carries its class, which the
+/// shared `''` and one-character values cannot. The caller MUST have already
+/// incremented the class's refcount, which the string takes ownership of.
+pub(crate) fn allocate_class_string(s: impl Into<Box<str>>, class_id: HeapId, heap: &Heap) -> Value {
+    Value::Ref(heap.allocate(HeapData::Str(Str::with_class(s, class_id))))
+}
+
 /// Converts a native integer count and preflights the repeated string allocation.
 fn repeat_str(value: &str, count: &Value, vm: &VM<'_>) -> RunResult<Option<Value>> {
     let Some(count) = repeat_count(count, vm)? else {
@@ -350,7 +454,7 @@ impl ops::Deref for Str {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.value
     }
 }
 
@@ -369,6 +473,15 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Str> {
         Type::Str
     }
 
+    /// The class name for an instance of a `class ...(str)` (`'Act'`), which is
+    /// what CPython names in a message about the object; `'str'` otherwise.
+    fn py_type_name(&self, vm: &VM<'h>) -> Cow<'h, str> {
+        match self.get(vm.heap).class() {
+            Some(class_id) => class_name(class_id, vm.heap, vm.interns),
+            None => Type::Str.name(vm.heap, vm.interns),
+        }
+    }
+
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         Ok(CallResult::Value(StringIterator::from_heap(
             self.id(),
@@ -379,11 +492,11 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Str> {
 
     fn py_len(&self, vm: &VM<'h>) -> Option<usize> {
         // Count Unicode characters, not bytes, to match Python semantics
-        Some(self.get(vm.heap).0.chars().count())
+        Some(self.get(vm.heap).value.chars().count())
     }
 
     fn py_getitem(&self, key: &Value, vm: &mut VM<'h>) -> RunResult<Value> {
-        let s = heap_read_ref_as_field!(self, Str, 0);
+        let s = heap_read_ref_as_field!(self, Str, value);
         str_getitem(&s.as_box_value(), key, vm)
     }
 
@@ -394,27 +507,29 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Str> {
 
     fn py_hash(&self, vm: &mut VM<'h>) -> RunResult<Option<HashValue>> {
         let s = self.get(vm.heap);
-        if let Some(cached) = s.1.get() {
+        if let Some(cached) = s.cached_hash.get() {
             return Ok(Some(cached));
         }
         // Delegates to the canonical helper used by both heap and intern paths;
         // an interned `"foo"` and a heap `"foo"` must hash identically for dict
         // lookup to work.
         let hash = hash_python_str(s.as_str());
-        s.1.set(Some(hash));
+        s.cached_hash.set(Some(hash));
         Ok(Some(hash))
     }
 
     fn py_bool(&self, vm: &mut VM<'h>) -> RunResult<bool> {
-        Ok(!self.get(vm.heap).0.is_empty())
+        Ok(!self.get(vm.heap).value.is_empty())
     }
 
     fn py_cmp(&self, other: &Self, vm: &mut VM<'h>) -> RunResult<CmpOrder> {
-        Ok(CmpOrder::Ordered(self.get(vm.heap).0.cmp(&other.get(vm.heap).0)))
+        Ok(CmpOrder::Ordered(
+            self.get(vm.heap).value.cmp(&other.get(vm.heap).value),
+        ))
     }
 
     fn py_repr_fmt(&self, f: &mut impl Write, vm: &mut VM<'h>, _heap_ids: &mut LazyHeapSet) -> RunResult<()> {
-        Ok(string_repr_fmt(&self.get(vm.heap).0, f)?)
+        Ok(string_repr_fmt(&self.get(vm.heap).value, f)?)
     }
 
     fn py_str(&self, vm: &mut VM<'h>) -> RunResult<Value> {
@@ -439,13 +554,33 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Str> {
         percent_format(&template, other, vm).map(Some)
     }
 
+    /// A member of the class carried by an instance of a `class ...(str)` is
+    /// looked up first, as CPython looks up the type before `str`'s own
+    /// methods; a plain string goes straight to the string methods.
+    fn py_getattr(&self, attr: &EitherStr, vm: &mut VM<'h>) -> RunResult<Option<CallResult>> {
+        let Some(class_id) = self.get(vm.heap).class() else {
+            return Ok(None);
+        };
+        let attr_str = attr.as_str(vm.interns);
+        Ok(class_attr(class_id, self.id(), attr_str, vm).map(CallResult::Value))
+    }
+
     fn py_call_attr(&mut self, vm: &mut VM<'h>, attr: &EitherStr, args: ArgValues) -> RunResult<CallResult> {
+        if let Some(class_id) = self.get(vm.heap).class() {
+            let attr_str = attr.as_str(vm.interns);
+            if let Some(member) = class_member(class_id, attr_str, vm) {
+                defer_drop!(member, vm);
+                return call_member_bound(member, self.id(), args, vm);
+            }
+        }
+
         let Some(method) = attr.static_string(vm.interns) else {
             args.drop_with(vm);
-            return Err(ExcType::attribute_error(Type::Str, attr.as_str(vm.interns)));
+            let owner = self.py_type_name(vm);
+            return Err(ExcType::attribute_error(owner, attr.as_str(vm.interns)));
         };
 
-        let s = heap_read_ref_as_field!(self, Str, 0);
+        let s = heap_read_ref_as_field!(self, Str, value);
         let s = s.as_box_value();
         call_str_method_impl(&s, method, args, vm).map(CallResult::Value)
     }
@@ -474,8 +609,10 @@ fn str_getitem<'h>(s: &impl HeapView<'h, str>, key: &Value, vm: &mut VM<'h>) -> 
 }
 
 impl HeapItem for Str {
-    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {
-        // No-op: strings don't hold Value references
+    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        // A plain string holds no references; an instance of a class that
+        // inherits `str` owns one on that class.
+        stack.extend(self.class.take());
     }
 }
 

@@ -2072,6 +2072,13 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
         HeapData::GenericAlias(alias) => alias.for_each_child_id(on_child),
         HeapData::Union(union) => union.for_each_child_id(on_child),
         HeapData::LruCache(cache) => cache.for_each_child_id(on_child),
+        // Mirrors `Str::py_dec_ref_ids`: an instance of a class that inherits
+        // `str` owns that class, and a plain string owns nothing.
+        HeapData::Str(value) => {
+            if let Some(class_id) = value.class() {
+                on_child(class_id);
+            }
+        }
         HeapData::Module(m) => {
             // Module attrs can contain references to heap values
             if !m.has_refs() {

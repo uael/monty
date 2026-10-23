@@ -266,10 +266,13 @@ impl HeapData {
             | Self::Union(_)
             | Self::LruCache(_)
             | Self::Csv(_) => true,
+            // An instance of a class that inherits `str` holds that class, which
+            // can reach the instance again through a method default or a class
+            // variable; a plain string holds nothing and stays a leaf.
+            Self::Str(value) => value.class().is_some(),
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
-            Self::Str(_)
-            | Self::Bytes(_)
+            Self::Bytes(_)
             | Self::Range(_)
             | Self::Slice(_)
             | Self::Exception(_)
