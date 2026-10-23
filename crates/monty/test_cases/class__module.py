@@ -1,4 +1,6 @@
-# cpython-main-module
+# /// monty
+# cpython-main-module = true
+# ///
 # `__module__` is the name of the module a class is written in, which the
 # harness must seed for CPython because it runs a case with no `__name__`.
 class Plain:

@@ -81,14 +81,16 @@ Size the limit with headroom, and use an OS or cgroup limit to bound the process
 Operations whose result size is predictable from their inputs are **pre-checked before allocating**, above a 100 KB
 threshold, including integer multiplication, division and `divmod`, left shift, integer power, sequence repeat
 (`'x' * n`), `str.replace` / `bytes.replace`, `re.sub`, the padding methods, deque rotation and slicing, materialising
-an iterator into a container, and f-string, `str.format()` or `%` formatting with a dynamic width or precision.
+an iterator into a container, f-string, `str.format()` or `%` formatting with a dynamic width or precision, and the
+`binascii` and `base64` conversions that can outgrow their input.
 So `'x' * 10**12` fails immediately rather than after consuming the machine's memory.
 
 Containers a program grows one element at a time are pre-checked as well, at the point the buffer would reallocate
 rather than on every push: `list.append` and `list.insert`, `deque.append` and `deque.appendleft`, `set.add`, and
 assigning a new dict key.
 So are the value buffers a single call fills: the argument pack behind `f(*args)`, the array `json.loads` parses, the
-pieces `re.split` collects, and the list `re.findall` builds for a pattern with at most one capture group.
+text `json.dumps` and `json.dump` build, the pieces `re.split` collects, and the list `re.findall` builds for a pattern
+with at most one capture group.
 A wider `findall`, and `re.finditer`, allocate an object per match and are not covered — see
 [the limitations note](limitations/resource_limits.md).
 
@@ -110,6 +112,8 @@ Both duration limits count **execution time**, not wall clock:
     `max_suspensions` bounds a sleeping loop as well. Under `'call_host'` the host waits uncharged, and a `'zero'`
     sleep does not suspend at all. See [security](security.md#waiting).
 - There is no way for sandboxed code to observe a budget or the time remaining.
+    `os_policy={'process_time': 'elapsed'}` exposes this same execution clock as `time.process_time()`; the
+    default `'zero'` keeps it hidden.
 
 They read the same clock and differ only in when it restarts:
 
@@ -173,6 +177,7 @@ Neither deadline covers [host mount I/O](filesystem.md#io-timeouts-and-cancellat
 ## Recursion
 
 Python-level call depth defaults to **1000 frames**; the 1001st nested call raises `RecursionError`.
+Internal Python frames implementing builtins do not count toward this limit; user callbacks still do.
 Unlike the memory and time limits, `RecursionError` is catchable inside the sandbox, matching CPython.
 Sandboxed code cannot raise the ceiling — `sys.setrecursionlimit` is not available in production builds.
 
@@ -207,6 +212,8 @@ caps the dump's, so a worker cannot report a looser one.
     budget; memory retained by compiled code does count toward `max_memory` in workers.
     Compilation has its own structural caps (AST nesting at 200 levels, bytecode operand sizes, comprehension nesting, and
     a 1,024-copy cap on `finally` expansion that raises `SyntaxError`).
+    The nesting cap is also checked before parsing for sources over 4 KiB, because the parser grows its native stack
+    outside the allocator's accounting; see [source nesting depth](limitations/language.md#source-nesting-depth).
     A host accepting untrusted source should still isolate compilation, as the subprocess and WebAssembly runtimes do.
     Source compiled at runtime by `eval()` / `exec()` is charged against the duration budget.
     Once a snippet starts executing, its compilation products stay allocated for the rest of the session;
@@ -216,9 +223,11 @@ caps the dump's, so a worker cannot report a looser one.
     It applies per frame, not to total host memory or subsequent host conversions.
 - **Print collectors.** [`CollectString`][pydantic_monty.CollectString] and [`CollectStreams`][pydantic_monty.CollectStreams] live in the host process, so their 10 MiB default cap is
     separate from `max_memory`.
-- **Mount memory.** Each [mount](filesystem.md) has its own `memory_usage_limit`, defaulting to 100 MB, shared between
+- **Mount memory.** Each [mount](filesystem.md) has its own `memory_usage_limit`, defaulting to [`DEFAULT_MEMORY_USAGE_LIMIT`](api/rust/monty-fs.md#default_memory_usage_limit), shared between
     retained overlay data and transient results.
 - **`json.loads` nesting**, capped at 200 levels independently of the recursion limit.
+- **`tomllib` nesting**, capped at 100 levels of inline arrays and tables, and at 1,000 parts per dotted key,
+    both independently of `max_recursion_depth` (see [tomllib.md](limitations/tomllib.md)).
 - **Host entropy.** Python's `AbstractOS.urandom()` raises `MemoryError` before allocating when a request exceeds
     `max_urandom_bytes`, 1 MiB by default (`OSAccess(max_urandom_bytes=...)`).
     A custom entropy callback allocates in the host process, so it must apply its own cap.

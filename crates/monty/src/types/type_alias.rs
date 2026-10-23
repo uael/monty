@@ -116,7 +116,7 @@ impl<'h> HeapObjectRead<'h, TypeAliasType> {
         }
 
         let thunk = self.get(vm.heap).thunk.clone_with_heap(vm.heap);
-        let evaluated = vm.evaluate_function("type alias value", &thunk, ArgValues::Empty);
+        let evaluated = vm.evaluate_function(&thunk, ArgValues::Empty);
         thunk.drop_with(vm);
         let evaluated = evaluated?;
 

@@ -89,12 +89,31 @@ it.
 
 A name present in both is served by the eager `inputs` binding.
 
+`external_modules` on `checkout()` maps import names to [`ExternalModule`][pydantic_monty.ExternalModule] values
+containing the module's public items and an optional type stub, for every feed of the session:
+
+```python
+from pydantic_monty import ExternalModule, Monty
+
+modules = {'tools': ExternalModule({'add': lambda a, b: a + b})}
+code = 'import tools\ntools.add(1, 2)'
+
+with Monty() as pool:
+    with pool.checkout(external_modules=modules) as session:
+        print(session.feed_run(code))
+        #> 3
+```
+
+See [importing host modules](../host-functions.md#importing-host-modules).
+
 ### Which values cross the boundary
 
-`None`, `bool`, `int` (arbitrary precision), `float`, `str`, `bytes`, `list`, `tuple`, `dict`, `set`, `frozenset`,
+`None`, `bool`, `int` (arbitrary precision), `float`, `complex`, `str`, `bytes`, `list`, `tuple`, `dict`, `set`, `frozenset`,
 `Ellipsis`, `NotImplemented`, `datetime.date`, `datetime.datetime`, `datetime.timedelta`, `datetime.timezone`, named
-tuples, exception instances, and the type objects Monty models (`int`, `str`, `datetime.date`, ...) all convert in both
-directions.
+tuples, exception instances, and the type objects of the data types Monty models (`int`, `str`, `datetime.date`, ...)
+all convert in both directions.
+Builtin functions and other type objects come out as a read-only [`MontyStdTypeProxy`][pydantic_monty.MontyStdTypeProxy]
+carrying the name; see [host-value limitations](../limitations/host-values.md#lossy-outputs).
 Class instances differ in each direction: a host instance enters only wrapped in [`ClassInstance`][pydantic_monty.ClassInstance], and a sandbox-defined
 instance comes out as a read-only [`MontyClassProxy`][pydantic_monty.MontyClassProxy].
 See [host objects](../host-objects.md).
@@ -172,7 +191,7 @@ with Monty() as pool:
 ```
 
 Sessions default to the worker's clock and entropy, with sleeps capped at ten seconds per call.
-For reproducible runs, `checkout(auto_os_calls=...)` can fix the clock, timezone and random seed, and skip sleeps:
+For reproducible runs, `checkout(os_policy=...)` can fix the clock, timezone and random seed, and skip sleeps:
 
 ```python
 from datetime import datetime
@@ -188,7 +207,7 @@ f'{datetime.now():%Y-%m-%d %H:%M} {random.random():.4f}'
 
 with Monty() as pool:
     with pool.checkout(
-        auto_os_calls={
+        os_policy={
             'datetime': datetime(2026, 1, 1, 9, 30),
             'sleep': 'zero',
             'random_start': {'seed': 42},

@@ -319,7 +319,7 @@ fn a_session_with_a_call_of_the_host_running_dumps_and_loads() {
     let echo = value(&mut repl, "echo");
     let call = outer(repl);
     let progress = call.call_first(echo.clone(), args([3]), PrintWriter::Disabled).unwrap();
-    let bytes = dump("call_first.py", None, SessionRef::Suspended(&progress)).unwrap();
+    let bytes = dump("call_first.py", None, &[], SessionRef::Suspended(&progress)).unwrap();
     drop(progress);
     let Session::Suspended(progress) = Dump::load(&bytes).unwrap().state else {
         panic!("dumped a suspended session, loaded something else");

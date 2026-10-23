@@ -31,9 +31,26 @@ use web_time::Instant;
 pub const OOM_EXIT_CODE: i32 = 65;
 /// Allocator-backed live bytes requested through the global allocator
 pub static LIVE_MEMORY: AtomicUsize = AtomicUsize::new(0);
-/// The leanest the process has ever been at an arming point: what the worker
-/// costs to exist, before any session ran.
+/// What the worker costs to exist: the leanest the process has ever been at an
+/// arming point, plus structures it keeps for life (see [`allocate_into_baseline`]).
 pub static BASELINE_MEMORY: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Runs `build` and adds what it leaves allocated to [`BASELINE_MEMORY`], so a
+/// structure the worker keeps for life (the type checker) is not charged to the
+/// session that happened to build it first.
+///
+/// Only accurate while no other thread changes [`LIVE_MEMORY`]. An unset baseline is
+/// left alone: the first arming counts the structure anyway.
+pub fn allocate_into_baseline<T>(build: impl FnOnce() -> T) -> T {
+    let before = LIVE_MEMORY.load(Ordering::Relaxed);
+    let value = build();
+    let cost = LIVE_MEMORY.load(Ordering::Relaxed).saturating_sub(before);
+    // `Err` just means the baseline is still unset
+    let _ = BASELINE_MEMORY.try_update(Ordering::Relaxed, Ordering::Relaxed, |baseline| {
+        (baseline != usize::MAX).then(|| baseline.saturating_add(cost))
+    });
+    value
+}
 
 /// Headroom for exception machinery and work between interpreter checkpoints.
 const MEMORY_LIMIT_HEADROOM: usize = 4 * 1024 * 1024;
@@ -151,27 +168,18 @@ pub struct ResourceLimits {
     /// Maximum execution time for a single feed (`feed_start`, `feed_run` or
     /// `call_function`), summed over the turns it takes and excluding time
     /// suspended on the host. Bounds one snippet, not the session.
-    ///
-    /// Defaulted on deserialization so limits written by a build without this
-    /// field still load from a self-describing format; a postcard dump of an
-    /// older layout is rejected by `DUMP_VERSION` instead.
-    #[serde(default)]
     pub max_feed_duration: Option<Duration>,
     /// Maximum execution time for a single host turn, reset at each feed and
     /// each resume. Bounds the stretch of sandbox code between two host round
     /// trips, so a host can bound its own response time per call. Its first
     /// excess in a turn raises a `TimeoutError` that the code may catch, and
     /// its second ends the run; see [`ResourceError::TurnTimeout`].
-    ///
-    /// Defaulted on deserialization like
-    /// [`max_feed_duration`](Self::max_feed_duration).
-    #[serde(default)]
     pub max_turn_duration: Option<Duration>,
     /// Maximum allocator-backed memory in bytes.
     ///
     /// Requires the executable to install and arm `monty-alloc`.
     pub max_memory: Option<usize>,
-    /// Run garbage collection every N GC-tracked allocations.
+    /// Run garbage collection every N GC-tracked allocations; `None` uses [`DEFAULT_GC_INTERVAL`].
     pub gc_interval: Option<usize>,
     /// Maximum recursion depth (function call stack depth).
     pub max_recursion_depth: usize,
@@ -181,13 +189,16 @@ pub struct ResourceLimits {
     pub max_suspensions: usize,
     /// Maximum cumulative sleep under `SleepMode::System`, enforced by the host.
     /// Sleeps do not count toward execution duration; without this limit, sleeping
-    /// loops need `max_suspensions` or a host deadline. Defaults on deserialization.
-    #[serde(default)]
+    /// loops need `max_suspensions` or a host deadline.
     pub max_total_sleep: Option<Duration>,
 }
 
 /// Recommended maximum recursion depth if not otherwise specified.
 pub const DEFAULT_MAX_RECURSION_DEPTH: usize = 1000;
+
+/// GC-tracked allocations between cycle collections when `gc_interval` is `None`.
+/// Builds with monty's `memory-model-checks` feature collect on every allocation instead.
+pub const DEFAULT_GC_INTERVAL: usize = 100_000;
 
 /// Maximum suspensions a host services per session if not otherwise
 /// specified: a backstop against a sandbox looping on host calls while the
@@ -284,15 +295,11 @@ pub struct ResourceTracker {
     /// Execution time accumulated by completed `on_execution_start`/`stop`
     /// windows. Bounds nothing — it is what [`elapsed`](Self::elapsed) reports
     /// to hosts for telemetry — but is serialized so a loaded session keeps
-    /// counting from where it left off. The serde default is for
-    /// self-describing formats; a postcard dump of an older layout is rejected
-    /// by `DUMP_VERSION` instead.
-    #[serde(default)]
+    /// counting from where it left off.
     total_execution_time: Cell<Duration>,
     /// Execution time accumulated since the last [`on_feed_start`](Self::on_feed_start).
     /// Serialized like `total_execution_time`: a dump taken mid-feed resumes
     /// that feed, so its budget must survive the round trip.
-    #[serde(default)]
     feed_execution_time: Cell<Duration>,
     /// Execution time accumulated since the last [`on_turn_start`](Self::on_turn_start).
     /// Not serialized — a dump is taken between turns, and the resume that
@@ -317,12 +324,7 @@ pub struct ResourceTracker {
     /// [`lower_recursion_limit`](Self::lower_recursion_limit)
     /// under the `test-hooks` feature — `sys.setrecursionlimit` uses it to
     /// tighten the bound from Python code without escaping the
-    /// host-configured ceiling.
-    ///
-    /// Modeled as an override rather than the live limit so adding this
-    /// field doesn't break deserialization of snapshots produced before it
-    /// existed (`#[serde(default)]` gives back the `None` fallback case).
-    #[serde(default)]
+    /// host-configured ceiling. `None` means the configured limit applies.
     recursion_limit_override: Cell<Option<usize>>,
 }
 
@@ -333,6 +335,22 @@ impl Default for ResourceTracker {
 }
 
 impl ResourceTracker {
+    /// Tightens restored limits to the destination policy without resetting execution clocks.
+    /// A snapshot can retain stricter limits but cannot increase the destination's allowance.
+    pub fn tighten_limits(&mut self, ceiling: &ResourceLimits) {
+        self.limits.max_memory = tighter_limit(self.limits.max_memory, ceiling.max_memory);
+        self.limits.max_feed_duration = tighter_limit(self.limits.max_feed_duration, ceiling.max_feed_duration);
+        self.limits.max_turn_duration = tighter_limit(self.limits.max_turn_duration, ceiling.max_turn_duration);
+        self.limits.max_total_sleep = tighter_limit(self.limits.max_total_sleep, ceiling.max_total_sleep);
+        self.limits.gc_interval = tighter_gc_interval(self.limits.gc_interval, ceiling.gc_interval);
+        self.limits.max_recursion_depth = self.limits.max_recursion_depth.min(ceiling.max_recursion_depth);
+        self.limits.max_suspensions = self.limits.max_suspensions.min(ceiling.max_suspensions);
+        if let Some(limit) = self.recursion_limit_override.get() {
+            self.recursion_limit_override
+                .set(Some(limit.min(self.limits.max_recursion_depth)));
+        }
+    }
+
     /// Creates a new ResourceTracker with the given limits.
     ///
     /// The execution-time clock starts at zero and only runs while the VM
@@ -766,6 +784,22 @@ impl ResourceTracker {
         self.recursion_limit_override.set(Some(new_limit));
         Ok(())
     }
+}
+
+/// Combines optional ceilings, where an absent limit permits any value.
+fn tighter_limit<T: Ord>(existing: Option<T>, ceiling: Option<T>) -> Option<T> {
+    match (existing, ceiling) {
+        (Some(existing), Some(ceiling)) => Some(existing.min(ceiling)),
+        (existing, ceiling) => existing.or(ceiling),
+    }
+}
+
+/// [`tighter_limit`] for `gc_interval`, where `None` is [`DEFAULT_GC_INTERVAL`], not unlimited.
+fn tighter_gc_interval(existing: Option<usize>, ceiling: Option<usize>) -> Option<usize> {
+    let effective = existing
+        .unwrap_or(DEFAULT_GC_INTERVAL)
+        .min(ceiling.unwrap_or(DEFAULT_GC_INTERVAL));
+    existing.or(ceiling).map(|_| effective)
 }
 
 /// Reports `elapsed` against one optional budget, naming `scope` in the error.

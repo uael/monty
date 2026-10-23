@@ -18,7 +18,7 @@ import pytest
 from conftest import CALL_HOST, RunMonty
 from inline_snapshot import snapshot
 
-from pydantic_monty import NOT_HANDLED, Monty, MontyFileHandle, MontyRuntimeError, StatResult
+from pydantic_monty import NOT_HANDLED, Monty, MontyFileHandle, MontyRuntimeError, OSAccess, StatResult, TimeCaller
 
 # =============================================================================
 # Basic os= callback dispatch
@@ -453,15 +453,49 @@ def test_datetime_now_callback_with_timezone(monty_run: RunMonty):
 
 
 def test_time_time_callback(monty_run: RunMonty):
-    """time.time() reaches the callback with no arguments and returns a float."""
+    """time.time() reaches the callback naming itself as the caller, and returns a float."""
 
     def os_handler(*, name: str, args: tuple[Any, ...], **_: Any) -> float | None:
         if name == 'time.time':
-            assert args == ()
+            assert args == ('time.time',)
             return 1700000000.5
         return None
 
     assert monty_run('import time; time.time()', os=os_handler, checkout=CALL_HOST) == snapshot(1700000000.5)
+
+
+def test_time_clocks_share_one_call_naming_their_caller(monty_run: RunMonty):
+    """Every clock reaches `time.time`; the caller argument lets a handler answer each one differently."""
+    answers = {'time.time': 1000.0, 'time.monotonic': 5.0, 'time.perf_counter': 0.25, 'time.gmtime': 0.0}
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def os_handler(*, name: str, args: tuple[Any, ...], **_: Any) -> Any:
+        calls.append((name, args))
+        if name == 'time.time':
+            return answers[args[0]]
+        return NOT_HANDLED
+
+    code = 'import time; (time.time(), time.monotonic(), time.perf_counter(), time.gmtime().tm_year)'
+    assert monty_run(code, os=os_handler, checkout=CALL_HOST) == snapshot((1000.0, 5.0, 0.25, 1970))
+    assert calls == snapshot(
+        [
+            ('time.time', ('time.time',)),
+            ('time.time', ('time.monotonic',)),
+            ('time.time', ('time.perf_counter',)),
+            ('time.time', ('time.gmtime',)),
+        ]
+    )
+
+
+def test_abstract_os_time_receives_the_caller(monty_run: RunMonty):
+    """`AbstractOS.time()` gets the caller, so a subclass can give each clock its own reading."""
+
+    class Clocks(OSAccess):
+        def time(self, caller: TimeCaller = 'time.time') -> float:
+            return {'time.time': 1000.0, 'time.monotonic': 5.0}.get(caller, -1.0)
+
+    code = 'import time; (time.time(), time.monotonic(), time.perf_counter())'
+    assert monty_run(code, os=Clocks(), checkout=CALL_HOST) == snapshot((1000.0, 5.0, -1.0))
 
 
 # =============================================================================
@@ -523,7 +557,7 @@ def test_async_os_callback_requires_async_monty(pool: Monty):
     async def os_handler(**_: Any) -> Any:
         return None
 
-    with pool.checkout(auto_os_calls={'sleep': 'call_host'}) as session:
+    with pool.checkout(os_policy={'sleep': 'call_host'}) as session:
         with pytest.raises(RuntimeError) as exc_info:
             session.feed_run('import time; time.sleep(0)', os=os_handler)
         assert str(exc_info.value) == snapshot('async os callbacks require AsyncMonty')
@@ -551,7 +585,7 @@ def test_os_urandom_callback(monty_run: RunMonty):
 
 
 SEED_BYTES = bytes(i % 256 for i in range(2496))
-CALL_HOST_RANDOM: dict[str, Any] = {'auto_os_calls': {'random_start': 'call_host'}}
+CALL_HOST_RANDOM: dict[str, Any] = {'os_policy': {'random_start': 'call_host'}}
 
 
 def test_random_unseeded_draws_never_call_the_host(monty_run: RunMonty):
@@ -820,13 +854,14 @@ Path('/tmp/mydir/file.txt').read_text()
     )
 
 
-# Auto OS calls
+# OS policy
 
 
 def test_datetime_default_reads_worker_clock(monty_run: RunMonty):
-    before = datetime.datetime.now()
+    """The default clock is the worker's, read in UTC rather than the host's zone."""
+    before = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     result = monty_run('from datetime import datetime\ndatetime.now()')
-    after = datetime.datetime.now()
+    after = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     assert before - datetime.timedelta(seconds=60) <= result <= after + datetime.timedelta(seconds=60)
 
 
@@ -836,7 +871,7 @@ def test_datetime_fixed_naive_is_utc(monty_run: RunMonty):
         'import time\nfrom datetime import date, datetime, timezone\n'
         '(datetime.now(), date.today(), time.time(), datetime.now(timezone.utc), datetime.now() == datetime.now())'
     )
-    result = monty_run(code, checkout={'auto_os_calls': {'datetime': frozen}})
+    result = monty_run(code, checkout={'os_policy': {'datetime': frozen}})
     assert result == snapshot(
         (
             datetime.datetime(2024, 1, 15, 10, 30, 5, 123456),
@@ -851,7 +886,7 @@ def test_datetime_fixed_naive_is_utc(monty_run: RunMonty):
 def test_datetime_fixed_aware_uses_its_offset(monty_run: RunMonty):
     frozen = datetime.datetime(2024, 1, 15, 10, 30, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
     code = 'import time\nfrom datetime import datetime, timezone\n(datetime.now(), datetime.now(timezone.utc), time.time())'
-    result = monty_run(code, checkout={'auto_os_calls': {'datetime': frozen}})
+    result = monty_run(code, checkout={'os_policy': {'datetime': frozen}})
     assert result == snapshot(
         (
             datetime.datetime(2024, 1, 15, 10, 30, 5),
@@ -865,7 +900,7 @@ def test_datetime_fixed_zoneinfo(monty_run: RunMonty):
     """Resolve date-dependent UTC offsets at the frozen instant."""
     frozen = datetime.datetime(2024, 7, 1, 12, 0, tzinfo=ZoneInfo('Europe/Paris'))
     code = 'from datetime import datetime, timezone\n(datetime.now(), datetime.now(timezone.utc))'
-    result = monty_run(code, checkout={'auto_os_calls': {'datetime': frozen}})
+    result = monty_run(code, checkout={'os_policy': {'datetime': frozen}})
     assert result == snapshot(
         (
             datetime.datetime(2024, 7, 1, 12, 0),
@@ -888,25 +923,24 @@ def test_datetime_fixed_zoneinfo(monty_run: RunMonty):
 )
 def test_datetime_invalid(pool: Monty, value: Any, error: type[Exception], message: str):
     with pytest.raises(error) as exc_info:
-        pool.checkout(auto_os_calls={'datetime': value})
+        pool.checkout(os_policy={'datetime': value})
     assert str(exc_info.value) == message
 
 
 def test_sleep_zero_returns_at_once(monty_run: RunMonty):
     start = time.monotonic()
     code = "import asyncio, time\ntime.sleep(3600)\nasyncio.run(asyncio.sleep(3600, 'woken'))"
-    assert monty_run(code, checkout={'auto_os_calls': {'sleep': 'zero'}}) == snapshot('woken')
+    assert monty_run(code, checkout={'os_policy': {'sleep': 'zero'}}) == snapshot('woken')
     assert time.monotonic() - start < 5
 
 
 def test_sleep_system_max(monty_run: RunMonty):
     start = time.monotonic()
     code = "import asyncio, time\nt = time.time()\ntime.sleep(3600)\nasyncio.run(asyncio.sleep(3600, 'woken'))\ntime.time() >= t"
-    assert monty_run(code, checkout={'auto_os_calls': {'sleep_system_max': 0.001}}) == snapshot(True)
+    assert monty_run(code, checkout={'os_policy': {'sleep_system_max': 0.001}}) == snapshot(True)
     assert time.monotonic() - start < 5
     assert (
-        monty_run('import time\ntime.sleep(0.001)', checkout={'auto_os_calls': {'sleep_system_max': float('inf')}})
-        is None
+        monty_run('import time\ntime.sleep(0.001)', checkout={'os_policy': {'sleep_system_max': float('inf')}}) is None
     )
 
 
@@ -943,14 +977,14 @@ def test_sandbox_sleeps_overlap(monty_run: RunMonty):
 )
 def test_sleep_system_max_invalid(pool: Monty, value: Any, error: type[Exception], message: str):
     with pytest.raises(error) as exc_info:
-        pool.checkout(auto_os_calls={'sleep_system_max': value})
+        pool.checkout(os_policy={'sleep_system_max': value})
     assert str(exc_info.value) == message
 
 
 @pytest.mark.parametrize('sleep', ['call_host', 'zero'])
 def test_sleep_system_max_contradicts_other_modes(pool: Monty, sleep: Any):
     with pytest.raises(ValueError) as exc_info:
-        pool.checkout(auto_os_calls={'sleep': sleep, 'sleep_system_max': 1})
+        pool.checkout(os_policy={'sleep': sleep, 'sleep_system_max': 1})
     assert str(exc_info.value) == f"sleep_system_max only applies to sleep='system', not '{sleep}'"
 
 
@@ -974,8 +1008,7 @@ def test_sleep_call_host_reaches_os(monty_run: RunMonty):
         return None
 
     assert (
-        monty_run('import time\ntime.sleep(1.5)', os=os_handler, checkout={'auto_os_calls': {'sleep': 'call_host'}})
-        is None
+        monty_run('import time\ntime.sleep(1.5)', os=os_handler, checkout={'os_policy': {'sleep': 'call_host'}}) is None
     )
     assert calls == snapshot([('time.sleep', (1.5,))])
 
@@ -989,7 +1022,46 @@ def test_sleep_call_host_reaches_os(monty_run: RunMonty):
 )
 def test_sleep_invalid(pool: Monty, value: Any, error: type[Exception], message: str):
     with pytest.raises(error) as exc_info:
-        pool.checkout(auto_os_calls={'sleep': value})
+        pool.checkout(os_policy={'sleep': value})
+    assert str(exc_info.value) == message
+
+
+def test_process_time_defaults_to_zero(monty_run: RunMonty):
+    code = 'import time; (time.process_time(), time.thread_time(), time.process_time_ns(), time.thread_time_ns())'
+    assert monty_run(code) == snapshot((0.0, 0.0, 0, 0))
+    assert monty_run(code, checkout={'os_policy': {'process_time': 'zero'}}) == snapshot((0.0, 0.0, 0, 0))
+
+
+def test_process_time_elapsed_reports_execution_time(monty_run: RunMonty):
+    """`'elapsed'` is the session's execution clock: it advances while the sandbox runs and never reaches `os=`."""
+    code = """
+import time
+start = time.process_time()
+for _ in range(200_000):
+    pass
+(time.process_time() > start, time.process_time_ns() > 0, time.thread_time() > 0.0)
+"""
+    calls: list[str] = []
+
+    def os_handler(*, name: str, **_: Any) -> Any:
+        calls.append(name)
+        return NOT_HANDLED
+
+    checkout = {'os_policy': {'process_time': 'elapsed', 'datetime': 'call_host'}}
+    assert monty_run(code, os=os_handler, checkout=checkout) == snapshot((True, True, True))
+    assert calls == snapshot([])
+
+
+@pytest.mark.parametrize(
+    ('value', 'error', 'message'),
+    [
+        ('cpu', ValueError, "process_time must be 'zero' or 'elapsed', got 'cpu'"),
+        (0, TypeError, 'process_time must be a str'),
+    ],
+)
+def test_process_time_invalid(pool: Monty, value: Any, error: type[Exception], message: str):
+    with pytest.raises(error) as exc_info:
+        pool.checkout(os_policy={'process_time': value})
     assert str(exc_info.value) == message
 
 
@@ -997,14 +1069,14 @@ def test_sleep_invalid(pool: Monty, value: Any, error: type[Exception], message:
 def test_random_start_seed_matches_random_seed(monty_run: RunMonty, seed: Any):
     expected = random.Random(seed)
     code = 'import random\n[random.random(), random.randint(1, 100)]'
-    assert monty_run(code, checkout={'auto_os_calls': {'random_start': {'seed': seed}}}) == [
+    assert monty_run(code, checkout={'os_policy': {'random_start': {'seed': seed}}}) == [
         expected.random(),
         expected.randint(1, 100),
     ]
 
 
 def test_random_start_seed_persists_and_is_overridable(pool: Monty):
-    with pool.checkout(auto_os_calls={'random_start': {'seed': 42}}) as session:
+    with pool.checkout(os_policy={'random_start': {'seed': 42}}) as session:
         session.feed_run('import random')
         assert session.feed_run('random.random()') == snapshot(0.6394267984578837)
         session.feed_run('random.seed(5)')
@@ -1013,8 +1085,8 @@ def test_random_start_seed_persists_and_is_overridable(pool: Monty):
 
 def test_random_start_seed_instances_are_deterministic(monty_run: RunMonty):
     code = 'import random\n[random.Random().random(), random.Random().random(), random.random()]'
-    first = monty_run(code, checkout={'auto_os_calls': {'random_start': {'seed': 42}}})
-    second = monty_run(code, checkout={'auto_os_calls': {'random_start': {'seed': 42}}})
+    first = monty_run(code, checkout={'os_policy': {'random_start': {'seed': 42}}})
+    second = monty_run(code, checkout={'os_policy': {'random_start': {'seed': 42}}})
     assert first == second
     assert len(set(first)) == 3
     assert first[2] == snapshot(0.6394267984578837)
@@ -1042,7 +1114,7 @@ def test_random_start_seed_instances_are_deterministic(monty_run: RunMonty):
 )
 def test_random_start_invalid(pool: Monty, value: Any, error: type[Exception], message: str):
     with pytest.raises(error) as exc_info:
-        pool.checkout(auto_os_calls={'random_start': value})
+        pool.checkout(os_policy={'random_start': value})
     assert str(exc_info.value) == message
 
 
@@ -1078,7 +1150,7 @@ def test_random_start_call_host_rejects_short_entropy(monty_run: RunMonty):
     assert str(exc_info.value) == snapshot("RuntimeError: 'os.urandom' returned 3 bytes, expected 2496")
 
 
-# Auto OS calls: timezone
+# OS policy: timezone
 
 
 def test_timezone_fixed_offset_and_name(monty_run: RunMonty):
@@ -1089,7 +1161,7 @@ def test_timezone_fixed_offset_and_name(monty_run: RunMonty):
         '(datetime.now(), date.today(), time.time(), datetime.now(timezone.utc))'
     )
     zone = {'offset_seconds': 3600, 'name': 'CET'}
-    result = monty_run(code, checkout={'auto_os_calls': {'datetime': frozen, 'timezone': zone}})
+    result = monty_run(code, checkout={'os_policy': {'datetime': frozen, 'timezone': zone}})
     assert result == snapshot(
         (
             datetime.datetime(2024, 1, 16, 0, 30, 5),
@@ -1100,71 +1172,126 @@ def test_timezone_fixed_offset_and_name(monty_run: RunMonty):
     )
 
 
-def test_timezone_system_with_a_fixed_instant(monty_run: RunMonty):
+def test_timezone_defaults_to_utc(monty_run: RunMonty):
+    """The default zone is UTC, not the host's, so `astimezone()` and the `time` constants are host-independent."""
     frozen = datetime.datetime(2024, 7, 1, 12, 0, tzinfo=datetime.timezone.utc)
-    code = 'from datetime import datetime, timezone\n(datetime.now() - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()'
-    result = monty_run(code, checkout={'auto_os_calls': {'datetime': frozen, 'timezone': 'system'}})
-    host_offset = frozen.astimezone().utcoffset()
-    assert host_offset is not None
-    assert result == host_offset.total_seconds()
-
-
-def test_timezone_call_host_sends_only_the_naive_calls(monty_run: RunMonty):
-    """Only the calls that need the zone reach the handler; `time.time()` and `now(tz)` are answered in the worker."""
-    calls: list[str] = []
-
-    def os_handler(*, name: str, args: tuple[Any, ...], **_: Any) -> Any:
-        calls.append(name)
-        return datetime.date(2001, 2, 3) if name == 'date.today' else datetime.datetime(2001, 2, 3, 4, 5)
-
-    frozen = datetime.datetime(2024, 1, 15, 10, 30, 5)
     code = (
-        'import time\nfrom datetime import date, datetime, timezone\n'
-        '(date.today(), datetime.now(), time.time(), datetime.now(timezone.utc))'
+        'import time\nfrom datetime import datetime\n'
+        '(datetime.now(), datetime.now().astimezone(), datetime(2024, 1, 1, 12, 30).astimezone().strftime("%H:%M %Z"), '
+        'time.timezone, time.altzone, time.daylight, time.tzname)'
     )
-    result = monty_run(code, os=os_handler, checkout={'auto_os_calls': {'datetime': frozen, 'timezone': 'call_host'}})
+    for zone in ['utc', None]:
+        os_policy: dict[str, Any] = {'datetime': frozen}
+        if zone is not None:
+            os_policy['timezone'] = zone
+        result = monty_run(code, checkout={'os_policy': os_policy})
+        assert result == snapshot(
+            (
+                datetime.datetime(2024, 7, 1, 12, 0),
+                datetime.datetime(2024, 7, 1, 12, 0, tzinfo=datetime.timezone(datetime.timedelta(0), 'UTC')),
+                '12:30 UTC',
+                0,
+                0,
+                0,
+                ('UTC', 'UTC'),
+            )
+        )
+
+
+def test_timezone_fixed_zone_is_reported(monty_run: RunMonty):
+    """A fixed zone's offset and name reach `astimezone()`, `%Z` and the `time` constants."""
+    code = (
+        'import time\nfrom datetime import datetime, timezone\n'
+        '(datetime(2024, 6, 15, 12, 30, tzinfo=timezone.utc).astimezone(), '
+        'datetime(2024, 6, 15, 12, 30).astimezone(timezone.utc), '
+        'datetime(2024, 6, 15, 12, 30).astimezone().strftime("%z %Z"), '
+        'time.timezone, time.tzname)'
+    )
+    zone = {'offset_seconds': 7200, 'name': 'EET'}
+    result = monty_run(code, checkout={'os_policy': {'timezone': zone}})
     assert result == snapshot(
         (
-            datetime.date(2001, 2, 3),
-            datetime.datetime(2001, 2, 3, 4, 5),
-            1705314605.0,
-            datetime.datetime(2024, 1, 15, 10, 30, 5, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2024, 6, 15, 14, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=7200), 'EET')),
+            datetime.datetime(2024, 6, 15, 10, 30, tzinfo=datetime.timezone.utc),
+            '+0200 EET',
+            -7200,
+            ('EET', 'EET'),
         )
     )
-    assert calls == snapshot(['date.today', 'datetime.now'])
+
+
+def test_timezone_named_zone_applies_dst_rules(monty_run: RunMonty):
+    """An IANA name resolves in the worker: the offset and abbreviation follow the instant, the constants the year."""
+    frozen = datetime.datetime(2024, 1, 15, 10, 30, 5, tzinfo=datetime.timezone.utc)
+    code = (
+        'import time\nfrom datetime import datetime, timezone\n'
+        '(datetime.now(), datetime(2024, 6, 15, 12, 30, tzinfo=timezone.utc).astimezone(), '
+        'datetime(2024, 10, 27, 1, 30).astimezone(timezone.utc), '
+        'datetime(2024, 6, 15, 12, 30).astimezone().strftime("%H:%M %Z %z"), '
+        'time.timezone, time.altzone, time.daylight, time.tzname)'
+    )
+    result = monty_run(code, checkout={'os_policy': {'datetime': frozen, 'timezone': 'Europe/London'}})
+    assert result == snapshot(
+        (
+            datetime.datetime(2024, 1, 15, 10, 30, 5),
+            datetime.datetime(2024, 6, 15, 13, 30, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600), 'BST')),
+            datetime.datetime(2024, 10, 27, 0, 30, tzinfo=datetime.timezone.utc),
+            '12:30 BST +0100',
+            0,
+            -3600,
+            1,
+            ('GMT', 'BST'),
+        )
+    )
+
+
+def test_timezone_named_zone_constants_need_the_clock(monty_run: RunMonty):
+    """The `time` constants come from the clock's year, which a `call_host` clock cannot give at import."""
+    with pytest.raises(MontyRuntimeError) as exc_info:
+        monty_run(
+            'import time\ntime.tzname',
+            checkout={'os_policy': {'datetime': 'call_host', 'timezone': 'Europe/London'}},
+        )
+    assert str(exc_info.value) == snapshot("AttributeError: module 'time' has no attribute 'tzname'")
+
+
+def test_timezone_unknown_name_is_refused_at_checkout(monty_run: RunMonty):
+    with pytest.raises(ValueError) as exc_info:
+        monty_run('1', checkout={'os_policy': {'timezone': 'Mars/Olympus'}})
+    assert str(exc_info.value) == snapshot("unknown timezone 'Mars/Olympus'")
 
 
 @pytest.mark.parametrize(
     ('value', 'error', 'message'),
     [
-        (
-            'mars',
-            ValueError,
-            "timezone must be 'system', 'call_host' or {'offset_seconds': int, 'name': str}, got 'mars'",
-        ),
+        ('mars', ValueError, "unknown timezone 'mars'"),
         (
             {'name': 'CET'},
             ValueError,
-            "timezone must be 'system', 'call_host' or {'offset_seconds': int, 'name': str}, got {'name': 'CET'}",
+            "timezone must be 'utc', an IANA zone name or {'offset_seconds': int, 'name': str}, got {'name': 'CET'}",
         ),
         ({'offset_seconds': True}, TypeError, 'timezone offset_seconds must be an int'),
         ({'offset_seconds': 86_400}, ValueError, 'timezone offset_seconds must be within -86399..=86399, got 86400'),
         ({'offset_seconds': 0, 'name': 1}, TypeError, 'timezone name must be a str'),
-        (3600, TypeError, "timezone must be 'system', 'call_host' or {'offset_seconds': int, 'name': str}, not int"),
+        (
+            3600,
+            TypeError,
+            "timezone must be 'utc', an IANA zone name or {'offset_seconds': int, 'name': str}, not int",
+        ),
     ],
 )
 def test_timezone_invalid(pool: Monty, value: Any, error: type[Exception], message: str):
     with pytest.raises(error) as exc_info:
-        pool.checkout(auto_os_calls={'timezone': value})
+        pool.checkout(os_policy={'timezone': value})
     assert str(exc_info.value) == message
 
 
-def test_auto_os_calls_rejects_unknown_keys(pool: Monty):
+def test_os_policy_rejects_unknown_keys(pool: Monty):
     with pytest.raises(ValueError) as exc_info:
-        pool.checkout(auto_os_calls={'sleeps': 'zero'})  # pyright: ignore[reportArgumentType]
+        pool.checkout(os_policy={'sleeps': 'zero'})  # pyright: ignore[reportArgumentType]
     assert str(exc_info.value) == snapshot(
-        "unknown auto_os_calls key 'sleeps', expected one of: datetime, timezone, sleep, sleep_system_max, random_start"
+        "unknown os_policy key 'sleeps', expected one of: datetime, timezone, sleep, sleep_system_max, process_time, random_start"
     )
     with pytest.raises(TypeError) as exc_info:
-        pool.checkout(auto_os_calls='zero')  # pyright: ignore[reportArgumentType]
-    assert str(exc_info.value) == snapshot('auto_os_calls must be a dict, not str')
+        pool.checkout(os_policy='zero')  # pyright: ignore[reportArgumentType]
+    assert str(exc_info.value) == snapshot('os_policy must be a dict, not str')

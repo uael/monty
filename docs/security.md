@@ -3,14 +3,14 @@
 Monty is designed to run code that a language model wrote and nobody reviewed.
 This page describes what that buys you and what it does not.
 
-The sandbox has been through two completed rounds of the [Hack Monty](https://pydantic.dev/articles/hack-monty-3)
-bounty program, and a third is under way.
-If you find a way out of it, please [open an issue](https://github.com/pydantic/monty/issues) or claim the bounty.
+Monty has a continuous bounty program for reported security vulnerabilities.
+If you find a way out of the sandbox, do not open a public issue; report it privately by creating a
+[security advisory](https://github.com/pydantic/monty/security).
 
 ## What "secure" means here
 
 Monty is a **language-level sandbox**, not an OS-level one.
-There is no container, no seccomp filter and no VM.
+There is no container, no seccomp filter and no virtual machine.
 The isolation comes from the interpreter itself: sandboxed code cannot express an operation that touches the host,
 because the interpreter implements no such operation.
 
@@ -18,24 +18,22 @@ because the interpreter implements no such operation.
 
     If you want Monty combined with OS-level isolation, see [Full Monty](server.md), the commercial version of Monty.
 
-Concretely:
+In practice that means:
 
 - **There is no ambient authority.** With no mounts and no host functions configured, the sandbox cannot read a file,
     read an environment variable, open a socket, or spawn a process.
     Not "it is blocked" — the capability does not exist in the bytecode VM.
     The wall clock and OS entropy are the exceptions: every session reads the clock by default and seeds `random`
-    from entropy; see [the clock](#the-clock) and [entropy](#entropy).
+    from entropy, although even those can be disabled or customised; see [the clock](#the-clock) and [entropy](#entropy).
 - **The interpreter performs no filesystem I/O at all.** It suspends with a description of the operation it wants, and a
     host component decides what to do about it.
-    All filesystem code lives in a separate crate (`monty-fs`) that worker artifacts do not even link in some builds.
-- **The dangerous modules are absent.** `socket`, `subprocess`, `multiprocessing`, `threading` and `ctypes`
-    are not importable, and are also missing from the bundled typeshed, so [type checking](type-checking.md) rejects code
-    that uses them before it runs.
+    All filesystem code lives in a separate crate (`monty-fs`).
 - **No FFI, no C dependencies.** Nothing in the sandbox can call into native code.
 
 ## The three host-access mechanisms
 
-Everything the sandbox can reach outside itself goes through one of three mechanisms, and all are opt-in per feed.
+Everything the sandbox can reach outside itself goes through one of three mechanisms, and all are opt-in: host
+functions, the objects wrapped in `ClassInstance` / `ClassType`, and the filesystem per feed, host modules per session.
 
 ### Host functions
 
@@ -84,6 +82,14 @@ It cannot guarantee that what you handed it is safe.
 A host function that takes a path and reads it, or takes a URL and fetches it, is an unconstrained filesystem or network
 primitive that you wrote.
 Validate arguments in the host function as you would validate any untrusted input.
+
+`external_modules` on `checkout()` selects which host modules the session's code can import; the bindings answer an
+import only from that mapping and never consult the host's own import system.
+A dict exposes all its public items, and its callables run on the host.
+A `ClassInstance` exposes only what its wrapper policy allows.
+Imports and stub requests use runtime-generated OS calls; sandbox code cannot call them by name (`__import__` is
+undefined).
+See [importing host modules](host-functions.md#importing-host-modules).
 
 ### Host objects and classes
 
@@ -225,9 +231,7 @@ The session freezes the clock:
     """
 
     with Monty() as pool:
-        with pool.checkout(
-            auto_os_calls={'datetime': datetime(2026, 1, 1, 9, 30)}
-        ) as session:
+        with pool.checkout(os_policy={'datetime': datetime(2026, 1, 1, 9, 30)}) as session:
             print(session.feed_run(code, os=fs))
             #> test test 09:30
     ```
@@ -254,7 +258,7 @@ The session freezes the clock:
     `
 
     await using pool = await Monty.create()
-    await using session = await pool.checkout({ autoOsCalls: { datetime: new Date('2026-01-01T09:30:00Z') } })
+    await using session = await pool.checkout({ osPolicy: { datetime: new Date('2026-01-01T09:30:00Z') } })
     console.log(await session.feedRun(code, { os: fs })) // test test 09:30
     ```
 
@@ -278,23 +282,30 @@ resolved inside the sandbox and reaches a mount as an absolute virtual path.
 
 ### The clock
 
-`date.today()`, `datetime.now()` and `time.time()` are the only calls that read a clock.
-All sessions default to the system clock and local timezone (UTC in the wasm worker).
-The session's `auto_os_calls` ([`AutoOSCalls`][pydantic_monty.AutoOSCalls] on
-[`Monty.checkout`][pydantic_monty.Monty.checkout] in Python, `autoOsCalls` on `checkout()` in JavaScript,
-`AutoOsCalls` in Rust) configures the instant (`datetime`) and local zone (`timezone`) separately:
+`date.today()`, `datetime.now()` and the `time` module's wall clocks (`time()`, `monotonic()`, `perf_counter()` and
+the conversion functions called without a time) are the only calls that read a clock.
+All sessions default to the system clock read in UTC.
+The session's `os_policy` ([`OSPolicy`][pydantic_monty.OSPolicy] on
+[`Monty.checkout`][pydantic_monty.Monty.checkout] in Python, `osPolicy` on `checkout()` in JavaScript,
+`OsPolicy` in Rust) configures the instant (`datetime`) and local zone (`timezone`) separately:
 
-- `'call_host'` delegates to your `os=` handler; unanswered calls raise.
+- `datetime='call_host'` delegates the clock calls to your `os=` handler; unanswered calls raise.
+    Every `time` module clock arrives as the one OS function `time.time`, with the asking function's name
+    (`'time.monotonic'`, `'time.localtime'`, ...) as its argument, so a handler can tell them apart.
 - A fixed instant (`datetime.datetime`, `Date` or `DateTimeSource::Fixed`) freezes the clock.
-    A fixed `timezone` sets the offset and name used by naive calls.
+- `timezone` sets the zone that naive `datetime.now()` and `date.today()` use and that `astimezone()`,
+    `strftime('%Z')` and the `time.timezone` / `time.tzname` constants report: `'utc'`, an IANA name such as
+    `'Europe/London'` resolved inside the worker from its tz database, or a fixed offset and name.
 
-System timezone offsets are evaluated at the selected instant, including historical daylight-saving changes.
 A fixed zone uses `{'offset_seconds': ..., 'name': ...}` in Python, `{ offsetSeconds, name }` in JavaScript,
-or `SandboxTimeZone::Fixed` in Rust.
+or `SandboxTimeZone::Fixed` in Rust; a named one is `SandboxTimeZone::named(...)` in Rust.
 
-Wall-clock time is a weak capability, but it is one — it is what makes elapsed time measurable from inside the sandbox,
-and a naive `datetime.now()` is read in the host's local zone, which discloses its UTC offset.
-A fixed instant and a fixed zone give away neither.
+Wall-clock time is a weak capability, but it is one: it is what makes elapsed time measurable from inside the sandbox.
+A fixed instant removes it, and pins `time.monotonic()` and `time.perf_counter()` too, since they read the same clock.
+`time.process_time()` is governed separately by `process_time`, which defaults to `'zero'`; `'elapsed'` deliberately
+hands elapsed execution time back to the sandbox.
+Under `datetime='call_host'` it learns whatever your handler answers; the default
+[`OSAccess`][pydantic_monty.OSAccess] handler answers with the host's real clock and zone.
 See [datetime](limitations/datetime.md#reading-the-clock).
 
 ### Entropy
@@ -357,7 +368,7 @@ The handler's `is_async` argument says which pool is calling, and
 
 
     with Monty() as pool:
-        with pool.checkout(auto_os_calls={'sleep': 'call_host'}) as session:
+        with pool.checkout(os_policy={'sleep': 'call_host'}) as session:
             print(session.feed_run('import time\ntime.sleep(30)\n"awake"', os=host_os))
             #> awake
     ```
@@ -375,7 +386,7 @@ The handler's `is_async` argument says which pool is calling, and
     }
 
     await using pool = await Monty.create()
-    await using session = await pool.checkout({ autoOsCalls: { sleep: 'call_host' } })
+    await using session = await pool.checkout({ osPolicy: { sleep: 'call_host' } })
     console.log(await session.feedRun('import time\ntime.sleep(30)\n"awake"', { os: hostOs })) // awake
     ```
 
@@ -384,21 +395,22 @@ Its return value is ignored: the sandbox itself produces the `result` argument o
 
 ## Crash isolation
 
-Monty runs in a subprocess, so an unexpected memory error or panic in the interpreter cannot kill the main process;
-the same design makes it easy to run many Monty interpreters in parallel.
-The Python package and the native `@pydantic/monty` binding never run the interpreter in your process: every session
-runs in a `monty` worker subprocess.
+Python's local [`Monty`][pydantic_monty.Monty] / [`AsyncMonty`][pydantic_monty.AsyncMonty] pools and the native
+`@pydantic/monty` binding run every session in a `monty` worker subprocess.
+Worker panics and aborts terminate the worker rather than the host.
+For WebSocket sessions, see [remote workers](#remote-workers).
 
-The WebAssembly build has no subprocess to use.
-In a browser it runs off-thread in a `Worker`; under Node, which has no global `Worker`, `@pydantic/monty/wasm` runs
-in-process outright.
-See [in-process execution](#in-process-execution).
+The WebAssembly build runs off-thread in a browser Web Worker or Node `worker_threads` worker.
+Both support hard termination and replacement after WASM traps; environments without workers are rejected.
+These are not subprocesses: JS-engine crashes or process-wide OOM can still affect the host.
+Browser worker failures have no OS exit status; Node can report the thread's exit code.
 
 When a worker dies, the pool observes the death, discards the worker, spawns a replacement, and the call raises
 [`MontyCrashedError`][pydantic_monty.MontyCrashedError] ([`PoolError::Crashed`](api/rust/monty-pool.md#poolerror) in Rust).
-The session is lost; your process is not.
+The session is lost.
+Subprocess isolation protects native hosts; WASM worker isolation has the limits described above.
 
-Two more properties of the worker boundary matter:
+Two more properties of the subprocess worker boundary matter:
 
 - **Workers spawn with an empty environment** (Windows keeps only `SystemRoot`), so host secrets are never in a worker's
     memory to begin with.
@@ -445,6 +457,11 @@ See [resource limits](resource-limits.md) for the full picture; the security-rel
 - Compilation of the fed source is not charged against the duration budgets.
     It has its own structural caps (AST nesting, bytecode operand sizes, comprehension nesting, `finally` expansion), but
     a host accepting untrusted source should still isolate compilation — as the subprocess and WebAssembly runtimes do.
+    The parser grows its native stack outside the allocator's accounting, so a source longer than
+    `CompileOptions::source_scan_threshold` (4 KiB by default, and fixed at that for Python and JavaScript hosts) is
+    scanned for nesting before it is parsed; a shorter one can add at most a few MiB of stack the memory limit does not
+    see, so a Rust host raising the threshold, or disabling the scan with `usize::MAX`, raises that exposure with it
+    (see [source nesting depth](limitations/language.md#source-nesting-depth)).
     `eval()` and `exec()` compile inside the VM under the same caps, charged against the budget, and their code runs
     under the limits and host boundary of the code that called them.
 - `max_suspensions` bounds suspension events per checkout.
@@ -463,11 +480,9 @@ sandboxed as the callback you wrote.
 
 ### In-process execution
 
-The Rust `monty` crate and the WebAssembly in-process degrade run the interpreter in the calling process.
+The Rust `monty` crate runs the interpreter in the calling process.
 The language-level sandbox still holds, but crash isolation does not: an abort in the sandbox is an abort in your
-process.
-In the browser, a real `Worker` restores isolation and gives the watchdog a hard kill via `Worker.terminate()`; where no
-`Worker` exists, the same API degrades to in-process with no preemption.
+process. The Python and JavaScript APIs do not offer an in-process execution mode.
 
 ### Remote workers
 

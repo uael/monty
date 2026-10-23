@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     # Self is 3.11+, hence this
     from typing import Self
 
+    # only an annotation here; importing at runtime would be circular
+    from . import TimeCaller
+
 __all__ = (
     'OsFunction',
     'AbstractOS',
@@ -35,6 +38,7 @@ __all__ = (
     'CallbackFile',
     'OSAccess',
     'StatResult',
+    'ScanEntry',
     'path_from_arg',
 )
 
@@ -54,6 +58,7 @@ OsFunction = Literal[
     'Path.unlink',
     'Path.rmdir',
     'Path.iterdir',
+    'Path.scan',
     'Path.stat',
     'Path.rename',
     'Path.resolve',
@@ -145,11 +150,37 @@ class StatResult(NamedTuple):
     """time of last change"""
 
 
+_MAX_SCAN_ENTRIES = 100_000
+"""Maximum entries per default scan, including the root."""
+
+_MAX_SCAN_PATH_BYTES = 100_000_000
+"""Maximum accumulated scan path data, estimated at four bytes per character for absolute and relative paths."""
+
+
+class ScanEntry(NamedTuple):
+    """One entry of a `Path.scan` reply: what `os.DirEntry` would report for it.
+
+    `is_dir` and `is_file` follow a symlink; `is_symlink` does not.
+    """
+
+    path: str
+    """Path relative to the scanned directory, `''` for the directory itself."""
+
+    is_dir: bool
+    """The entry is, or links to, a directory."""
+
+    is_file: bool
+    """The entry is, or links to, a regular file."""
+
+    is_symlink: bool
+    """The entry itself is a symbolic link."""
+
+
 class AbstractOS(ABC):
     """Base class for virtual filesystems and host OS callbacks.
 
     Implement the abstract methods and pass an instance to `feed_run(code, os=...)`.
-    Clock and sleep callbacks require `auto_os_calls` to select `'call_host'`.
+    Clock and sleep callbacks require `os_policy` to select `'call_host'`.
     """
 
     max_urandom_bytes: int = MAX_URANDOM_BYTES_DEFAULT
@@ -251,6 +282,8 @@ class AbstractOS(ABC):
                 return self.path_rmdir(*args)
             case 'Path.iterdir':
                 return self.path_iterdir(*args)
+            case 'Path.scan':
+                return self.path_scan(*args, **kwargs)
             case 'Path.stat':
                 return self.path_stat(*args)
             case 'Path.rename':
@@ -270,7 +303,7 @@ class AbstractOS(ABC):
             case 'os.urandom':
                 return self.urandom(*args)
             case 'time.time':
-                return self.time()
+                return self.time(*args)
             # `feed_start` callers can dispatch system sleeps manually.
             case 'time.sleep' | 'system.sleep':
                 return self.sleep(*args)
@@ -504,6 +537,80 @@ class AbstractOS(ABC):
         """
         raise NotImplementedError
 
+    def path_scan(
+        self,
+        path: PurePosixPath,
+        *,
+        max_depth: int | None,
+        follow_symlinks: bool,
+        pattern: list[str] | None = None,
+        case_sensitive: bool | None = None,
+        recurse_symlinks: bool = False,
+    ) -> list[ScanEntry]:
+        """Read a subtree in one call, for `os.scandir`, `os.walk`, `Path.walk` and `Path.glob`.
+
+        Return the directory itself (path `''`) and every entry down to `max_depth` levels below it
+        (`None` for the whole tree), descending into symlinked directories only when `follow_symlinks`.
+        `pattern`, `case_sensitive` and `recurse_symlinks` describe a glob and are only a hint:
+        returning entries the pattern cannot match is allowed, since Monty filters the reply itself.
+        A directory below `path` that cannot be listed reads as empty, as it does for a mount.
+        When following symlinks without a `max_depth`, the default stops 64 levels down so a link cycle ends.
+        The default also caps each scan at 100,000 entries, including the root, and 100 MB of path data
+        estimated at four bytes per character for both absolute and relative paths.
+
+        The default walks the tree with `path_iterdir()`, `path_is_dir()`, `path_is_file()` and
+        `path_is_symlink()`; override it to answer in fewer host calls.
+
+        Args:
+            path: The directory to scan; may also name a file, which is described but not listed.
+            max_depth: The deepest level to return, `None` for no limit.
+            follow_symlinks: Whether to descend into symlinked directories.
+            pattern: Glob pattern parts relative to `path`, or `None`.
+            case_sensitive: The glob's `case_sensitive` argument.
+            recurse_symlinks: Whether the glob's `**` descends into symlinked directories.
+
+        Raises:
+            FileNotFoundError: If `path` does not exist.
+            RuntimeError: If the default scan exceeds its entry or path-data limit.
+        """
+        if not (self.path_exists(path) or self.path_is_symlink(path)):
+            raise FileNotFoundError(f'[Errno 2] No such file or directory: {str(path)!r}')
+        root = self._scan_entry('', path)
+        entries = [root]
+        path_bytes = 4 * len(str(path))
+        if path_bytes > _MAX_SCAN_PATH_BYTES:
+            raise RuntimeError(f'directory scan exceeded {_MAX_SCAN_PATH_BYTES} bytes of path data')
+        stack = [(path, '', 0)] if root.is_dir else []
+        while stack:
+            directory, relative, depth = stack.pop()
+            # Following links, 64 levels bounds a symlink cycle, as a mount's path limit does.
+            limit = 64 if max_depth is None and follow_symlinks else max_depth
+            if limit is not None and depth >= limit:
+                continue
+            try:
+                children = self.path_iterdir(directory)
+            except OSError:
+                if depth == 0:
+                    raise
+                continue
+            for child in children:
+                if len(entries) >= _MAX_SCAN_ENTRIES:
+                    raise RuntimeError(f'directory scan exceeded {_MAX_SCAN_ENTRIES} entries')
+                name = PurePosixPath(child).name
+                relative_len = len(relative) + bool(relative) + len(name)
+                path_bytes += 4 * (relative_len + len(str(directory)) + 1 + len(name))
+                if path_bytes > _MAX_SCAN_PATH_BYTES:
+                    raise RuntimeError(f'directory scan exceeded {_MAX_SCAN_PATH_BYTES} bytes of path data')
+                entry = self._scan_entry(f'{relative}/{name}' if relative else name, directory / name)
+                entries.append(entry)
+                if entry.is_dir and (follow_symlinks or not entry.is_symlink):
+                    stack.append((directory / name, entry.path, depth + 1))
+        return entries
+
+    def _scan_entry(self, relative: str, path: PurePosixPath) -> ScanEntry:
+        """Describes `path` for `path_scan()` with the single-path predicates."""
+        return ScanEntry(relative, self.path_is_dir(path), self.path_is_file(path), self.path_is_symlink(path))
+
     @abstractmethod
     def path_stat(self, path: PurePosixPath) -> StatResult:
         """Get file status information.
@@ -582,16 +689,16 @@ class AbstractOS(ABC):
         raise NotImplementedError
 
     def date_today(self) -> datetime.date:
-        """Return the host's date when `auto_os_calls` routes the clock or zone to the host.
+        """Return the host's date when `os_policy` routes the clock or zone to the host.
 
-        Use `auto_os_calls` directly to configure a fixed clock.
+        Use `os_policy` directly to configure a fixed clock.
         """
         return datetime.date.today()
 
     def datetime_now(self, tz: datetime.tzinfo | None = None) -> datetime.datetime:
-        """Return host `datetime.now(tz)` when `auto_os_calls` routes the clock or zone to the host.
+        """Return host `datetime.now(tz)` when `os_policy` routes the clock or zone to the host.
 
-        Use `auto_os_calls` directly to configure a fixed clock.
+        Use `os_policy` directly to configure a fixed clock.
         """
         return datetime.datetime.now(tz=tz)
 
@@ -606,11 +713,16 @@ class AbstractOS(ABC):
             raise MemoryError(f'os.urandom() size exceeds max_urandom_bytes ({self.max_urandom_bytes})')
         return os.urandom(size)
 
-    def time(self) -> float:
-        """Return the epoch seconds for Monty's `time.time()` callback.
+    def time(self, caller: TimeCaller = 'time.time') -> float:
+        """Return the epoch seconds for Monty's `time` module clocks.
 
-        Reached only under `auto_os_calls={'datetime': 'call_host'}`; override it
+        Reached only under `os_policy={'datetime': 'call_host'}`; override it
         alongside `date_today()` and `datetime_now()` for a virtual clock.
+        An override must accept `caller`: the dispatcher passes it positionally.
+
+        Args:
+            caller: The `time` function that asked, e.g. `'time.monotonic'`; ignore it
+                unless each clock should read differently.
         """
         return time.time()
 

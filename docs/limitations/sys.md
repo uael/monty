@@ -71,10 +71,6 @@ holds what this session imported and nothing else, where CPython's is seeded
 with every module the interpreter loaded at startup. See
 [modules.md](modules.md).
 
-Accessing an attribute the module does not define raises Monty's generic
-`AttributeError: 'module' object has no attribute '<name>'`, where CPython says
-`module 'sys' has no attribute '<name>'`.
-
 ## Not implemented
 
 `path`, `exit`, `exc_info`, `getrecursionlimit`,

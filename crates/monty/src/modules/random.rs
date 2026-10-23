@@ -149,7 +149,7 @@ pub(crate) fn random_dispatch(
         RandomFunctions::Setstate => setstate(target, args, vm).map(CallResult::Value),
         _ => {
             if !target.is_seeded(vm) {
-                match vm.random.first_state(target, &vm.env.auto_os_calls.random_start) {
+                match vm.random.first_state(target, &vm.env.os_policy.random_start) {
                     Ok(Some(state)) => target.reseed(vm, state),
                     Ok(None) => return Ok(request_entropy(target, Some(RandomRetry { function, args }), vm)),
                     Err(err) => {
@@ -305,7 +305,7 @@ fn seed(target: RandomTarget, args: ArgValues, vm: &mut VM<'_>) -> RunResult<Cal
     defer_drop!(a, vm);
     defer_drop!(version, vm);
     let state = if matches!(a, Value::None) {
-        match vm.random.fresh_state(&vm.env.auto_os_calls.random_start)? {
+        match vm.random.fresh_state(&vm.env.os_policy.random_start)? {
             Some(state) => state,
             None => return Ok(request_entropy(target, None, vm)),
         }
@@ -531,7 +531,7 @@ fn getrandbits(target: RandomTarget, args: ArgValues, vm: &mut VM<'_>) -> RunRes
         .get_one_arg("Random.getrandbits", vm.heap)?;
     defer_drop!(k, vm);
     let k = k.as_int_with_overflow(vm, ExcType::overflow_c_uint64)?;
-    let k = u64::try_from(k).map_err(|_| ExcType::value_error("Cannot convert negative int"))?;
+    let k = u64::try_from(k).map_err(|_| ExcType::value_error_negative_int())?;
     if k == 0 {
         return Ok(Value::Int(0));
     }
@@ -562,7 +562,7 @@ fn randbytes(target: RandomTarget, args: ArgValues, vm: &mut VM<'_>) -> RunResul
     defer_drop!(n, vm);
     // `getrandbits(n * 8)` is what rejects a negative or oversized count.
     let n = n.as_int_with_overflow(vm, ExcType::overflow_c_uint64)?;
-    let n = usize::try_from(n).map_err(|_| ExcType::value_error("Cannot convert negative int"))?;
+    let n = usize::try_from(n).map_err(|_| ExcType::value_error_negative_int())?;
     if n == 0 {
         return Ok(allocate_bytes(Vec::new(), vm.heap));
     }
@@ -760,7 +760,7 @@ fn shuffle(target: RandomTarget, args: ArgValues, vm: &mut VM<'_>) -> RunResult<
     defer_drop_mut!(x, vm);
     let len = len_of(x, vm)?;
     if let Value::Ref(id) = x
-        && let HeapReadOutput::List(mut list) = vm.heap.read(*id)
+        && let HeapReadOutput::List(list) = vm.heap.read(*id)
     {
         return target.with_generator(vm, |random, vm| {
             for i in (1..len).rev() {

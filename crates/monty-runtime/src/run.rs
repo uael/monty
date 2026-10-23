@@ -20,13 +20,16 @@ use std::{
 // output keeps using `std::println!` — it is program data, not our styling.
 use anstream::{AutoStream, ColorChoice, eprintln};
 use anstyle::{AnsiColor, Color, Style};
-use monty::{MontyRepl, MontyRun, ReplContinuationMode, ReplProgress, RunProgress, detect_repl_continuation_mode};
+use monty::{
+    MontyRepl, MontyRun, ReplContinuationMode, ReplProgress, RunProgress, detect_repl_continuation_mode,
+    type_check_nesting_exception,
+};
 use monty_fs::{MountCallOutcome, MountMode, MountTable, OverlayState};
 use monty_type_checking::{SourceFile, TypeChecker};
 use monty_types::{
-    AutoOsCalls, CallArgs, CompileOptions, DEFAULT_MAX_SUSPENSIONS, ExcType, ExtFunctionResult, MontyException,
-    MontyObject, NameLookupResult, OsFunctionCall, PrintWriter, ResourceLimits, ResourceTracker, SleepMode,
-    TypeCheckingConfig, memory_limit_with_headroom, validate_cwd,
+    CallArgs, CompileOptions, DEFAULT_MAX_SUSPENSIONS, ExcType, ExtFunctionResult, MontyException, MontyObject,
+    NameLookupResult, OsFunctionCall, OsPolicy, PrintWriter, ResourceLimits, ResourceTracker, SOURCE_SCAN_THRESHOLD,
+    SleepMode, TypeCheckingConfig, memory_limit_with_headroom, validate_cwd,
 };
 use rustyline::{DefaultEditor, error::ReadlineError};
 #[cfg(feature = "telemetry")]
@@ -210,7 +213,12 @@ fn run_script(
     mut host: HostOs,
     cwd: &str,
 ) -> ExitCode {
+    // ty recurses through the AST unguarded, so a source nested too deeply is rejected before it.
     if let Some(config) = type_check {
+        if let Err(err) = type_check_nesting_exception(&code, file_path, SOURCE_SCAN_THRESHOLD) {
+            eprintln!("{BOLD_RED}error{BOLD_RED:#}:\n{err}");
+            return ExitCode::FAILURE;
+        }
         let start = Instant::now();
         let mut checker = TypeChecker::default();
         if let Some(failure) = checker.run(&SourceFile::new(&code, file_path), None, config).unwrap() {
@@ -232,7 +240,7 @@ fn run_script(
     let inputs = vec![];
 
     let mut runner = match MontyRun::new(code, file_path, input_names, CompileOptions::default()) {
-        Ok(ex) => ex.with_auto_os_calls(host.auto_os_calls()),
+        Ok(ex) => ex.with_os_policy(host.os_policy()),
         Err(err) => {
             eprintln!("{BOLD_RED}error{BOLD_RED:#}:\n{err}");
             return ExitCode::FAILURE;
@@ -309,8 +317,7 @@ fn run_script(
 /// initialization or I/O errors.
 fn run_repl(file_path: &str, code: &str, tracker: ResourceTracker, mut host: HostOs, cwd: &str) -> ExitCode {
     let mut suspensions = SuspensionBudget::new(&tracker);
-    let mut repl =
-        MontyRepl::new(file_path, tracker, CompileOptions::default()).with_auto_os_calls(host.auto_os_calls());
+    let mut repl = MontyRepl::new(file_path, tracker, CompileOptions::default()).with_os_policy(host.os_policy());
     repl.set_cwd(cwd);
     let mut repl = Some(repl);
 
@@ -663,10 +670,10 @@ impl HostOs {
 
     /// Uses the system clock and entropy, with `--max-sleep` capping each sleep.
     /// Without mounts or a sleep budget, the interpreter waits instead of the CLI.
-    fn auto_os_calls(&self) -> AutoOsCalls {
-        AutoOsCalls {
+    fn os_policy(&self) -> OsPolicy {
+        OsPolicy {
             sleep: SleepMode::System(self.max_sleep),
-            ..AutoOsCalls::default()
+            ..OsPolicy::default()
         }
     }
 

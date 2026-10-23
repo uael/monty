@@ -70,7 +70,7 @@ impl VM<'_> {
     /// Takes the reference it is given, and releases it if the bind fails.
     pub(crate) fn remember(&mut self, name: StringId, module: Value) -> RunResult<()> {
         let dict_id = self.modules.dict(self.heap);
-        let HeapReadOutput::Dict(mut dict) = self.heap.read(dict_id) else {
+        let HeapReadOutput::Dict(dict) = self.heap.read(dict_id) else {
             module.drop_with(self);
             return Err(RunError::internal("sys.modules is not a dict"));
         };

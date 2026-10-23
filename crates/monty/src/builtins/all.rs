@@ -22,7 +22,7 @@ pub fn builtin_all(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
         return vm.read_generator(gen_id, Reader::Test(true));
     }
     defer_drop!(iterable, vm);
-    let iter = iterable.py_iter(vm)?;
+    let iter = iterable.py_iter(vm)?.require_synchronous(vm)?;
     defer_drop!(iter, vm);
     let mut iter = iter.read(vm);
 

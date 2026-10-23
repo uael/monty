@@ -250,12 +250,12 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Generator> {
         self.get(vm.heap).kind == GeneratorKind::Generator
     }
 
-    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
+    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         if self.get(vm.heap).kind == GeneratorKind::Coroutine {
             let name = Type::Coroutine.name(vm.heap, vm.interns).into_owned();
             return Err(ExcType::type_error_not_iterable(&name));
         }
-        Ok(self.clone_value(vm.heap))
+        Ok(CallResult::Value(self.clone_value(vm.heap)))
     }
 
     /// Steps the generator from Rust, for the builtins that walk an iterator

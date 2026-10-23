@@ -1,4 +1,6 @@
-# xfail=cpython
+# /// monty
+# xfail = ['cpython']
+# ///
 # `monty.instance(cls, fields)`: an instance of a class of the session holding
 # these attributes, made with no `__init__` run. CPython has no `monty` module,
 # so this runs on Monty alone.

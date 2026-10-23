@@ -2,7 +2,7 @@
 
 The `monty` binary runs Python files and gives you an interactive REPL, with the same sandbox, resource limits and type
 checking the libraries use.
-It is the fastest way to see what the interpreter does with a piece of code.
+It is the fastest way to see what the sandbox does with a piece of code.
 
 It ships with `pydantic-monty` (through the [`pydantic-monty-runtime`](https://pypi.org/project/pydantic-monty-runtime/)
 dependency), or you can build it with `cargo build -p monty-runtime`.
@@ -56,10 +56,12 @@ The separator is `::` rather than `:` so Windows drive letters stay unambiguous.
 $ monty -m ./data::/data::ro -c "from pathlib import Path; print(Path('/data').iterdir())"
 ```
 
+Repeat `-m` for several mounts; they must have distinct virtual paths and disjoint host directories, or `monty` exits
+before running anything.
 Without a mount, the sandbox has no filesystem at all.
 See [filesystem access](filesystem.md).
 
-CLI mounts always use the default per-mount memory limit of 100 MB; there is no flag to change it.
+CLI mounts always use the default per-mount memory limit, [`DEFAULT_MEMORY_USAGE_LIMIT`](api/rust/monty-fs.md#default_memory_usage_limit); there is no flag to change it.
 
 The sandbox's [working directory](filesystem.md#working-directory) defaults to the first mount's virtual path, so
 `monty -m ./data::/data script.py` runs with `os.getcwd() == '/data'` and `__file__ == '/data/script.py'`; `--cwd`
@@ -69,7 +71,8 @@ Only the file argument's name is used, so `monty ./scripts/run.py` and `monty /a
 
 ## The clock, sleeping and entropy
 
-`date.today()` and `datetime.now()` read the machine's clock and local timezone; `time.time()` reads the machine's clock as Unix epoch seconds.
+`date.today()`, `datetime.now()` and `time.localtime()` read the machine's clock in UTC; `astimezone()` and `time.tzname` also report that zone; `time.time()`, `time.monotonic()` and `time.perf_counter()` all read it as Unix epoch seconds.
+`time.process_time()` is always `0.0`.
 `--max-sleep` caps each `time.sleep()` and `asyncio.sleep()` at ten seconds by default (`inf` removes the cap).
 `--max-total-sleep` optionally bounds their cumulative duration.
 Both limits apply to scripts, `-c` and the REPL, with or without mounts.

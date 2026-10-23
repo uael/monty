@@ -232,7 +232,7 @@ impl<'h> HeapObjectRead<'h, ContextVar> {
 /// token belongs to the variable, and from `Token.__exit__`, where it cannot
 /// belong to another.
 fn spend_token(token_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value> {
-    let HeapReadOutput::ContextVarToken(mut token) = vm.heap.read(token_id) else {
+    let HeapReadOutput::ContextVarToken(token) = vm.heap.read(token_id) else {
         unreachable!("the caller matched a token")
     };
     if token.get(vm.heap).used {
@@ -250,7 +250,7 @@ fn spend_token(token_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value> {
     let Value::Ref(var_id) = token.get(vm.heap).var else {
         unreachable!("a token always holds its variable")
     };
-    let HeapReadOutput::ContextVar(mut var) = vm.heap.read(var_id) else {
+    let HeapReadOutput::ContextVar(var) = vm.heap.read(var_id) else {
         unreachable!("a token always holds its variable")
     };
     let replaced = mem::replace(&mut var.get_mut(vm.heap).value, restored);

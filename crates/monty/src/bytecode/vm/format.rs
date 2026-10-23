@@ -12,10 +12,14 @@ use crate::{
         validate_string_spec,
     },
     heap::HeapReadOutput,
+    intern::StringId,
     string_builder::StringBuilder,
     types::{
-        PyTrait, Type, date::format_date_strftime, datetime::format_datetime_strftime, str::allocate_string,
-        time::format_time_strftime,
+        PyTrait, Type,
+        date::format_date_strftime,
+        datetime::format_datetime_strftime,
+        str::allocate_string,
+        time::{attached_timezone, format_time_strftime},
     },
     value::Value,
 };
@@ -23,15 +27,30 @@ use crate::{
 impl VM<'_> {
     /// Builds an f-string by concatenating n string parts from the stack.
     pub(super) fn build_fstring(&mut self, count: usize) -> Result<(), RunError> {
+        if count == 1 {
+            return Ok(());
+        }
         let this = self;
+        if count == 0 {
+            this.push(Value::InternString(StringId::EMPTY));
+            return Ok(());
+        }
+
         let parts = this.pop_n(count);
         defer_drop!(parts, this);
-        let mut result = String::new();
+
+        let mut total_len = 0_usize;
+        for part in parts.as_slice() {
+            let s = part.to_str_heap(this.heap, this.interns)?;
+            total_len = total_len.saturating_add(s.len());
+        }
+
+        this.heap.tracker.check_allocation(total_len)?;
+        let mut result = String::with_capacity(total_len);
 
         for part in parts.as_slice() {
-            let part_str = part.py_str(this)?;
-            defer_drop!(part_str, this);
-            result.push_str(part_str.to_str(this)?);
+            let s = part.to_str_heap(this.heap, this.interns)?;
+            result.push_str(s);
         }
 
         let value = allocate_string(result, this.heap);
@@ -184,9 +203,12 @@ impl VM<'_> {
         }
 
         let formatted = match self.heap.read(id) {
-            HeapReadOutput::Date(d) => format_date_strftime(*d.get(self.heap), spec_str),
-            HeapReadOutput::DateTime(d) => format_datetime_strftime(d.get(self.heap), spec_str),
-            HeapReadOutput::Time(t) => format_time_strftime(t.get(self.heap), spec_str),
+            HeapReadOutput::Date(d) => format_date_strftime(*d.get(self.heap), spec_str, &self.heap.tracker),
+            HeapReadOutput::DateTime(d) => format_datetime_strftime(d.get(self.heap), spec_str, &self.heap.tracker),
+            HeapReadOutput::Time(t) => {
+                let tz = attached_timezone(t.get(self.heap), self.heap);
+                format_time_strftime(t.get(self.heap), tz.as_ref(), spec_str, &self.heap.tracker)
+            }
             _ => unreachable!("temporal-ness checked above"),
         };
         formatted.map(Some)

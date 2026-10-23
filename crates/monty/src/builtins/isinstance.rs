@@ -38,7 +38,7 @@ pub fn builtin_isinstance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> 
 /// - The abstract base classes of `collections.abc`: `isinstance(x, Iterable)`,
 ///   answered from what the value is; see [`abc_instance`]
 /// - Tuples (possibly nested) of the above
-fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
+pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) -> RunResult<bool> {
     match classinfo {
         Value::Builtin(Builtins::Type(t)) => Ok(obj.py_type(vm).is_instance_of(*t)),
         // A sandbox exception class's instance matches through the builtin
@@ -97,7 +97,7 @@ fn abc_instance(obj: &Value, marker: StaticStrings, vm: &mut VM<'_>) -> RunResul
     Ok(match marker {
         // The same answer `callable()` gives, which leaves out an instance of
         // a class with a `__call__`: Monty dispatches none.
-        StaticStrings::Callable => obj.is_callable(vm.heap),
+        StaticStrings::Callable => obj.is_callable(vm),
         StaticStrings::CoroutineType => held == Type::Coroutine,
         StaticStrings::Generator => held == Type::Generator,
         StaticStrings::Iterable => obj.py_is_iterable(vm),

@@ -8,18 +8,13 @@ notes below.
 
 ## Importing
 
-`from string.templatelib import Template, Interpolation` and
-`import string.templatelib as tl` both work.
+`from string.templatelib import Template, Interpolation`,
+`import string.templatelib as tl` and `import string.templatelib` all work, the
+last binding `string` as CPython does.
 
-- **`import string` raises `ModuleNotFoundError`.** Monty has no `string`
-    module; `templatelib` is registered under its full dotted name only.
-- **`import string.templatelib` (no alias) is rejected** with
-    `NotImplementedError: importing a submodule without an alias; use \`import
-    string.templatelib as <name>\` or \`from string.templatelib import <name>\``. Monty interns a dotted module path as one name and has no package objects, so the plain form would bind a name no expression can spell; CPython binds `string\` and reaches the submodule through it.
-- **`import string` type-checks anyway.** The vendored typeshed carries the
-    `string` package as an empty namespace so that `string.templatelib` resolves,
-    since the checker walks into a package only when it exists; the package itself
-    still raises at runtime.
+- **`string` holds `templatelib` alone.** `import string` gives a package with
+    no other attribute, so `string.ascii_letters` and the rest of CPython's
+    `string` module raise `AttributeError`.
 
 ## Module contents
 

@@ -16,38 +16,13 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::{HashValue, identity_hash},
     heap::{
-        BorrowedHeapReadMut, DropGuard, DropWithContext, HeapId, HeapItem, HeapObjectRead, HeapRead,
+        BorrowedHeapReadMut, DropGuard, DropWithContext, HeapId, HeapItem, HeapObjectRead, HeapReadMut,
         heap_read_ref_as_field_mut,
     },
     intern::StaticStrings,
     types::{Union, str::allocate_string},
     value::{EitherStr, Value},
 };
-
-/// The `@dataclass(...)` options Monty implements.
-///
-/// Small and `Copy`, so it doubles as the payload of the *configured decorator*
-/// (`dataclass(frozen=True)`) without a heap allocation. Every other CPython
-/// flag is rejected at the call, so each is either stored here or known to hold
-/// its default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DataclassOptions {
-    /// Synthesize a field-wise `__eq__` (CPython's `eq`, default `True`).
-    pub eq: bool,
-    /// Reject attribute assignment, and hash by field values when `eq` is also
-    /// set (CPython's `frozen`, default `False`).
-    pub frozen: bool,
-}
-
-impl Default for DataclassOptions {
-    /// CPython's defaults: `eq=True, frozen=False`.
-    fn default() -> Self {
-        Self {
-            eq: true,
-            frozen: false,
-        }
-    }
-}
 
 /// The builtin type a class inherits, for the two a class may name as its base.
 ///
@@ -102,11 +77,6 @@ pub(crate) struct Class {
     /// because the chain cannot change afterwards, or `None` for a class that
     /// descends from `object` alone.
     base: Option<BuiltinBase>,
-    /// The `@dataclass(...)` options this class was decorated with, left at
-    /// CPython's defaults for a class that was not. Stands in for the dunders
-    /// CPython generates and Monty cannot yet install: baked in at decoration
-    /// so `__dataclass_params__` stays a report, not a rewritable control.
-    options: DataclassOptions,
     /// Boundary identity, generated lazily the first time the class (or one of
     /// its instances) crosses to the host; dumped with the heap so it stays
     /// stable across restores.
@@ -115,9 +85,6 @@ pub(crate) struct Class {
 
 impl Class {
     /// Creates a new class object from its name and member namespace.
-    ///
-    /// Dataclass options start at their defaults; `@dataclass` sets them with
-    /// [`HeapRead::set_dataclass_options`] once it has built the class.
     #[must_use]
     pub fn new(
         name: EitherStr,
@@ -132,7 +99,6 @@ impl Class {
             bases,
             globals,
             base,
-            options: DataclassOptions::default(),
             uuid: None,
         }
     }
@@ -156,7 +122,6 @@ impl Class {
             bases,
             globals,
             base: self.base,
-            options: self.options,
             uuid: None,
         }
     }
@@ -203,16 +168,6 @@ impl Class {
         self.uuid
     }
 
-    /// The `@dataclass(...)` options in force for this class.
-    ///
-    /// Meaningful only once [`dataclass_options`](crate::modules::dataclasses::dataclass_options)
-    /// has confirmed the class is a dataclass — a plain class reports the
-    /// defaults it was never decorated with.
-    #[must_use]
-    pub fn dataclass_options(&self) -> DataclassOptions {
-        self.options
-    }
-
     /// Returns the class name (interned or heap-owned).
     #[must_use]
     pub fn name(&self) -> &EitherStr {
@@ -249,8 +204,9 @@ impl Class {
     }
 }
 
-impl<'h> HeapRead<'h, Class> {
-    fn namespace_mut(&mut self) -> BorrowedHeapReadMut<'_, 'h, Dict> {
+impl<'h> HeapReadMut<'h, Class> {
+    /// Borrows the inline namespace for reader-gated attribute mutation.
+    fn namespace_mut(&self) -> BorrowedHeapReadMut<'_, 'h, Dict> {
         heap_read_ref_as_field_mut!(self, Class, namespace)
     }
 
@@ -269,18 +225,19 @@ impl<'h> HeapRead<'h, Class> {
     ///
     /// Existing instances observe the change immediately: instance attribute reads
     /// fall through to this namespace.
-    pub fn set_attr(&mut self, name: Value, value: Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
+    pub fn set_attr(&self, name: Value, value: Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
         self.namespace_mut().set(name, value, vm)
     }
 
-    /// Records what `@dataclass(...)` decorated this class with.
+    /// Removes a class attribute, returning it for the caller to drop.
     ///
-    /// Called once per decoration, so re-decorating replaces the options as it
-    /// replaces the fields. Assigning to `__dataclass_params__` afterwards does
-    /// not reach here, which is what makes that object a report rather than a
-    /// control.
-    pub fn set_dataclass_options(&mut self, options: DataclassOptions, vm: &mut VM<'h>) {
-        self.get_mut(vm.heap).options = options;
+    /// Only `@dataclass` needs this, to clear the `field()` object a class body
+    /// bound for a factory-only field — CPython's decorator `delattr`s it.
+    pub fn pop_attr(&self, name: &Value, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
+        Ok(self.namespace_mut().pop(name, vm)?.map(|(key, value)| {
+            key.drop_with(vm);
+            value
+        }))
     }
 }
 

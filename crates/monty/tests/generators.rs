@@ -166,7 +166,7 @@ fn a_suspended_generator_survives_dump_and_load() {
     assert_eq!(feed(&mut repl, "next(g) == 0"), t(true));
     assert_eq!(feed(&mut repl, "next(g) == 1"), t(true));
 
-    let bytes = dump("gen.py", None, SessionRef::Idle(&repl)).unwrap();
+    let bytes = dump("gen.py", None, &[], SessionRef::Idle(&repl)).unwrap();
     let mut back = match Dump::load(&bytes).unwrap().state {
         Session::Idle(repl) => *repl,
         _ => panic!("dumped an idle session, loaded something else"),
@@ -189,7 +189,7 @@ fn a_delegating_generator_survives_dump_and_load() {
     feed(&mut repl, "def outer():\n    yield from inner()\ng = outer()");
     assert_eq!(feed(&mut repl, "next(g) == 1"), t(true));
 
-    let bytes = dump("gen.py", None, SessionRef::Idle(&repl)).unwrap();
+    let bytes = dump("gen.py", None, &[], SessionRef::Idle(&repl)).unwrap();
     let mut back = match Dump::load(&bytes).unwrap().state {
         Session::Idle(repl) => *repl,
         _ => panic!("dumped an idle session, loaded something else"),
@@ -275,7 +275,7 @@ fn answer(mut progress: RunProgress, dumping: bool) -> (MontyObject, Vec<i64>) {
     let mut asked = Vec::new();
     loop {
         if dumping && matches!(progress, RunProgress::FunctionCall(_)) {
-            let bytes = dump("gen.py", None, SessionRef::Running(&progress)).unwrap();
+            let bytes = dump("gen.py", None, &[], SessionRef::Running(&progress)).unwrap();
             let Session::Running(back) = Dump::load(&bytes).unwrap().state else {
                 panic!("dumped a run, loaded something else")
             };

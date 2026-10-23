@@ -21,10 +21,12 @@ Install as [`pydantic-monty`](https://pypi.org/project/pydantic-monty/) — see 
             - AsyncMonty
             - AsyncMontySession
             - ResourceLimits
-            - AutoOSCalls
+            - OSPolicy
             - TimeZone
             - RandomSeed
             - CollectStreams
             - CollectString
             - TypeCheckFormat
             - PrintCallback
+            - ExternalModule
+            - ModuleValue

@@ -18,7 +18,6 @@ any code runs.
     *expressions* (`(x for x in ...)`) parse but currently materialize to a
     `list` rather than a lazy iterator, a known temporary divergence; see
     `iter__generator_expr_type.py`.
-- **`match` statements** — structural pattern matching is not supported.
 - **`try*` / `except*` exception groups** — PEP 654 syntax rejected.
 - **`async for` loops** and **async comprehensions**.
 - **Wildcard imports** (`from m import *`) — raises
@@ -37,11 +36,6 @@ targets in one statement (`del a, d[k]`), and a parenthesized list
 - **Module dunders cannot be deleted.** `del __name__` raises `NameError`,
     because the module dunders are resolved on read rather than stored. CPython
     deletes the real module-dict entry.
-
-## Expressions rejected at parse time
-
-- **Complex number literals** (`1j`, `2+3j`) —
-    `NotImplementedError: The monty syntax parser does not yet support complex constants`.
 
 ## Template strings (PEP 750)
 
@@ -77,6 +71,27 @@ exactly, except for the comprehension target restriction in
 - Class-body annotations count against the budget even though they are stringized rather than evaluated (see
     [typing.md](typing.md)), as do class-variable values and method parameter defaults; all three are walked before
     being parsed. CPython imposes no comparable limit on a stringized annotation.
+- A source longer than `CompileOptions::source_scan_threshold` bytes (4 KiB by default) is first scanned token by
+    token and rejected with the same `SyntaxError` when its estimated parser nesting exceeds the cap.
+    The scan bounds how much native stack the parser grows on a long source, memory the sandbox allocator does not
+    see; a shorter source cannot nest deeper than its length, so it skips the scan.
+- The scan counts open brackets, indented blocks, prefix operators, `**` right operands, lambda bodies, `else`
+    branches, f-string format specs and the `+` and `-` of `case` complex-literal patterns, so one expression holding
+    more than 200 of those open at once, with no comma, newline or lower-precedence operator between them, is rejected
+    even where CPython would accept it.
+    A long literal such as `[-1, -2, ...]` releases the count at every comma.
+    A logical line starting with a variable named `case` counts its binary `+` and `-` the same way.
+- The scan also enters string literals, because the type checker parses a forward-reference annotation such as
+    `x: "list[int]"` from the text between the quotes; a string longer than 200 bytes holding more than 200 unbalanced
+    brackets is rejected the same way even when it is plain data.
+- With type checking on, the whole AST is checked against the cap before the type checker runs, whatever the source's
+    length.
+    That includes function parameter and return annotations, which the compiler otherwise drops unchecked, so
+    `def f(a: A | B | ...)` with more than 200 members is rejected only when type checking.
+    Every string literal longer than the remaining budget is parsed as a forward-reference annotation and counted
+    from the depth it sits at, so a string that parses as a deeply nested expression is rejected even when it is data.
+- Only Rust hosts can change the threshold, with `CompileOptions { source_scan_threshold: n, ..CompileOptions::default() }`
+    (`0` scans every source, `usize::MAX` never scans); Python and JavaScript sessions use the default.
 
 ## Imports
 

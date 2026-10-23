@@ -13,7 +13,9 @@ bytecode compilation do not consume them. In workers, allocations retained by
 compiled code do count toward `max_memory`; transient compilation allocations
 are released before execution reaches its first memory checkpoint.
 Compilation has separate structural caps for parser nesting, bytecode operand
-sizes, comprehension nesting, and repeated `finally` expansion. A code object
+sizes, comprehension nesting, and repeated `finally` expansion. The parser
+grows its native stack outside the sandbox allocator, so a source over 4 KiB is
+scanned for nesting before it is parsed (see [language.md](language.md)). A code object
 requiring more than 1,024 emitted copies of `finally` bodies is rejected with
 `SyntaxError`; CPython has no equivalent limit. Production hosts should still
 isolate compilation when accepting untrusted source, as the subprocess and
@@ -43,8 +45,12 @@ Snippets rejected before execution retain none of their compilation products (se
     container, and string formatting with dynamic width or precision, for
     f-strings (`f"{v:>{w}}"`, `f"{v:.{p}f}"`), `str.format()`
     (`"{0:>{1}}".format(v, w)`, `"{0:.{1}f}".format(v, p)`) and `%`
-    formatting (`"%*d" % (w, v)`, `"%.*f" % (p, v)`). The pre-check
-    threshold is 100 KB:
+    formatting (`"%*d" % (w, v)`, `"%.*f" % (p, v)`), and every `binascii` and
+    `base64` conversion that can outgrow its input — including `base64.a85decode`,
+    where Ascii85's `z` (and `y` with `foldspaces=True`) stands for a whole
+    four-byte word. Each of these reserves what it pre-checked, so the buffer
+    never grows past it.
+    The pre-check threshold is 100 KB:
     estimates above that are checked against the remaining budget and rejected
     with `MemoryError` before allocation when they would exceed it.
 - `bigint.pow(base, exp)` estimates result size as `bits(base) * exp` with
@@ -99,16 +105,16 @@ without one is unlimited.
     with type checking. Use `max_processes` and an OS-level limit to bound a host.
 - **Per session, but against a fixed baseline.** A worker serves many checkouts
     and re-derives the cap for each session, always from the leanest the process
-    has been. Memory retained between sessions therefore consumes the headroom
+    has been, plus the type checker once a session has needed it.
+    Other memory retained between sessions therefore consumes the headroom
     rather than raising the cap, and a worker whose residue outgrows it is killed
     and replaced rather than allowed to grow indefinitely.
-- **Restoring a dump is bounded by the checkout it lands in.** `load_session` /
-    `load_snapshot` restore the dump's own limits (see
-    [snapshot configuration](../snapshots.md#what-restoring-does-and-does-not-carry)), and the cap is re-derived from
-    them once the session exists, but the load *itself* runs under the limit the
-    `checkout()` config applied. Restoring a large dump into a checkout with a
-    much smaller `max_memory` can therefore exceed it while loading; pass a
-    comparable limit to `checkout()`.
+- **Loading a dump makes no soft `max_memory` check.** Only the hard ceiling derived
+    from the checkout's `max_memory` bounds it, so restoring a large dump into a
+    checkout with a much smaller `max_memory` ends the worker rather than raising a
+    recoverable `MemoryError`; pass a comparable limit to `checkout()`.
+    The limits a restored session keeps are covered in
+    [snapshot configuration](../snapshots.md#what-restoring-does-and-does-not-carry).
 - **The wasm worker cannot classify a hard breach.** A soft breach is a normal
     `MemoryError`, but exceeding the hard limit traps the instance and the host
     reports [`MontyCrashedError`][pydantic_monty.MontyCrashedError]. Its `usize` is also 32 bits, so a limit near
@@ -134,6 +140,10 @@ indistinguishable from a stack overflow.
     bases 0, 1 and -1, which are computed.
 - `pow(base, exp, mod)` requires all integer arguments and rejects negative
     exponents (`ValueError`).
+    A call whose work estimate (exponent bits × modulus words²) is at most 2²⁷ runs
+    to completion without polling the time limit, about 0.2 s on a laptop; larger
+    calls poll between exponent bits, so a single squaring of the modulus is the
+    longest uninterruptible step.
 - `int(str_or_bytes, base)` rejects inputs over 4,300 digits before the
     potentially quadratic BigInt parse when the effective base is not a power
     of two. The fixed cap matches CPython's
@@ -266,6 +276,8 @@ indistinguishable from a stack overflow.
     `swapcase`) and `is*()` predicates are **not** polled and run to completion.
     Their cost is linear in the input, so the overshoot is bounded by the largest
     string `max_memory` admits.
+- `binascii` and `base64` conversions are **not** polled either, for the same
+    reason; a large input can overrun the budget into the grace period.
 - `base64.a85decode()` polls the clock every 64th byte that matches no
     Ascii85 digit and so reaches `ignorechars`. Each of those bytes is one
     `in` test against the container, so a large explicit `ignorechars`
@@ -294,10 +306,13 @@ indistinguishable from a stack overflow.
     resumes the feed budget it was dumped mid-way through; `max_turn_duration`'s
     clock is not, because a dump is only ever taken between turns.
 
-## JSON
+## JSON and TOML
 
 - `json.loads` rejects input nested deeper than 200 levels with
     `json.JSONDecodeError` (independent of the Python recursion limit).
+- `tomllib.loads` rejects inline arrays and tables nested deeper than 100 levels,
+    and dotted keys of more than 1,000 parts, with `RecursionError`; both are fixed
+    caps independent of the Python recursion limit (see [tomllib.md](tomllib.md)).
 
 ## After a terminal resource error
 
