@@ -6,6 +6,8 @@ on:
       - main
     tags:
       - '**'
+      # A tag furb-vX.Y.Z releases the crates of furb, which furb-publish.yml publishes, and none of the jobs here.
+      - '!furb-v*'
   pull_request: {}
   workflow_dispatch:
     inputs:
