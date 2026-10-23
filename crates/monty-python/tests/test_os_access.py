@@ -9,7 +9,7 @@ For tests of the AbstractOS interface via custom subclasses, see test_os_access_
 
 import datetime
 import time
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 from unittest.mock import Mock
 
@@ -48,6 +48,21 @@ def test_file_nested_within_file_rejected():
     assert str(exc_info.value) == snapshot(
         "Cannot put file MemoryFile(path=/test/file.txt/nested.txt, content='...', permissions=420) "
         "within sub-directory of file MemoryFile(path=/test/file.txt, content='...', permissions=420)"
+    )
+
+
+def test_file_replacing_directory_rejected_in_any_order():
+    """A file cannot replace a directory that holds another file, whichever order they appear in."""
+    with pytest.raises(ValueError) as exc_info:
+        OSAccess(
+            [
+                MemoryFile('/test/dir/nested.txt', content='inner'),
+                MemoryFile('/test/dir', content='outer'),
+            ]
+        )
+    assert str(exc_info.value) == snapshot(
+        "Cannot put file MemoryFile(path=/test/dir, content='...', permissions=420) "
+        "at path of directory {'nested.txt': MemoryFile(path=/test/dir/nested.txt, content='...', permissions=420)}"
     )
 
 
@@ -1404,6 +1419,113 @@ def test_rename_file_direct():
     assert fs.path_read_text(P('/test/new.txt')) == 'content'
 
 
+def test_cpython_rename_paths_to_themselves(tmp_path: Path):
+    """CPython treats file and directory self-renames as no-ops."""
+    file = tmp_path / 'file.txt'
+    file.write_text('content')
+    assert (file.rename(file) == file) == snapshot(True)
+    assert file.read_text() == snapshot('content')
+
+    empty_dir = tmp_path / 'empty'
+    empty_dir.mkdir()
+    assert (empty_dir.rename(empty_dir) == empty_dir) == snapshot(True)
+    assert list(empty_dir.iterdir()) == snapshot([])
+
+    nonempty_dir = tmp_path / 'nonempty'
+    nonempty_dir.mkdir()
+    child = nonempty_dir / 'child.txt'
+    child.write_text('child')
+    assert (nonempty_dir.rename(nonempty_dir) == nonempty_dir) == snapshot(True)
+    assert child.read_text() == snapshot('child')
+
+
+@pytest.mark.parametrize('via_monty', [False, True])
+@pytest.mark.parametrize(
+    ('source', 'target'),
+    [
+        ('/test/file.txt', '/test/file.txt'),
+        ('/test//file.txt', '/test/file.txt'),
+        ('/test/./file.txt', '/test/file.txt'),
+    ],
+)
+def test_rename_file_to_itself(via_monty: bool, source: str, target: str, monty_run: RunMonty):
+    """Self-renaming a file preserves its host object and contents."""
+    file = MemoryFile('/test/file.txt', content='content')
+    fs = OSAccess([file])
+
+    if via_monty:
+        result = monty_run(
+            f"from pathlib import Path; Path('{source}').rename(Path('{target}')); "
+            "path = Path('/test/file.txt'); before = path.read_text(); "
+            "written = path.write_text('updated'); (before, written, path.read_text())",
+            os=fs,
+        )
+        assert result == snapshot(('content', 7, 'updated'))
+    else:
+        fs.path_rename(P(source), P(target))
+        assert fs.path_read_text(P('/test/file.txt')) == snapshot('content')
+        assert fs.path_write_text(P('/test/file.txt'), 'updated') == snapshot(7)
+
+    assert (file.deleted is False) == snapshot(True)
+    assert file.path.as_posix() == snapshot('/test/file.txt')
+    assert (fs.path_exists(P('/test/file.txt')) is True) == snapshot(True)
+    assert [path.as_posix() for path in fs.path_iterdir(P('/test'))] == snapshot(['/test/file.txt'])
+    assert fs.path_read_text(P('/test/file.txt')) == snapshot('updated')
+
+
+@pytest.mark.parametrize('via_monty', [False, True])
+@pytest.mark.parametrize('nonempty', [False, True])
+def test_rename_directory_to_itself(via_monty: bool, nonempty: bool, monty_run: RunMonty):
+    """Self-renaming an empty or nonempty directory preserves its tree."""
+    files = [MemoryFile('/test/keep.txt', content='keep')]
+    if nonempty:
+        files.append(MemoryFile('/test/dir/child.txt', content='child'))
+    fs = OSAccess(files)
+    if not nonempty:
+        fs.path_mkdir(P('/test/dir'), parents=False, exist_ok=False)
+
+    if via_monty:
+        result = monty_run(
+            "from pathlib import Path; Path('/test/dir').rename(Path('/test/dir')); Path('/test/dir').exists()",
+            os=fs,
+        )
+        assert result == snapshot(True)
+    else:
+        fs.path_rename(P('/test/dir'), P('/test/dir'))
+
+    assert (fs.path_is_dir(P('/test/dir')) is True) == snapshot(True)
+    assert {path.as_posix() for path in fs.path_iterdir(P('/test'))} == snapshot({'/test/dir', '/test/keep.txt'})
+    if nonempty:
+        assert [path.as_posix() for path in fs.path_iterdir(P('/test/dir'))] == snapshot(['/test/dir/child.txt'])
+    else:
+        assert fs.path_iterdir(P('/test/dir')) == snapshot([])
+    assert fs.path_read_text(P('/test/keep.txt')) == snapshot('keep')
+    if nonempty:
+        assert fs.path_read_text(P('/test/dir/child.txt')) == snapshot('child')
+
+
+@pytest.mark.parametrize('via_monty', [False, True])
+def test_rename_missing_path_to_itself_still_fails(via_monty: bool, monty_run: RunMonty):
+    """A self-rename still checks that its source exists."""
+    fs = OSAccess([MemoryFile('/test/keep.txt', content='keep')])
+
+    if via_monty:
+        with pytest.raises(MontyRuntimeError) as exc_info:
+            monty_run(
+                "from pathlib import Path; Path('/test/missing').rename(Path('/test/missing'))",
+                os=fs,
+            )
+        assert str(exc_info.value) == snapshot(
+            "FileNotFoundError: [Errno 2] No such file or directory: '/test/missing' -> '/test/missing'"
+        )
+    else:
+        with pytest.raises(FileNotFoundError):
+            fs.path_rename(P('/test/missing'), P('/test/missing'))
+
+    assert {path.as_posix() for path in fs.path_iterdir(P('/test'))} == snapshot({'/test/keep.txt'})
+    assert fs.path_read_text(P('/test/keep.txt')) == snapshot('keep')
+
+
 def test_rename_source_not_found_direct():
     """path_rename raises FileNotFoundError when source doesn't exist via direct API."""
     fs = OSAccess()
@@ -1468,6 +1590,59 @@ def test_rename_directory_updates_file_paths_direct():
     # Verify old paths no longer exist
     assert fs.path_exists(P('/old/dir')) is False
     assert fs.path_exists(P('/old/dir/file1.txt')) is False
+
+
+@pytest.mark.parametrize('via_monty', [False, True])
+@pytest.mark.parametrize(
+    ('target', 'error_type', 'message'),
+    [
+        ('/a/moved', OSError, '[Errno 22] Invalid argument'),
+        ('/a/b/moved', OSError, '[Errno 22] Invalid argument'),
+        ('/a/b/c/moved', OSError, '[Errno 22] Invalid argument'),
+        ('/a/b/c', OSError, '[Errno 22] Invalid argument'),
+        ('/a/b', OSError, '[Errno 22] Invalid argument'),
+        ('/a/file.txt', NotADirectoryError, '[Errno 20] Not a directory'),
+    ],
+)
+def test_rename_directory_into_descendant(
+    monty_run: RunMonty, target: str, error_type: type[OSError], message: str, via_monty: bool
+):
+    """A rejected move into a descendant leaves the original tree usable."""
+    files = [MemoryFile('/a/file.txt', 'root data'), MemoryFile('/a/b/nested.txt', 'nested data')]
+    fs = OSAccess([*files, MemoryFile('/keep.txt', 'keep data')])
+    fs.path_mkdir(P('/a/b/c'), parents=False, exist_ok=False)
+
+    with pytest.raises(MontyRuntimeError if via_monty else error_type) as exc_info:
+        if via_monty:
+            monty_run(f'from pathlib import Path; Path("/a").rename(Path("{target}"))', os=fs)
+        else:
+            fs.path_rename(P('/a'), P(target))
+    prefix = f'{error_type.__name__}: ' if via_monty else ''
+    assert str(exc_info.value) == f"{prefix}{message}: '/a' -> '{target}'"
+
+    assert fs.path_iterdir(P('/')) == [P('/a'), P('/keep.txt')]
+    assert fs.path_iterdir(P('/a')) == [P('/a/file.txt'), P('/a/b')]
+    assert fs.path_iterdir(P('/a/b')) == [P('/a/b/nested.txt'), P('/a/b/c')]
+    assert fs.path_iterdir(P('/a/b/c')) == []
+    assert fs.path_read_text(P('/a/file.txt')) == 'root data'
+    assert fs.path_read_text(P('/a/b/nested.txt')) == 'nested data'
+    assert fs.path_read_text(P('/keep.txt')) == 'keep data'
+    assert [(file.path, file.deleted) for file in files] == [(P('/a/file.txt'), False), (P('/a/b/nested.txt'), False)]
+    if via_monty:
+        assert monty_run('from pathlib import Path; Path("/a/b/nested.txt").read_text()', os=fs) == 'nested data'
+
+
+@pytest.mark.parametrize('via_monty', [False, True])
+def test_rename_directory_similar_prefix(monty_run: RunMonty, via_monty: bool):
+    """A shared name prefix does not make the destination a descendant."""
+    fs = OSAccess([MemoryFile('/a/file.txt', 'data'), MemoryFile('/ab/keep.txt', 'keep')])
+    if via_monty:
+        monty_run('from pathlib import Path; Path("/a").rename(Path("/ab/moved"))', os=fs)
+    else:
+        fs.path_rename(P('/a'), P('/ab/moved'))
+    assert fs.path_exists(P('/a')) is False
+    assert fs.path_read_text(P('/ab/moved/file.txt')) == 'data'
+    assert fs.path_read_text(P('/ab/keep.txt')) == 'keep'
 
 
 # =============================================================================
