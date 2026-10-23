@@ -33,4 +33,5 @@ fn a_call_of_the_host_carries_the_compiled_patterns_of_the_run() {
     assert_eq!(call.function_name, "second");
     // The resumed run holds the pattern it compiled before the call beside the one it compiled after.
     assert_eq!(held(&call), "RePatternCache(2)");
+    drop(call.into_repl());
 }

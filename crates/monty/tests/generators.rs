@@ -5,7 +5,9 @@
 //! may not contain, and what the saved frame survives.
 
 use monty::{Dump, MontyRepl, MontyRun, RunProgress, Session, SessionRef, dump};
-use monty_types::{CompileOptions, ExtFunctionResult, MontyObject, NameLookupResult, PrintWriter, ResourceTracker};
+use monty_types::{
+    CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter, ResourceTracker,
+};
 
 fn session() -> MontyRepl {
     MontyRepl::new("gen.py", ResourceTracker::default(), CompileOptions::default())
@@ -279,7 +281,13 @@ fn answer(mut progress: RunProgress, dumping: bool) -> (MontyObject, Vec<i64>) {
             let Session::Running(back) = Dump::load(&bytes).unwrap().state else {
                 panic!("dumped a run, loaded something else")
             };
-            progress = *back;
+            // end the dumped original, which releases its heap; the restored copy carries on
+            let original = std::mem::replace(&mut progress, *back);
+            original
+                .into_function_call()
+                .unwrap()
+                .abort(MontyException::new(ExcType::RuntimeError, None), PrintWriter::Disabled)
+                .unwrap_err();
         }
         progress = match progress {
             RunProgress::NameLookup(lookup) => {
