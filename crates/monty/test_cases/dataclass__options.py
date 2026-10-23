@@ -45,7 +45,15 @@ try:
     assert False, 'expected a frozen assignment to raise'
 except FrozenInstanceError as e:
     assert str(e) == "cannot assign to field 'x'"
+    assert type(e).__name__ == 'FrozenInstanceError'
 assert p.x == 1
+
+# FrozenInstanceError is no builtin: only `dataclasses` binds it.
+try:
+    exec('FrozenInstanceError', {})
+    assert False, 'expected a bare FrozenInstanceError to raise NameError'
+except NameError as e:
+    assert str(e) == "name 'FrozenInstanceError' is not defined"
 
 # Assigning an attribute that is not a declared field is refused too.
 try:

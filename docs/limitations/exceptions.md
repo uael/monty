@@ -12,14 +12,15 @@ these built-ins; `raise MyClass()` on a plain user class raises
 `BaseException`, `Exception`, `SystemExit`, `KeyboardInterrupt`,
 `ArithmeticError`, `OverflowError`, `ZeroDivisionError`, `LookupError`,
 `IndexError`, `KeyError`, `RuntimeError`, `NotImplementedError`,
-`RecursionError`, `AttributeError`, `FrozenInstanceError`, `NameError`,
+`RecursionError`, `AttributeError`, `NameError`,
 `UnboundLocalError`, `ValueError`, `UnicodeDecodeError`, `UnicodeEncodeError`,
 `ImportError`, `ModuleNotFoundError`, `OSError`, `FileNotFoundError`, `FileExistsError`,
 `IsADirectoryError`, `NotADirectoryError`, `PermissionError`,
 `AssertionError`, `MemoryError`, `StopIteration`, `SyntaxError`,
 `TimeoutError`, `TypeError`.
 
-Module-specific: `json.JSONDecodeError` and `tomllib.TOMLDecodeError` (subclasses of `ValueError`),
+Module-specific: `dataclasses.FrozenInstanceError` (a subclass of `AttributeError`),
+`json.JSONDecodeError` and `tomllib.TOMLDecodeError` (subclasses of `ValueError`),
 `re.PatternError` / `re.error`, `io.UnsupportedOperation` (catchable as
 both `OSError` and `ValueError`, matching CPython's dual parentage).
 
