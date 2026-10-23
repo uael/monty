@@ -587,6 +587,35 @@ pub enum AssignTarget {
     },
 }
 
+/// One target of a `del` statement.
+///
+/// `del` accepts the same shapes as an assignment except a starred name, and a
+/// parenthesized list is equivalent to listing the targets (`del (a, b)` is
+/// `del a, b`), so the parser flattens those away and this enum stays flat.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DeleteTarget {
+    /// `del a`: unbinds the name, and raises if it was never bound.
+    Name(Identifier),
+    /// `del obj.attr`
+    Attr {
+        /// Expression evaluating to the object whose attribute is removed.
+        object: ExprLoc,
+        /// The attribute name.
+        attr: EitherStr,
+        /// Position of the full attribute expression (for traceback carets).
+        position: CodeRange,
+    },
+    /// `del container[index]`
+    Subscript {
+        /// Expression evaluating to the container.
+        object: ExprLoc,
+        /// Expression evaluating to the index, key or slice.
+        index: ExprLoc,
+        /// Position of the full subscript expression (for traceback carets).
+        position: CodeRange,
+    },
+}
+
 /// A generator clause in a comprehension: `for target in iter [if cond1] [if cond2]...`
 ///
 /// Represents one `for` clause with zero or more `if` filters. Multiple generators
@@ -839,6 +868,8 @@ pub enum Node<F> {
         /// Source position of the `class` statement (for error reporting).
         position: CodeRange,
     },
+    /// `del a, b.c, d[k]`: the targets are unbound left to right.
+    Delete(Vec<DeleteTarget>),
     /// Global variable declaration. Only present in parsed form, consumed during prepare.
     ///
     /// Declares that the listed names refer to module-level (global) variables,
