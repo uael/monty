@@ -433,6 +433,17 @@ pub enum Opcode {
     /// Raises `RuntimeError` if coroutine/future has already been awaited.
     Await = 102,
 
+    // === Generators ===
+    /// Suspend the running generator, handing TOS to whoever resumed it.
+    ///
+    /// A return that keeps the frame: the frame's stack region and its slice of
+    /// the exception stack move into the generator object, the frame is popped,
+    /// and the yielded value is pushed onto the resumer's operand stack exactly
+    /// where a call's return value would land. Resuming pushes the frame back
+    /// and leaves the sent value on top, which is what this instruction's result
+    /// is, so `x = yield v` reads it.
+    Yield = 130,
+
     // === Unpacking ===
     /// Unpack TOS into n values. Operand: u8 count.
     UnpackSequence = 103,
@@ -638,6 +649,7 @@ impl Opcode {
     fn operand_shape(self) -> OperandShape {
         match self {
             Self::Pop
+            | Self::Yield
             | Self::Dup
             | Self::Dup2
             | Self::Rot2
@@ -960,7 +972,7 @@ impl Opcode {
             (ListToTuple, Operand::None) => 0,
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
-            (GetIter | Await, Operand::None) => 0,
+            (GetIter | Await | Yield, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
             (ReturnValue, Operand::None) => -1,

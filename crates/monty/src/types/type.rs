@@ -146,6 +146,8 @@ pub enum Type {
     CallableIterator,
     /// Coroutine type for async functions and external futures.
     Coroutine,
+    /// A generator object, from calling a function whose body yields.
+    Generator,
     Module,
     /// Marker types like stdout/stderr - displays as "_io.TextIOWrapper"
     #[strum(serialize = "_io.TextIOWrapper")]
@@ -179,8 +181,10 @@ pub enum Type {
     /// The iterator `os.scandir()` returns.
     #[strum(serialize = "posix.ScandirIterator")]
     ScandirIterator,
-    /// The iterator `os.walk()` and `Path.walk()` return; CPython's is a generator.
-    #[strum(serialize = "generator")]
+    /// The iterator `os.walk()` and `Path.walk()` return; CPython's is a generator,
+    /// and [`name`](Self::name) shows it as one. Its own name stays apart from
+    /// [`Generator`](Self::Generator)'s, so the name `generator` parses to that.
+    #[strum(serialize = "os._walk_generator")]
     WalkGenerator,
     // Variants serialize by name into dumps: renaming one needs `#[serde(alias)]`.
     #[strum(serialize = "tuple_iterator")]
@@ -365,6 +369,7 @@ impl Type {
         match self {
             Self::Instance(class_id) => class_name(class_id, heap, interns),
             Self::Exception(exc_type) => Cow::Borrowed(exc_type.into()),
+            Self::WalkGenerator => Cow::Borrowed(Self::Generator.into()),
             other => Cow::Borrowed(other.into()),
         }
     }
@@ -496,7 +501,9 @@ impl Type {
     pub(crate) const fn is_iterator(self) -> bool {
         matches!(
             self,
-            Self::ListIterator
+            // A generator is its own iterator, which is what `iter()` asks.
+            Self::Generator
+                | Self::ListIterator
                 | Self::DequeIterator
                 | Self::TupleIterator
                 | Self::StrAsciiIterator

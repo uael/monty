@@ -284,6 +284,7 @@ ExcType = Literal[
     'AssertionError',
     'MemoryError',
     'StopIteration',
+    'GeneratorExit',
     'SyntaxError',
     'TimeoutError',
     'TypeError',

@@ -325,6 +325,7 @@ e19 = TimeoutError('error')
 e20 = TypeError('error')
 e21 = ValueError('error')
 e22 = StopIteration()
+e23 = GeneratorExit()
 
 
 # === Exception Inheritance ===

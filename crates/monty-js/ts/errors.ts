@@ -308,6 +308,7 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   'binascii.Error',
   'binascii.Incomplete',
   '_csv.Error',
+  'GeneratorExit',
 ])
 
 /**
