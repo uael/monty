@@ -2067,6 +2067,22 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
         HeapData::GenericAlias(alias) => alias.for_each_child_id(on_child),
         HeapData::Union(union) => union.for_each_child_id(on_child),
         HeapData::LruCache(cache) => cache.for_each_child_id(on_child),
+        // Mirrors `py_dec_ref_ids_for_data`: a template owns its two tuples and
+        // an interpolation its four fields.
+        HeapData::Template(template) => {
+            for value in template.owned_values() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::Interpolation(interpolation) => {
+            for value in interpolation.owned_values() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
         HeapData::Module(m) => {
             // Module attrs can contain references to heap values
             if !m.has_refs() {
@@ -2228,6 +2244,9 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::GenericAlias(alias) => alias.py_dec_ref_ids(stack),
         HeapData::Union(union) => union.py_dec_ref_ids(stack),
         HeapData::LruCache(cache) => cache.py_dec_ref_ids(stack),
+        // Release the template and interpolation references (mirrors `for_each_child_id`).
+        HeapData::Template(template) => template.py_dec_ref_ids(stack),
+        HeapData::Interpolation(interpolation) => interpolation.py_dec_ref_ids(stack),
         HeapData::Module(m) => m.py_dec_ref_ids(stack),
         HeapData::Coroutine(coro) => {
             // Decrement ref count for namespace values that are heap references

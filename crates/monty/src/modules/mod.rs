@@ -35,6 +35,7 @@ pub(crate) mod os_path;
 pub(crate) mod pathlib;
 pub(crate) mod random;
 pub(crate) mod re;
+pub(crate) mod string_templatelib;
 pub(crate) mod sys;
 pub(crate) mod time;
 pub(crate) mod tomllib;
@@ -86,6 +87,11 @@ pub(crate) enum StandardLib {
     Random,
     /// The `copy` module providing `copy()` and `deepcopy()`.
     Copy,
+    /// The `string.templatelib` module exposing the PEP 750 `Template` and
+    /// `Interpolation` type objects (no functions).
+    StringTemplatelib,
+    /// The `string` package, which holds `string.templatelib` alone.
+    String,
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
@@ -128,6 +134,8 @@ impl StandardLib {
             StaticStrings::Binascii => Some(Self::Binascii),
             StaticStrings::Random => Some(Self::Random),
             StaticStrings::Copy => Some(Self::Copy),
+            StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
+            StaticStrings::StringAttr => Some(Self::String),
             StaticStrings::Time => Some(Self::Time),
             StaticStrings::Hashlib => Some(Self::Hashlib),
             StaticStrings::Bisect => Some(Self::Bisect),
@@ -169,6 +177,8 @@ impl StandardLib {
             Self::Binascii => binascii::create_module(vm),
             Self::Random => random::create_module(vm),
             Self::Copy => copy::create_module(vm),
+            Self::StringTemplatelib => string_templatelib::create_module(vm),
+            Self::String => string_templatelib::create_package(vm),
             Self::Time => time::create_module(vm),
             Self::Hashlib => hashlib::create_module(vm),
             Self::Bisect => bisect::create_module(vm),

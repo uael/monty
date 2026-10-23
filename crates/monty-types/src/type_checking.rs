@@ -212,6 +212,7 @@ pub const SANDBOX_MODULE_NAMES: &[&str] = &[
     "posixpath",
     "random",
     "re",
+    "string",
     "sys",
     "time",
     "tomllib",

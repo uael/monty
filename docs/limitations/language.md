@@ -30,9 +30,10 @@ any code runs.
 - **Wildcard imports** (`from m import *`) — raises
     `` NotImplementedError: "Wildcard imports (`from ... import *`) are not supported" ``.
 
-## Expressions rejected at parse time
+## Template strings (PEP 750)
 
-- **Template strings (t-strings)** — PEP 750.
+`t'...'` builds a `string.templatelib.Template`. See
+[string_templatelib.md](string_templatelib.md).
 
 ## Starred unpacking
 

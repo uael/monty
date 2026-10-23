@@ -40,6 +40,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
     see [modules.md](modules.md#host-modules)
 - Starred unpacking everywhere CPython allows it
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)
+- PEP 750 `t'...'` template strings, see [string_templatelib.md](string_templatelib.md)
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
 
@@ -52,7 +53,6 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - PEP 695 `type` aliases
 - `async with`, `async for` and async comprehensions
 - Wildcard imports (`from m import *`)
-- t-strings
 
 **Missing in other ways:**
 

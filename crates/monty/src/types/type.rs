@@ -27,7 +27,7 @@ use crate::{
         long_int::INT_MAX_STR_DIGITS,
         path,
         str::{StringRepr, allocate_string},
-        time,
+        template, time,
         timedelta::{self, DAY_MICROSECONDS, MAX_TIMEDELTA_DAYS, MIN_TIMEDELTA_DAYS},
         timezone::{self, MAX_TIMEZONE_CONSTANT_SECONDS},
     },
@@ -325,6 +325,14 @@ pub enum Type {
     /// A resolved `csv` dialect, CPython's `_csv.Dialect`.
     #[strum(serialize = "_csv.Dialect")]
     CsvDialect,
+    /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
+    /// Dotted like `re.Match`; only `__name__` diverges from CPython's bare
+    /// `'Template'`. See `limitations/string_templatelib.md`.
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -808,6 +816,8 @@ impl Type {
             Self::Path => Path::init(vm, args),
             Self::Partial => Partial::init(vm, args),
             Self::Random => Random::init(vm, args),
+            Self::Template => template::template_init(vm, args),
+            Self::Interpolation => template::interpolation_init(vm, args),
             Self::Blake2b => hashlib::blake2_init(Blake2Kind::Blake2b, vm, args),
             Self::Blake2s => hashlib::blake2_init(Blake2Kind::Blake2s, vm, args),
 
