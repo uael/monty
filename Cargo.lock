@@ -2727,6 +2727,7 @@ dependencies = [
  "monty-type-checking",
  "monty-types",
  "rustyline",
+ "strum 0.27.2",
  "tempfile",
  "tracing",
 ]
