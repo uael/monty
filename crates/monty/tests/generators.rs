@@ -4,6 +4,8 @@
 //! runs against both interpreters. Here is the boundary: what a generator body
 //! may not contain, and what the saved frame survives.
 
+use std::mem;
+
 use monty::{Dump, MontyRepl, MontyRun, RunProgress, Session, SessionRef, dump};
 use monty_types::{
     CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter,
@@ -283,7 +285,7 @@ fn answer(mut progress: RunProgress, dumping: bool) -> (MontyObject, Vec<i64>) {
                 panic!("dumped a run, loaded something else")
             };
             // end the dumped original, which releases its heap; the restored copy carries on
-            let original = std::mem::replace(&mut progress, *back);
+            let original = mem::replace(&mut progress, *back);
             original
                 .into_function_call()
                 .unwrap()
