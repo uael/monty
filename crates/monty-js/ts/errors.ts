@@ -307,6 +307,7 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   're.PatternError',
   'binascii.Error',
   'binascii.Incomplete',
+  'asyncio.exceptions.CancelledError',
   '_csv.Error',
 ])
 

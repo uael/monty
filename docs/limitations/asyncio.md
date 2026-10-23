@@ -5,7 +5,7 @@ external calls. The sandbox schedules its own tasks; host event loops execute ex
 
 ## Module surface
 
-The `asyncio` module exposes exactly three functions:
+The `asyncio` module exposes three functions and one exception class:
 
 - `asyncio.run(coro)` — runs a coroutine to completion. Returns the value
     the coroutine `return`s, or re-raises an exception from it.
@@ -19,15 +19,22 @@ The `asyncio` module exposes exactly three functions:
 - `asyncio.sleep(delay, result=None)` — waits as the session's `sleep` setting
     says, then produces `result`. See
     [below](#asynciosleep-waits-at-the-call-not-at-the-await).
+- `asyncio.CancelledError` — raisable and catchable, but **nothing in Monty
+    raises it**: no await is ever cancelled. A sibling of a failing `gather()`
+    keeps running rather than having this raised at its `await`
+    ([below](#siblings-left-running-by-a-failed-gather-only-advance-while-something-else-suspends)).
+    It reprs as `asyncio.exceptions.CancelledError('...')` where CPython gives
+    `CancelledError('...')`, like the other qualified exception classes (see
+    [exceptions.md](exceptions.md)).
 
 Not implemented (raise `AttributeError`):
 
-`create_task`, `wait`, `wait_for`, `shield`, `to_thread`,
+`create_task`, `current_task`, `wait`, `wait_for`, `shield`, `to_thread`,
 `new_event_loop`, `get_event_loop`, `get_running_loop`, `Queue`, `Lock`,
 `Semaphore`, `Event`, `Future`, `Task`, `TaskGroup`, `timeout`,
 `timeout_at`, `Timeout`, `as_completed`, `iscoroutine`, `ensure_future`,
-the whole `asyncio.subprocess` / `asyncio.streams` / `asyncio.protocols`
-surface.
+`InvalidStateError`, the whole `asyncio.subprocess` / `asyncio.streams` /
+`asyncio.protocols` surface.
 
 `asyncio.timeout()` / `asyncio.timeout_at()` would be unreachable in any
 case: they are async context managers, and `async with` is rejected at parse
