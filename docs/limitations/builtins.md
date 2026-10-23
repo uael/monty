@@ -9,7 +9,7 @@ Python.
 `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `eval`, `exec`, `filter`,
 `format`, `getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `iter`, `len`,
 `locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`, `repr`,
-`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
+`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `vars`, `zip`.
 `eval`, `exec` and `locals` are described in [eval_exec.md](eval_exec.md).
 
 ## Implemented type constructors (also builtins)
@@ -23,7 +23,7 @@ Python.
 These raise `NameError`:
 
 - **Code objects and imports**: `compile`, `__import__`.
-- **Namespace introspection**: `globals`, `vars`, `dir`.
+- **Namespace introspection**: `globals`, `dir`.
 - **Interactive**: `input`, `breakpoint`, `help`, and the other names that the `site` module adds:
     `exit`, `quit`, `copyright`, `credits`, `license`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`. (`property` is a name, but
@@ -169,6 +169,13 @@ raises `NameError`. `crates/monty-runtime/tests/typeshed_builtins.rs` holds the 
     [classes.md](classes.md)), a `|` union of those (see [typing.md](typing.md)),
     or a tuple of those. Passing a host-supplied dataclass / namedtuple as the
     second argument raises `TypeError`.
+- **`vars(obj)` gives a copy, not the live `__dict__`.** CPython gives the
+    mapping of the object itself, so `vars(obj)['x'] = 1` sets the attribute.
+    Monty makes a new dict from the namespace, so a write to it does not change
+    the object, as for `locals()` (see [eval_exec.md](eval_exec.md)).
+    `vars()` with no argument is `locals()`, as in CPython. Only a module, a
+    class and an instance have a namespace. Each other object raises
+    `TypeError: vars() argument must have __dict__ attribute`.
 - **`iter()`** — see [iter.md](iter.md) for iterator and `iter(callable, sentinel)` divergences.
 - **`pow(base, exp, mod)` with integer operands** rejects negative exponents with `ValueError`
     instead of computing a modular inverse. Non-modular exponents whose result cannot be materialized raise
