@@ -53,6 +53,13 @@ pub(crate) struct Class {
     /// Defaults to empty, so a dump made before bases existed still loads.
     #[serde(default)]
     bases: Vec<HeapId>,
+    /// The `exec()` / `eval()` globals dict the class was made under, as an
+    /// OWNED reference, or `None` for a class of the module: what a function
+    /// made under a dict carries too, so that a copy which makes again what
+    /// was made under one dict knows which classes are its. Defaults to
+    /// `None`, so a dump made before it existed still loads.
+    #[serde(default)]
+    globals: Option<HeapId>,
     /// Boundary identity, generated lazily the first time the class (or one of
     /// its instances) crosses to the host; dumped with the heap so it stays
     /// stable across restores.
@@ -62,11 +69,33 @@ pub(crate) struct Class {
 impl Class {
     /// Creates a new class object from its name and member namespace.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, globals: Option<HeapId>) -> Self {
         Self {
             name,
             namespace,
             bases,
+            globals,
+            uuid: None,
+        }
+    }
+
+    /// The globals dict the class was made under, borrowed, or `None` for a
+    /// class of the module.
+    #[must_use]
+    pub fn globals(&self) -> Option<HeapId> {
+        self.globals
+    }
+
+    /// This class made again: its name over another namespace, other bases and
+    /// another globals dict, each an OWNED reference the copy takes, with no
+    /// boundary identity yet, since the copy has crossed nowhere.
+    #[must_use]
+    pub(crate) fn made_again(&self, namespace: Dict, bases: Vec<HeapId>, globals: Option<HeapId>) -> Self {
+        Self {
+            name: self.name.clone(),
+            namespace,
+            bases,
+            globals,
             uuid: None,
         }
     }
@@ -298,7 +327,8 @@ impl HeapItem for Class {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         self.namespace.py_dec_ref_ids(stack);
         // Mirrors the GC child walk in `heap::for_each_child_id`: a class owns
-        // a reference on each of its bases.
+        // a reference on each of its bases and on the dict it was made under.
         stack.extend(self.bases.iter().copied());
+        stack.extend(self.globals);
     }
 }

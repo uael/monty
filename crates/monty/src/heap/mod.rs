@@ -1997,8 +1997,8 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
         }
         HeapData::Class(class) => {
             // The class namespace holds method/class-variable values, and the
-            // class owns a reference on each of its bases. Mirrors
-            // `Class::py_dec_ref_ids`.
+            // class owns a reference on each of its bases and on the dict it
+            // was made under. Mirrors `Class::py_dec_ref_ids`.
             for (k, v) in class.namespace() {
                 if let Value::Ref(id) = k {
                     on_child(*id);
@@ -2009,6 +2009,9 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
             }
             for base in class.bases() {
                 on_child(*base);
+            }
+            if let Some(globals) = class.globals() {
+                on_child(globals);
             }
         }
         HeapData::Instance(instance) => {
@@ -2072,6 +2075,12 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
         HeapData::GenericAlias(alias) => alias.for_each_child_id(on_child),
         HeapData::Union(union) => union.for_each_child_id(on_child),
         HeapData::LruCache(cache) => cache.for_each_child_id(on_child),
+        // Mirrors `py_dec_ref_ids_for_data`: a property owns its getter.
+        HeapData::ClassProperty(property) => {
+            if let Value::Ref(id) = property.fget() {
+                on_child(*id);
+            }
+        }
         HeapData::Module(m) => {
             // Module attrs can contain references to heap values
             if !m.has_refs() {
@@ -2233,6 +2242,8 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::GenericAlias(alias) => alias.py_dec_ref_ids(stack),
         HeapData::Union(union) => union.py_dec_ref_ids(stack),
         HeapData::LruCache(cache) => cache.py_dec_ref_ids(stack),
+        // Release the getter (mirrors `for_each_child_id`).
+        HeapData::ClassProperty(property) => property.py_dec_ref_ids(stack),
         HeapData::Module(m) => m.py_dec_ref_ids(stack),
         HeapData::Coroutine(coro) => {
             // Decrement ref count for namespace values that are heap references
