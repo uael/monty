@@ -45,6 +45,7 @@ impl FrozenFunction {
         let source = self.source();
         let mut overlay = CompileInterns::new(interns);
         let index = overlay.functions_len();
+        let id = overlay.next_function_id();
         let mut globals = NameMap::new();
         let nodes =
             parse_with_interner(source, "<monty-frozen>", &mut overlay).map_err(|e| e.into_run_error(source))?;
@@ -61,8 +62,6 @@ impl FrozenFunction {
             1,
             "frozen source must take its dependencies as arguments"
         );
-        // Successful compilation checked the bytecode's function-ID limit.
-        let id = FunctionId::from_index(u16::try_from(index).expect("compiled function ID fits u16"));
         Ok((id, overlay))
     }
 

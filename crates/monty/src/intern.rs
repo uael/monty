@@ -52,12 +52,10 @@ impl StringId {
     /// Executor-independent ID for the empty string, immediately after ASCII.
     pub const EMPTY: Self = Self(128);
 
-    /// Creates a StringId from a raw index value.
-    ///
-    /// Used by the bytecode VM to reconstruct StringIds from operands stored
-    /// in bytecode. The caller is responsible for ensuring the index is valid.
+    /// Reads a string ID from an operand of a body that a dump from before the code tables wrote,
+    /// where the operand is the session ID itself.
     #[inline]
-    pub fn from_index(index: u16) -> Self {
+    pub(crate) fn from_index(index: u16) -> Self {
         Self(u32::from(index))
     }
 
@@ -2516,12 +2514,10 @@ impl LongIntId {
 pub struct FunctionId(u32);
 
 impl FunctionId {
-    /// Creates a FunctionId from a raw index value.
-    ///
-    /// Used by the bytecode VM to reconstruct FunctionIds from operands stored
-    /// in bytecode. The caller is responsible for ensuring the index is valid.
+    /// Reads a function ID from an operand of a body that a dump from before the code tables wrote,
+    /// where the operand is the session ID itself.
     #[inline]
-    pub fn from_index(index: u16) -> Self {
+    pub(crate) fn from_index(index: u16) -> Self {
         Self(u32::from(index))
     }
 
