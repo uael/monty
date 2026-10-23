@@ -3232,14 +3232,8 @@ fn collect_cell_vars_from_node(
             }
         }
         // Handle expressions that may contain lambdas
-        Node::Expr(expr) | Node::Return(Some(expr)) | Node::Raise(Some(expr)) => {
+        Node::Expr(expr) | Node::Return(Some(expr)) => {
             collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
-        }
-        Node::Assert { test, msg } => {
-            collect_cell_vars_from_expr(test, our_locals, cell_vars, interner);
-            if let Some(m) = msg {
-                collect_cell_vars_from_expr(m, our_locals, cell_vars, interner);
-            }
         }
         Node::Return(None) => {}
         Node::Assign { object, .. } => {
