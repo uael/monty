@@ -6,7 +6,8 @@
 
 use monty::{Dump, MontyRepl, MontyRun, RunProgress, Session, SessionRef, dump};
 use monty_types::{
-    CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter, ResourceTracker,
+    CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter,
+    ResourceTracker,
 };
 
 fn session() -> MontyRepl {
