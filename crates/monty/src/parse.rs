@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, fmt};
+use std::{borrow::Cow, cmp::Ordering, fmt, mem};
 
 use ahash::AHashSet;
 use monty_types::{FormatComplex, FormatFloat, MontyException, StackFrame, StringRepr, bytes_repr};
@@ -333,6 +333,9 @@ pub struct Parser<'a, 'i> {
     /// class's traceback frame needs the concrete position. Read only by
     /// [`Parser::class_keyword_range`].
     class_keyword_offsets: Vec<TextSize>,
+    /// Whether the statements being parsed are the body of a function, the
+    /// only place CPython lets a `return` stand.
+    in_function: bool,
 }
 
 impl<'a, 'i> Parser<'a, 'i> {
@@ -348,6 +351,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             interner,
             depth_remaining: MAX_NESTING_DEPTH,
             class_keyword_offsets,
+            in_function: false,
         }
     }
 
@@ -622,6 +626,10 @@ impl<'a, 'i> Parser<'a, 'i> {
                 Ok(Node::FunctionDef { def, decorators })
             }
             Stmt::ClassDef(c) => self.parse_class_def(c),
+            Stmt::Return(ast::StmtReturn { range, .. }) if !self.in_function => Err(ParseError::syntax(
+                "'return' outside function",
+                self.convert_range(range),
+            )),
             Stmt::Return(ast::StmtReturn { value, .. }) => Ok(Node::Return(match value {
                 Some(value) => Some(self.parse_expression(*value)?),
                 None => None,
@@ -1031,7 +1039,10 @@ impl<'a, 'i> Parser<'a, 'i> {
 
         let name = self.identifier(&function.name.id, function.name.range);
         // Parse function body recursively
-        let body = self.parse_statements(function.body)?;
+        let outer = mem::replace(&mut self.in_function, true);
+        let body = self.parse_statements(function.body);
+        self.in_function = outer;
+        let body = body?;
         let is_async = function.is_async;
 
         Ok((
