@@ -1,11 +1,16 @@
 use std::fmt::Write;
 
 use monty_types::MontyUuid;
+use smallvec::{SmallVec, smallvec};
 
-use super::{Dict, LazyHeapSet, PyTrait, Type, attribute_name_value};
+use super::{
+    Dict, LazyHeapSet, PyTrait, Type, attribute_name_value,
+    tuple::{TUPLE_INLINE_CAPACITY, allocate_tuple},
+};
 use crate::{
     args::ArgValues,
     boundary_uuid::create_uuid,
+    builtins::Builtins,
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
@@ -14,7 +19,7 @@ use crate::{
         BorrowedHeapReadMut, DropGuard, DropWithContext, HeapId, HeapItem, HeapObjectRead, HeapReadMut, HeapReader,
         heap_read_ref_as_field_mut,
     },
-    intern::{Interns, StringId},
+    intern::{Interns, StaticStrings, StringId},
     types::{Union, str::allocate_string},
     value::{EitherStr, Value},
 };
@@ -27,9 +32,11 @@ use crate::{
 /// work via reference identity, so there is no separate type-id counter.
 ///
 /// Calling a class (`Foo(...)`) constructs an [`Instance`](super::Instance); see
-/// `instantiate_class` in the VM's call module. Inheritance is not yet supported,
-/// but a future `bases: Vec<HeapId>` field would slot in here without disturbing
-/// the rest of the design.
+/// `instantiate_class` in the VM's call module.
+///
+/// Inheritance is single: `bases` holds at most one class, and every lookup
+/// walks that chain derived-first. There is no C3 linearization here because
+/// there is nothing to linearize.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Class {
     /// Class name (e.g. `Foo`), used for `repr` and `__name__`. Interned for
@@ -39,6 +46,13 @@ pub(crate) struct Class {
     name: EitherStr,
     /// Members: method name / class-variable name -> value.
     namespace: Dict,
+    /// The base class, as an OWNED reference, or empty for a root class. A
+    /// `Vec` rather than an `Option` because the field is what `__bases__`
+    /// would report and what a future second base would extend; both
+    /// `py_dec_ref_ids` and the GC child walk must report every id in it.
+    /// Defaults to empty, so a dump made before bases existed still loads.
+    #[serde(default)]
+    bases: Vec<HeapId>,
     /// Boundary identity, generated lazily the first time the class (or one of
     /// its instances) crosses to the host; dumped with the heap so it stays
     /// stable across restores.
@@ -48,12 +62,19 @@ pub(crate) struct Class {
 impl Class {
     /// Creates a new class object from its name and member namespace.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>) -> Self {
         Self {
             name,
             namespace,
+            bases,
             uuid: None,
         }
+    }
+
+    /// The base classes, as borrowed ids. Owned by this class.
+    #[must_use]
+    pub fn bases(&self) -> &[HeapId] {
+        &self.bases
     }
 
     /// Boundary identity of the class, generated and stored on first use so
@@ -80,12 +101,41 @@ impl Class {
     pub fn namespace(&self) -> &Dict {
         &self.namespace
     }
+
+    /// `__bases__`: the class this one was made with, as a tuple of one, since
+    /// inheritance is single here. A class of the session stands as itself,
+    /// and a class made with none as `object`, which is what CPython reports
+    /// for each.
+    pub(crate) fn bases_tuple(&self, vm: &VM<'_>) -> Value {
+        let items: SmallVec<[Value; TUPLE_INLINE_CAPACITY]> = if self.bases.is_empty() {
+            smallvec![Value::Builtin(Builtins::Type(Type::Object))]
+        } else {
+            self.bases
+                .iter()
+                .map(|id| {
+                    vm.heap.inc_ref(*id);
+                    Value::Ref(*id)
+                })
+                .collect()
+        };
+        allocate_tuple(items, vm.heap)
+    }
 }
 
 impl<'h> HeapReadMut<'h, Class> {
     /// Borrows the inline namespace for reader-gated attribute mutation.
     fn namespace_mut(&self) -> BorrowedHeapReadMut<'_, 'h, Dict> {
         heap_read_ref_as_field_mut!(self, Class, namespace)
+    }
+
+    /// An attribute the class answers from what it is rather than from its
+    /// namespace: `__bases__`, which is the class's own and no instance's, and
+    /// what [`class_default`] gives every class and its instances.
+    fn synthesized(&self, attr: &str, vm: &VM<'h>) -> Option<Value> {
+        if attr == "__bases__" {
+            return Some(self.get(vm.heap).bases_tuple(vm));
+        }
+        class_default(attr, vm)
     }
 
     /// Sets a class attribute (`Foo.x = 1`), returning the previous value (if any)
@@ -189,10 +239,13 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
         // Otherwise look up a member (method or class variable) in the namespace.
         match self.get(vm.heap).namespace.get_by_str(attr_str, vm.heap, vm.interns) {
             Some(value) => Ok(Some(CallResult::Value(value.clone_with_heap(vm.heap)))),
-            None => Err(ExcType::attribute_error_type(
-                self.get(vm.heap).name.as_str(vm.interns),
-                attr_str,
-            )),
+            None => match self.synthesized(attr_str, vm) {
+                Some(value) => Ok(Some(CallResult::Value(value))),
+                None => Err(ExcType::attribute_error_type(
+                    self.get(vm.heap).name.as_str(vm.interns),
+                    attr_str,
+                )),
+            },
         }
     }
 
@@ -214,7 +267,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
             .get(vm.heap)
             .namespace
             .get_by_str(attr_str, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap));
+            .map(|v| v.clone_with_heap(vm.heap))
+            .or_else(|| self.synthesized(attr_str, vm));
         if let Some(member) = member {
             defer_drop!(member, vm);
             vm.call_function(member, args)
@@ -228,8 +282,23 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Class> {
     }
 }
 
+/// A class attribute Monty synthesizes rather than keeping in the namespace
+/// and that an instance of the class inherits, which is `__module__` alone;
+/// `__bases__` is the class's own, see [`Class::bases_tuple`].
+///
+/// Monty runs one module, so every class is written in `__main__`, which is
+/// what `__name__` reads there too. In CPython this is an ordinary entry of the
+/// class dict, so it is read after the namespace: a class that binds the name
+/// itself shadows it, and an instance of the class inherits it.
+pub(crate) fn class_default(attr: &str, vm: &VM<'_>) -> Option<Value> {
+    (attr == "__module__").then(|| Value::InternString(vm.interns.intern_static(StaticStrings::DunderMain)))
+}
+
 impl HeapItem for Class {
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         self.namespace.py_dec_ref_ids(stack);
+        // Mirrors the GC child walk in `heap::for_each_child_id`: a class owns
+        // a reference on each of its bases.
+        stack.extend(self.bases.iter().copied());
     }
 }

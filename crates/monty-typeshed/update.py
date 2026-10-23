@@ -29,6 +29,7 @@ ALLOWED_FUNCTIONS = {
     'hex',
     'id',
     'isinstance',
+    'issubclass',
     'iter',
     'len',
     'locals',

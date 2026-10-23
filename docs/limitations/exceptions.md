@@ -69,13 +69,13 @@ tracebacks are not preserved across `raise from`.
 
 ## Custom subclasses
 
-User `class` definitions are supported, but classes cannot inherit
-(`class Foo(Exception):` raises `NotImplementedError: ... class inheritance and metaclasses`), so there is no way to
-create a new exception class inside
-the sandbox. Raising a plain user class instance (`raise MyClass()`) fails
-with `TypeError: exceptions must derive from BaseException`. Define custom
-exception types on the host side if needed, or use the built-in subclass
-that best fits.
+A class may inherit from another sandbox class, but not from a builtin
+exception type: `class Foo(Exception):` raises
+`NotImplementedError: ... a class whose base is a builtin exception ...`, so
+there is no way to create a new exception class inside the sandbox. Raising a
+plain user class instance (`raise MyClass()`) fails with
+`TypeError: exceptions must derive from BaseException`. Define custom exception
+types on the host side if needed, or use the built-in subclass that best fits.
 
 ## Control flow in `finally`
 

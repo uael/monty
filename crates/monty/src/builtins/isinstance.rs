@@ -1,13 +1,13 @@
 //! Implementation of the isinstance() builtin function.
 
-use super::Builtins;
+use super::{Builtins, BuiltinsFunctions};
 use crate::{
     args::ArgValues,
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{HeapData, HeapId, HeapRead, HeapReadOutput},
-    types::{PyTrait, Tuple, Type},
+    types::{PyTrait, Tuple, Type, instance::class_chain},
     value::Value,
 };
 
@@ -38,7 +38,7 @@ pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) 
         Value::Builtin(Builtins::ExcType(handler_type)) => {
             Ok(matches!(obj.py_type(vm), Type::Exception(exc_type) if exc_type.is_subclass_of(*handler_type)))
         }
-        // A user-defined class: true iff `obj` is an instance of exactly this class.
+        // A user-defined class: true for an instance of it or of a subclass.
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::Class(_)) => Ok(instance_of_class(obj, *id, vm)),
         // A `collections.namedtuple` class, matched by the instance's `class_id`.
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::NamedTupleClass(_)) => {
@@ -62,6 +62,10 @@ pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) 
             };
             isinstance_check_tuple(obj, &members, vm)
         }
+        // `type` is a builtin function here rather than the class object, but
+        // it is still the class every class is an instance of, which is what
+        // `isinstance(x, type)` asks; see `limitations/builtins.md`.
+        Value::Builtin(Builtins::Function(BuiltinsFunctions::Type)) => Ok(obj.py_type(vm).is_instance_of(Type::Type)),
         _ => Err(ExcType::isinstance_arg2_error()),
     }
 }
@@ -72,9 +76,13 @@ fn instance_of_host_class(obj: &Value, class_id: HeapId, vm: &VM<'_>) -> bool {
     matches!(obj, Value::Ref(obj_id) if matches!(vm.heap.get(*obj_id), HeapData::HostClass(hc) if hc.class_id() == class_id))
 }
 
-/// Whether `obj` is an instance whose class object is `class_id`.
+/// Whether `obj` is an instance of `class_id` or of one of its subclasses.
 fn instance_of_class(obj: &Value, class_id: HeapId, vm: &VM<'_>) -> bool {
-    matches!(obj, Value::Ref(obj_id) if matches!(vm.heap.get(*obj_id), HeapData::Instance(inst) if inst.class() == class_id))
+    let Value::Ref(obj_id) = obj else { return false };
+    let HeapData::Instance(inst) = vm.heap.get(*obj_id) else {
+        return false;
+    };
+    class_chain(inst.class(), vm).contains(&class_id)
 }
 
 /// Whether `obj` is a namedtuple instance built from the class `class_id`.
@@ -94,6 +102,12 @@ fn isinstance_check_tuple<'h>(obj: &Value, tuple: &HeapRead<'h, Tuple>, vm: &mut
         match &tuple.get(vm.heap).as_slice()[i] {
             Value::Builtin(Builtins::Type(t)) => {
                 if obj.py_type(vm).is_instance_of(*t) {
+                    return Ok(true);
+                }
+            }
+            // `type`, a builtin function here, as in `isinstance_check`.
+            Value::Builtin(Builtins::Function(BuiltinsFunctions::Type)) => {
+                if obj.py_type(vm).is_instance_of(Type::Type) {
                     return Ok(true);
                 }
             }
