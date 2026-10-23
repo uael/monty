@@ -320,7 +320,9 @@ fn classify(output: &HeapReadOutput<'_>) -> Copyability {
         // `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
         | HeapReadOutput::Union(_)
-        | HeapReadOutput::FunctionDefaults(_) => Copyability::Shared,
+        | HeapReadOutput::FunctionDefaults(_)
+        // A property is its getter's, and a getter is a function.
+        | HeapReadOutput::ClassProperty(_) => Copyability::Shared,
         // Refused, with the `TypeError` CPython's pickler raises. Views and
         // iterators are positions into something else; the rest are host
         // objects or interpreter internals with no Python-visible
