@@ -533,6 +533,20 @@ impl CallFrame<'_> {
         (u16::from_le_bytes([a, b]), c, d)
     }
 
+    /// Fetches a name operand and resolves it through this code's name table.
+    #[inline]
+    fn fetch_name(&mut self) -> StringId {
+        let index = self.fetch_u16();
+        self.code.name(index)
+    }
+
+    /// Fetches the callee name of a `DictMerge`, whose operand `u16::MAX` names no callee.
+    #[inline]
+    fn fetch_callee_name(&mut self) -> Option<StringId> {
+        let index = self.fetch_u16();
+        (index != u16::MAX).then(|| self.code.name(index))
+    }
+
     /// Fetches two little-endian `u16`s followed by a `u8`, in a single bounds check.
     ///
     /// Mirrors `CodeBuilder::emit_name_op` on the encode side.
@@ -1375,8 +1389,7 @@ impl<'h> VM<'h> {
                     self.stack[len - 1 - n..].rotate_right(1);
                 }
                 Opcode::RaiseUnboundLocal => {
-                    let name_idx = self.current_frame.fetch_u16();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.fetch_name();
                     catch!(self, self.unbound_local_error(0, Some(name_id)));
                 }
                 Opcode::DeleteLocal => {
@@ -1390,15 +1403,24 @@ impl<'h> VM<'h> {
                 // Variables - runtime name resolution (eval/exec snippets)
                 Opcode::LoadName => {
                     let (slot, name_idx, flags) = self.current_frame.fetch_u16_u16_u8();
-                    handle_load_result!(self, self.load_name(slot, StringId::from_index(name_idx), flags));
+                    handle_load_result!(
+                        self,
+                        self.load_name(slot, self.current_frame.code.name(name_idx), flags)
+                    );
                 }
                 Opcode::StoreName => {
                     let (slot, name_idx, flags) = self.current_frame.fetch_u16_u16_u8();
-                    try_catch!(self, self.store_name(slot, StringId::from_index(name_idx), flags));
+                    try_catch!(
+                        self,
+                        self.store_name(slot, self.current_frame.code.name(name_idx), flags)
+                    );
                 }
                 Opcode::DeleteName => {
                     let (slot, name_idx, flags) = self.current_frame.fetch_u16_u16_u8();
-                    try_catch!(self, self.delete_name(slot, StringId::from_index(name_idx), flags));
+                    try_catch!(
+                        self,
+                        self.delete_name(slot, self.current_frame.code.name(name_idx), flags)
+                    );
                 }
                 // Variables - Global Operations
                 Opcode::LoadGlobal => {
@@ -1407,7 +1429,7 @@ impl<'h> VM<'h> {
                 }
                 Opcode::LoadGlobalCallable => {
                     let (slot, name_idx) = self.current_frame.fetch_u16_u16();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.code.name(name_idx);
                     self.load_global_callable(slot, name_id);
                 }
                 Opcode::StoreGlobal => {
@@ -1530,12 +1552,12 @@ impl<'h> VM<'h> {
                     try_catch!(self, self.list_to_tuple());
                 }
                 Opcode::DictMerge => {
-                    let func_name_id = self.current_frame.fetch_u16();
-                    try_catch!(self, self.dict_merge(func_name_id));
+                    let func_name = self.current_frame.fetch_callee_name();
+                    try_catch!(self, self.dict_merge(func_name));
                 }
                 Opcode::MethodDictMerge => {
-                    let func_name_id = self.current_frame.fetch_u16();
-                    try_catch!(self, self.method_dict_merge(func_name_id));
+                    let func_name = self.current_frame.fetch_callee_name();
+                    try_catch!(self, self.method_dict_merge(func_name));
                 }
                 // PEP 448 literal building
                 Opcode::DictUpdate => {
@@ -1583,20 +1605,19 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::LoadAttr => {
-                    let name_idx = self.current_frame.fetch_u16();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.fetch_name();
                     handle_call_result!(self, self.load_attr(name_id));
                 }
                 Opcode::LoadSubmodule => {
                     let (name_idx, path_idx) = self.current_frame.fetch_u16_u16();
-                    let path_id = StringId::from_index(path_idx);
+                    let name_id = self.current_frame.code.name(name_idx);
+                    let path_id = self.current_frame.code.name(path_idx);
                     // the module a following `LoadAttrImport` names in its `ImportError`
                     self.current_frame.import_from_module = Some(path_id);
-                    handle_call_result!(self, self.load_submodule(StringId::from_index(name_idx), path_id));
+                    handle_call_result!(self, self.load_submodule(name_id, path_id));
                 }
                 Opcode::LoadAttrImport => {
-                    let name_idx = self.current_frame.fetch_u16();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.fetch_name();
                     // the compiler emits this only after the statement's `LoadModule`
                     let module_id = self
                         .current_frame
@@ -1605,8 +1626,7 @@ impl<'h> VM<'h> {
                     handle_call_result!(self, self.load_attr_import(name_id, module_id));
                 }
                 Opcode::StoreAttr => {
-                    let name_idx = self.current_frame.fetch_u16();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.fetch_name();
                     try_catch!(self, self.store_attr(name_id));
                 }
                 // Control Flow - use self.current_frame.ip directly for jumps
@@ -1740,19 +1760,19 @@ impl<'h> VM<'h> {
                     handle_call_result!(self, self.exec_call_function_kw(pos_count, kw_count));
                 }
                 Opcode::CallAttr => {
-                    // CallAttr: u16 name_id, u8 arg_count
+                    // CallAttr: u16 name, u8 arg_count
                     // Stack: [obj, arg1, arg2, ..., argN] -> [result]
                     let (name_idx, arg_count) = self.current_frame.fetch_u16_u8();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.code.name(name_idx);
                     let arg_count = arg_count as usize;
 
                     handle_call_result!(self, self.exec_call_attr(name_id, arg_count));
                 }
                 Opcode::CallAttrKw => {
-                    // CallAttrKw: u16 name_id, u8 pos_count, u8 kw_count, then kw_count u16 name indices
+                    // CallAttrKw: u16 name, u8 pos_count, u8 kw_count, then kw_count u16 names
                     // Stack: [obj, pos_args..., kw_values...] -> [result]
                     let (name_idx, pos_count, kw_count) = self.current_frame.fetch_u16_u8_u8();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.code.name(name_idx);
                     let (pos_count, kw_count) = (pos_count as usize, kw_count as usize);
 
                     handle_call_result!(self, self.exec_call_attr_kw(name_id, pos_count, kw_count));
@@ -1765,7 +1785,7 @@ impl<'h> VM<'h> {
                 }
                 Opcode::CallAttrExtended => {
                     let (name_idx, flags) = self.current_frame.fetch_u16_u8();
-                    let name_id = StringId::from_index(name_idx);
+                    let name_id = self.current_frame.code.name(name_idx);
                     let has_kwargs = (flags & 0x01) != 0;
 
                     handle_call_result!(self, self.exec_call_attr_extended(name_id, has_kwargs));
@@ -1773,7 +1793,7 @@ impl<'h> VM<'h> {
                 // Function Definition
                 Opcode::MakeFunction => {
                     let (func_idx, defaults_count) = self.current_frame.fetch_u16_u8();
-                    let func_id = FunctionId::from_index(func_idx);
+                    let func_id = self.current_frame.code.function(func_idx);
                     let defaults_count = defaults_count as usize;
 
                     // A function defined under an explicit globals dict carries it.
@@ -1803,7 +1823,7 @@ impl<'h> VM<'h> {
                 }
                 Opcode::MakeClosure => {
                     let (func_idx, defaults_count, cell_count) = self.current_frame.fetch_u16_u8_u8();
-                    let func_id = FunctionId::from_index(func_idx);
+                    let func_id = self.current_frame.code.function(func_idx);
                     let (defaults_count, cell_count) = (defaults_count as usize, cell_count as usize);
 
                     // Pop cells from stack (pushed after defaults, so on top)
@@ -2040,10 +2060,10 @@ impl<'h> VM<'h> {
                 }
                 // Module Operations
                 Opcode::LoadModule => {
-                    let module_id = self.current_frame.fetch_u16();
+                    let name_id = self.current_frame.fetch_name();
                     // for the `LoadAttrImport`s of a `from ... import`; harmless for a bare `import`
-                    self.current_frame.import_from_module = Some(StringId::from_index(module_id));
-                    handle_call_result!(self, Ok(self.load_module(module_id)));
+                    self.current_frame.import_from_module = Some(name_id);
+                    handle_call_result!(self, Ok(self.load_module(name_id)));
                 }
                 // Context Managers
                 Opcode::BeforeWith => {
@@ -2062,8 +2082,7 @@ impl<'h> VM<'h> {
     /// Loads a top-level built-in or suspends with [`OsFunctionCall::Import`].
     /// The host's value becomes the module; `NotFound` raises `ModuleNotFoundError`.
     /// `LoadSubmodule` resolves the remaining dotted components.
-    fn load_module(&mut self, module_id: u16) -> CallResult {
-        let name_id = StringId::from_index(module_id);
+    fn load_module(&mut self, name_id: StringId) -> CallResult {
         match self.interns.static_string(name_id).and_then(StandardLib::from_static) {
             Some(module) => CallResult::Value(Value::Ref(module.create(self))),
             None => CallResult::OsCall(OsFunctionCall::Import(self.interns.get_str(name_id).to_owned())),

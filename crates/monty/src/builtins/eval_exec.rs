@@ -14,7 +14,7 @@ use crate::{
     expressions::{Identifier, Node},
     function::Function,
     heap::{DropGuard, HeapData, HeapId},
-    intern::{CompileInterns, FunctionId, StaticStrings},
+    intern::{CompileInterns, StaticStrings},
     name_map::NameMap,
     parse::{CodeRange, parse_expression_with_interner, parse_module_with_filename_id},
     prepare::{SnippetNames, prepare_snippet},
@@ -184,15 +184,7 @@ fn compile_and_push(
         false,
         code,
     );
-    let index = overlay.functions_len();
-    let func_id = u16::try_from(index).map(FunctionId::from_index).map_err(|_| {
-        SimpleException::new_msg(
-            ExcType::SyntaxError,
-            format!("session defines too many functions; maximum is {}", u16::MAX),
-        )
-    })?;
-
-    overlay.push_function(function);
+    let func_id = overlay.push_function(function);
     let (namespace, vm) = namespace_guard.into_parts();
     vm.push_snippet_frame(func_id, overlay, namespace)?;
     vm.globals.resize_with(vm.global_names.len(), || Value::Undefined);

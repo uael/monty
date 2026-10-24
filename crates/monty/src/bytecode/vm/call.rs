@@ -256,7 +256,7 @@ impl<'h> VM<'h> {
         // Build kwargs directly as Vec<(StringId, Value)>
         let mut kwargs_inline = Vec::with_capacity(kw_count);
         for value in kw_values {
-            let name_id = StringId::from_index(this.current_frame.fetch_u16());
+            let name_id = this.current_frame.fetch_name();
             kwargs_inline.push((name_id, value));
         }
 
@@ -309,7 +309,7 @@ impl<'h> VM<'h> {
         // Build kwargs directly as Vec<(StringId, Value)>
         let mut kwargs_inline = Vec::with_capacity(kw_count);
         for value in kw_values {
-            let kw_name_id = StringId::from_index(self.current_frame.fetch_u16());
+            let kw_name_id = self.current_frame.fetch_name();
             kwargs_inline.push((kw_name_id, value));
         }
 

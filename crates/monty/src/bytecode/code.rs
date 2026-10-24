@@ -4,7 +4,11 @@
 //! bytecode instructions, a constant pool, source location information for tracebacks,
 //! and an exception handler table.
 
-use crate::{intern::StringId, parse::CodeRange, value::Value};
+use crate::{
+    intern::{FunctionId, StringId},
+    parse::CodeRange,
+    value::Value,
+};
 
 /// Compiled bytecode for a function or module.
 ///
@@ -20,6 +24,25 @@ pub struct Code {
     /// Immediate constants indexed by `LoadConst`; heap literals live in `Interns`.
     #[serde(rename = "C")]
     constants: Vec<Value>,
+
+    /// Session string IDs indexed by the `u16` name operands of this body.
+    ///
+    /// A session interns strings for its whole life, so its IDs outgrow `u16`;
+    /// this table bounds an operand by the names one body uses, as CPython's `co_names`.
+    ///
+    /// `None` for a body that a dump from before the tables wrote: its operands are session IDs, so an
+    /// operand is the ID itself. This keeps those dumps loading.
+    #[serde(default, rename = "S")]
+    names: Option<Vec<StringId>>,
+
+    /// Session function IDs indexed by the `u16` operands of `MakeFunction` and `MakeClosure` in this body.
+    ///
+    /// A session keeps every function it compiles, so its IDs outgrow `u16`; this table bounds an operand by the
+    /// functions one body defines.
+    ///
+    /// `None` for a body that a dump from before the tables wrote: its operands are session IDs.
+    #[serde(default, rename = "F")]
+    functions: Option<Vec<FunctionId>>,
 
     /// Source location table for tracebacks.
     ///
@@ -48,7 +71,15 @@ impl Code {
     /// Creates an empty code object for tests that only need VM context.
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
-        Self::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        Self::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// Creates a new Code object with all components.
@@ -58,6 +89,8 @@ impl Code {
     pub fn new(
         bytecode: Vec<u8>,
         constants: Vec<Value>,
+        names: Vec<StringId>,
+        functions: Vec<FunctionId>,
         location_table: Vec<LocationEntry>,
         exception_table: Vec<ExceptionEntry>,
         local_names: Vec<StringId>,
@@ -65,6 +98,8 @@ impl Code {
         Self {
             bytecode,
             constants,
+            names: Some(names),
+            functions: Some(functions),
             location_table,
             exception_table,
             local_names,
@@ -82,6 +117,26 @@ impl Code {
     #[must_use]
     pub fn constant(&self, index: u16) -> &Value {
         &self.constants[usize::from(index)]
+    }
+
+    /// Returns the name a name operand indexes.
+    /// Panics for an index not produced by this code's compiler.
+    #[must_use]
+    pub fn name(&self, index: u16) -> StringId {
+        match &self.names {
+            Some(names) => names[usize::from(index)],
+            None => StringId::from_index(index),
+        }
+    }
+
+    /// Returns the function a `MakeFunction` or `MakeClosure` operand indexes.
+    /// Panics for an index not produced by this code's compiler.
+    #[must_use]
+    pub fn function(&self, index: u16) -> FunctionId {
+        match &self.functions {
+            Some(functions) => functions[usize::from(index)],
+            None => FunctionId::from_index(index),
+        }
     }
 
     /// Returns the local variable name for a given slot index.
@@ -130,6 +185,8 @@ impl Clone for Code {
         Self {
             bytecode: self.bytecode.clone(),
             constants: self.constants.iter().map(Value::copy_immediate).collect(),
+            names: self.names.clone(),
+            functions: self.functions.clone(),
             location_table: self.location_table.clone(),
             exception_table: self.exception_table.clone(),
             local_names: self.local_names.clone(),
