@@ -60,6 +60,7 @@ use crate::{
     types::{
         Dict, PyTrait, SessionRandom,
         file::{apply_buffer_load, apply_buffer_store, apply_file_next, apply_open_name, apply_write_position},
+        instance::instance_builtin_exc,
         random::SEED_BYTES,
         str::allocate_string,
     },
@@ -1864,8 +1865,16 @@ impl<'h> VM<'h> {
                     // Re-raise an instance as-is so `raise e` preserves `e`'s
                     // identity, like CPython. A bare type or non-exception has
                     // nothing to reuse and rebuilds from the error.
+                    // An instance of a sandbox exception class is kept for the
+                    // same reason: the handler must bind the object that was
+                    // raised, with its own attributes, not a rebuilt base.
                     let raised = match &exc {
-                        Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Exception(_)) => Some(exc),
+                        Value::Ref(id)
+                            if matches!(self.heap.get(*id), HeapData::Exception(_))
+                                || instance_builtin_exc(&exc, self).is_some() =>
+                        {
+                            Some(exc)
+                        }
                         _ => {
                             exc.drop_with(self);
                             None

@@ -50,17 +50,23 @@ and function-attributes-become-methods), bound methods, class variables
 The 3-arg `type()` form creates classes at runtime with CPython's validation
 order and error wording, but with these divergences:
 
-- **`bases` must be the empty tuple `()`.** Any non-empty bases tuple, even
-    `(object,)`, raises `TypeError: type() bases are not supported`, the
-    runtime counterpart of the parse-time `class Foo(Bar)` rejection.
+- **`bases` holds at most one class, and it must be a class defined in the
+    sandbox.** Two or more raise
+    `NotImplementedError: ... a class with more than one base ...`, because
+    Monty resolves a member by walking one chain and has no linearization to
+    resolve a second base against. A builtin type other than an exception,
+    `object` included, raises
+    `TypeError: a class can only inherit from a class defined in the sandbox or a builtin exception`.
 - **Keywords are always rejected.** CPython forwards extra keywords to
     `__init_subclass__`; Monty has no `__init_subclass__`, but the error
     message matches what `object.__init_subclass__` produces
     (`A.__init_subclass__() takes no keyword arguments`).
 - Only `__doc__` is synthesized into the namespace when absent (as `None`,
-    matching CPython). CPython also sets `__module__`, `__qualname__`,
-    `__dict__`, `__weakref__`, etc.; those attributes raise `AttributeError`
-    in Monty, as for compiled classes.
+    matching CPython). CPython also sets `__qualname__`, `__dict__`,
+    `__weakref__`, etc.; those attributes raise `AttributeError` in Monty, as
+    for compiled classes. `__module__` is answered, but it is not in the
+    namespace: it is read after it, so a class that binds the name itself
+    shadows the answer.
 - **Non-string namespace keys raise `TypeError`**
     (`non-string key (int) in the namespace of class 'A'`). CPython accepts
     them with only a `RuntimeWarning`; Monty has no warnings machinery, so it
@@ -362,9 +368,15 @@ every construction request. Divergences:
 
 ## What does NOT exist for user code
 
-- `class Foo(Bar): ...` — no inheritance, no MRO, no `super()` (rejected at
-    parse time: "class inheritance and metaclasses"; the runtime equivalent
-    `type('Foo', (Bar,), {})` raises `TypeError`, see above).
+- Multiple inheritance and the C3 linearization behind it. One base works; two
+    raise, rather than being resolved in the order written (see above).
+- `super()`, in either form. A method reaches its base's version by naming the
+    base class: `Base.m(self)`.
+- `__mro__` and `__base__`. A class reports what it inherits only through
+    `__bases__`: a tuple of its one base, a class or a builtin exception, or
+    `(object,)` for a class made with none.
+- Inheriting from a builtin type other than an exception, `object` included. A
+    builtin exception *is* inheritable; see [exceptions.md](exceptions.md).
 - Metaclasses, `__init_subclass__`, `__set_name__`, and any other
     metaclass-driven namespace customization.
 - `__slots__`, descriptors (`__get__` / `__set__` / `__delete__`).
@@ -372,10 +384,10 @@ every construction request. Divergences:
 - Method decorators — `@classmethod`, `@staticmethod`, `@property`, and any
     decorator on a `def` inside a class body (rejected at parse time). Decorators
     on classes and on non-method functions are supported.
-- **Classes are barely introspectable**: `__dict__`, `__bases__` and `dir()`
-    are all unavailable (`cls.__name__` and `cls.__annotations__` work, the
-    latter with stringized values, see [typing.md](typing.md)). A class decorator
-    can therefore discover fields and nothing else.
+- **Classes are barely introspectable**: `__dict__` and `dir()` are
+    unavailable (`cls.__name__`, `cls.__bases__` and `cls.__annotations__`
+    work, the latter with stringized values, see [typing.md](typing.md)). A
+    class decorator can therefore discover fields and bases and nothing else.
 - **Tracebacks from decorator application point at the whole `class` statement**
     (a span from the first decorator through the body, with the body elided as
     `...<N lines>...`), where CPython pins the individual decorator that raised.
@@ -441,11 +453,12 @@ every construction request. Divergences:
     `@dataclass(frozen=True)` instance, which it writes to and `obj.x = v`
     refuses — the same escape hatch CPython's generated `__init__` uses. On a
     class object it does not write at all, where `Foo.x = v` sets a class member.
-- Introspection attributes other than `__name__`, `__doc__`, `__annotations__`
-    and `obj.__class__`: `Foo.__dict__`, `obj.__dict__`, `Foo.__bases__`,
-    `Foo.__mro__`, `Foo.__qualname__`, `Foo.__module__`, and explicit
+- Introspection attributes other than `__name__`, `__module__`, `__doc__`,
+    `__annotations__`, `Foo.__bases__` and `obj.__class__`: `Foo.__dict__`,
+    `obj.__dict__`, `Foo.__mro__`, `Foo.__qualname__`, and explicit
     `obj.__repr__()` / `obj.__str__()` calls when the class defines none, all
-    raise `AttributeError`.
+    raise `AttributeError`. `Foo.__module__` reads `'__main__'` for every
+    class, because Monty runs one module, which is what `__name__` reads too.
 - Class-body statements other than a `def`, a simple `name [: T] = <expr>`
     variable assignment, `pass`, `...`, or a docstring, e.g. `if`/`for`/`while`
     in the class body, or tuple/multiple assignment targets (rejected at parse

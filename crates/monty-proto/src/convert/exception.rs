@@ -17,6 +17,7 @@ impl From<&MontyException> for pb::RaisedException {
             message: exc.message().map(ToOwned::to_owned),
             traceback: exc.traceback().iter().map(pb::StackFrame::from).collect(),
             data: pb_exc_data(exc.data()),
+            user_type: exc.user_type().map(ToOwned::to_owned),
         }
     }
 }
@@ -47,9 +48,22 @@ impl TryFrom<pb::RaisedException> for MontyException {
             }
             None => ExcData::None,
         };
-        Ok(Self::with_traceback(exc_type, err.message, traceback).with_data(data))
+        let exc = Self::with_traceback(exc_type, err.message, traceback).with_data(data);
+        // A child may be compromised, so an over-long class name is dropped
+        // rather than pinning parent memory; a name no identifier could be is
+        // dropped for the same reason.
+        Ok(match err.user_type.filter(|name| name.len() <= MAX_USER_TYPE_LEN) {
+            Some(name) => exc.with_user_type(name),
+            None => exc,
+        })
     }
 }
+
+/// How long a sandbox exception class name may be on the receive side.
+///
+/// Python has no identifier length limit, but a name this long is a compromised
+/// child rather than a program, and the parent must not hold it.
+const MAX_USER_TYPE_LEN: usize = 256;
 
 /// Maps monty's `ExcData` onto the wire message; `ExcData::None` becomes an
 /// absent field rather than an empty message.

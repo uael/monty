@@ -6,7 +6,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
-    heap::{DropWithContext, HeapData},
+    heap::{DropWithContext, HeapData, HeapId},
     intern::StaticStrings,
     types::{Class, Dict, PyTrait},
     value::Value,
@@ -119,20 +119,7 @@ fn create_class(
         return Err(ExcType::type_error_bad_arg_pos("type.__new__", 1, "str", got));
     };
 
-    match bases {
-        Value::Ref(id) if let HeapData::Tuple(t) = vm.heap.get(*id) => {
-            // Monty divergence: classes cannot inherit, so even `(object,)` is
-            // rejected — the parse-time equivalent (`class Foo(Bar)`) is a
-            // syntax error, and this is its runtime counterpart.
-            if !t.as_slice().is_empty() {
-                return Err(ExcType::type_error("type() bases are not supported"));
-            }
-        }
-        _ => {
-            let got = bases.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
-            return Err(ExcType::type_error_bad_arg_pos("type.__new__", 2, "tuple", got));
-        }
-    }
+    let (base_ids, builtin_exc) = resolve_bases(bases, vm)?;
 
     let Value::Ref(ns_id) = namespace else {
         let got = namespace.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
@@ -177,8 +164,86 @@ fn create_class(
     }
     let namespace_dict = Dict::from_pairs(pairs, vm)?;
 
-    let class_id = vm
-        .heap
-        .allocate(HeapData::Class(Box::new(Class::new(class_name, namespace_dict))));
+    // The class takes a reference on each base, released by
+    // `Class::py_dec_ref_ids`.
+    for base in &base_ids {
+        vm.heap.inc_ref(*base);
+    }
+    let class_id = vm.heap.allocate(HeapData::Class(Box::new(Class::new(
+        class_name,
+        namespace_dict,
+        base_ids,
+        builtin_exc,
+    ))));
     Ok(Value::Ref(class_id))
+}
+
+/// Validates a `type()` bases tuple, answering the base classes it names and
+/// the builtin exception the new class descends from, if any.
+///
+/// Inheritance is single: a second base would need a linearization Monty does
+/// not have, so it is refused rather than silently resolved in the order
+/// written. A builtin type other than an exception is refused too, for want of
+/// anything to inherit: a `Class` holds a namespace, and `str` has none.
+fn resolve_bases(bases: &Value, vm: &mut VM<'_>) -> RunResult<(Vec<HeapId>, Option<ExcType>)> {
+    let Value::Ref(id) = bases else {
+        let got = bases.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
+        return Err(ExcType::type_error_bad_arg_pos("type.__new__", 2, "tuple", got));
+    };
+    let HeapData::Tuple(tuple) = vm.heap.get(*id) else {
+        let got = bases.py_type(vm).cpython_arg_name(vm.heap, vm.interns);
+        return Err(ExcType::type_error_bad_arg_pos("type.__new__", 2, "tuple", got));
+    };
+    // Classified while the tuple still borrows the heap; the refusals below
+    // need it again, so nothing here holds that borrow.
+    let bases: Vec<BaseKind> = tuple
+        .as_slice()
+        .iter()
+        .map(|base| match base {
+            Value::Ref(base_id) if matches!(vm.heap.get(*base_id), HeapData::Class(_)) => {
+                BaseKind::SandboxClass(*base_id)
+            }
+            Value::Builtin(Builtins::ExcType(exc)) => BaseKind::BuiltinException(*exc),
+            _ => BaseKind::Other,
+        })
+        .collect();
+    if bases.len() > 1 {
+        return Err(ExcType::not_implemented(
+            "a class with more than one base; Monty resolves a member by walking one chain, \
+             so there is no linearization to resolve a second base against",
+        )
+        .into());
+    }
+    match bases.into_iter().next() {
+        // A sandbox base contributes its own reference, and passes on whatever
+        // builtin exception it descends from.
+        Some(BaseKind::SandboxClass(id)) => {
+            let inherited = match vm.heap.get(id) {
+                HeapData::Class(class) => class.builtin_exc(),
+                _ => None,
+            };
+            Ok((vec![id], inherited))
+        }
+        // A builtin exception is not a heap object, so there is no reference to
+        // take: the class records which one it descends from instead.
+        Some(BaseKind::BuiltinException(exc)) => Ok((Vec::new(), Some(exc))),
+        Some(BaseKind::Other) => Err(ExcType::type_error(
+            "a class can only inherit from a class defined in the sandbox or a builtin exception",
+        )),
+        None => Ok((Vec::new(), None)),
+    }
+}
+
+/// What a value in a `type()` bases tuple turned out to be.
+///
+/// Classified in one pass while the tuple borrows the heap, so the refusals can
+/// take it back.
+enum BaseKind {
+    /// A `class` statement's class object: the one base Monty accepts.
+    SandboxClass(HeapId),
+    /// A builtin exception type: the class descends from it, but there is no
+    /// heap object to hold a reference on.
+    BuiltinException(ExcType),
+    /// Anything else.
+    Other,
 }
