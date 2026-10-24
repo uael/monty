@@ -25,7 +25,7 @@ use crate::{
         time::{HostSleep, host_sleep},
     },
     os_dispatch::PostConversionEffect,
-    types::Module,
+    types::{EventLoop, Module},
     value::Value,
 };
 
@@ -36,12 +36,17 @@ pub(crate) enum AsyncioFunctions {
     Gather,
     Run,
     Sleep,
+    #[strum(serialize = "get_running_loop")]
+    GetRunningLoop,
+    #[strum(serialize = "current_task")]
+    CurrentTask,
 }
 
 /// Creates the `asyncio` module and allocates it on the heap.
 ///
-/// The module contains only the `run`, `gather` and `sleep` functions. Other asyncio
-/// functions are not implemented as they would require additional VM/scheduler features.
+/// The module contains the `run`, `gather`, `sleep`, `get_running_loop` and
+/// `current_task` functions. Other asyncio functions are not implemented as
+/// they would require additional VM/scheduler features.
 pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     let mut module = Module::new(StaticStrings::Asyncio, vm.interns);
 
@@ -60,6 +65,16 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         Value::ModuleFunction(ModuleFunctions::Asyncio(AsyncioFunctions::Sleep)),
         vm,
     );
+    module.set_attr(
+        StaticStrings::GetRunningLoop,
+        Value::ModuleFunction(ModuleFunctions::Asyncio(AsyncioFunctions::GetRunningLoop)),
+        vm,
+    );
+    module.set_attr(
+        StaticStrings::CurrentTask,
+        Value::ModuleFunction(ModuleFunctions::Asyncio(AsyncioFunctions::CurrentTask)),
+        vm,
+    );
 
     vm.heap.allocate(HeapData::Module(Box::new(module)))
 }
@@ -68,7 +83,30 @@ pub(super) fn call(vm: &mut VM<'_>, functions: AsyncioFunctions, args: ArgValues
         AsyncioFunctions::Gather => gather(vm, args).map(CallResult::Value),
         AsyncioFunctions::Run => run(vm.heap, args),
         AsyncioFunctions::Sleep => sleep(vm, args),
+        AsyncioFunctions::GetRunningLoop => get_running_loop(vm, args).map(CallResult::Value),
+        AsyncioFunctions::CurrentTask => current_task(vm, args).map(CallResult::Value),
     }
+}
+
+/// `asyncio.get_running_loop()`: proof that a loop is running, which here it
+/// always is while sandbox code runs.
+///
+/// CPython raises `RuntimeError: no running event loop` outside one, and a
+/// program that calls this to make sure it is inside a loop gets the same
+/// answer. What comes back schedules nothing; see [`EventLoop`].
+fn get_running_loop(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    args.check_zero_args("get_running_loop", vm.heap)?;
+    Ok(vm.heap.allocate_as(EventLoop).into_value())
+}
+
+/// `asyncio.current_task()`: `None`, since nothing here is a `Task`.
+///
+/// CPython answers `None` outside a task and a `Task` inside one. Monty
+/// schedules coroutines without giving a program an object for one, so the
+/// answer is always `None`; see `limitations/asyncio.md`.
+fn current_task(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    args.check_zero_args("current_task", vm.heap)?;
+    Ok(Value::None)
 }
 
 /// Returns an awaitable producing `result`, retained by [`PostConversionEffect::SleepResult`].
