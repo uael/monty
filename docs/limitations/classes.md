@@ -183,6 +183,8 @@ with these divergences:
 - A proxy whose sandbox object has since been freed raises
     `RuntimeError: invalid input type: sandbox instance of 'Foo' (id ...) no longer exists` rather than materializing a
     host-backed copy.
+    A Rust session opened with `MontyRepl::with_handles` instead makes the instance again from its class and
+    the attributes that it carries, with no `__init__` run, under the same id.
 - A proxy of a **host-sent** instance (produced after a restore) has no
     sandbox object to resolve to: passing it back re-enters as a host-backed
     copy built from its `attributes`, not the host's original object.
