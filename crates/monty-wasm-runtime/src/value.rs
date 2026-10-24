@@ -346,6 +346,7 @@ fn node_into_component(node: MontyNode) -> ValueNode {
         }),
         MontyNode::Function { name, docstring } => ValueNode::Function(FunctionNode { name, docstring }),
         MontyNode::Repr(value) => ValueNode::Repr(value),
+        MontyNode::Handle { .. } => unreachable!("the wasm runtime opens no session with handles"),
         MontyNode::Cycle(placeholder) => ValueNode::Cycle(placeholder),
         MontyNode::Module { name, id, attrs } => ValueNode::Module(ModuleNode {
             name,

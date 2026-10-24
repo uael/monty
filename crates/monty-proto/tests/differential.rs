@@ -399,6 +399,7 @@ fn node_to_oracle(node: &MontyNode) -> oracle::MontyNode {
             attrs: Some(oracle_pairs(attrs)),
         }),
         MontyNode::Repr(r) => Kind::Repr(r.clone()),
+        MontyNode::Handle { .. } => unreachable!("a worker opens no session with handles"),
         MontyNode::Cycle(placeholder) => Kind::Cycle(placeholder.clone()),
     };
     oracle::MontyNode { kind: Some(kind) }

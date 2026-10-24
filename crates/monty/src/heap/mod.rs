@@ -34,7 +34,11 @@ pub(crate) use crate::{
 };
 
 mod free_list;
+mod handles;
 mod stable_heap;
+
+use handles::Handles;
+pub(crate) use handles::Held;
 pub(crate) use stable_heap::StableHeap;
 
 /// Unique identifier for values stored inside the heap arena.
@@ -991,16 +995,21 @@ pub(crate) struct Heap {
     /// `boundary_index` because host and sandbox uuids are distinct namespaces.
     /// Weak like the others: cleared on free, rebuilt on restore.
     host_type_index: BTreeMap<MontyUuid, HeapId>,
+    /// The values with no data form and the classes held for the host by
+    /// handle, when the session holds handles; strong, unlike the indexes
+    /// above.
+    handles: Option<Handles>,
 }
 
 impl serde::Serialize for Heap {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Heap", 5)?;
+        let mut state = serializer.serialize_struct("Heap", 6)?;
         state.serialize_field("entries", &self.entries)?;
         state.serialize_field("tracker", &self.tracker)?;
         state.serialize_field("purple_count", &self.purple_count)?;
         state.serialize_field("allocations_since_gc", &self.allocations_since_gc.get())?;
         state.serialize_field("timezone_utc", &self.timezone_utc)?;
+        state.serialize_field("handles", &self.handles)?;
         state.end()
     }
 }
@@ -1014,6 +1023,8 @@ impl<'de> serde::Deserialize<'de> for Heap {
             purple_count: usize,
             allocations_since_gc: u32,
             timezone_utc: Option<HeapId>,
+            #[serde(default)]
+            handles: Option<Handles>,
         }
         let fields = HeapFields::deserialize(deserializer)?;
         let mut entries = fields.entries;
@@ -1033,6 +1044,7 @@ impl<'de> serde::Deserialize<'de> for Heap {
             ext_function_cache,
             boundary_index,
             host_type_index,
+            handles: fields.handles,
         })
     }
 }
@@ -1125,6 +1137,7 @@ impl Heap {
             ext_function_cache: BTreeMap::new(),
             boundary_index: BTreeMap::new(),
             host_type_index: BTreeMap::new(),
+            handles: None,
         };
 
         // The empty-tuple singleton starts with refcount = 1 — that single ref *is* the

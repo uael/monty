@@ -178,6 +178,16 @@ impl MontyObject {
         })
     }
 
+    /// A value of the sandbox, by the handle a session that holds handles
+    /// gave it under; see [`MontyNode::Handle`].
+    #[must_use]
+    pub fn handle(id: MontyUuid, type_name: impl Into<String>) -> Self {
+        Self::leaf(MontyNode::Handle {
+            id,
+            type_name: type_name.into(),
+        })
+    }
+
     /// A builtin function such as `len`.
     #[must_use]
     pub fn builtin_function(function: BuiltinsFunctions) -> Self {
@@ -498,6 +508,18 @@ impl<'a> ObjectRef<'a> {
         }
     }
 
+    /// The handle a session that holds handles gave the value under: that of
+    /// a value with no data form, or the id of a class of the sandbox. The
+    /// host releases the value by it.
+    #[must_use]
+    pub fn handle(&self) -> Option<MontyUuid> {
+        match self.node() {
+            MontyNode::Handle { id, .. } => Some(*id),
+            MontyNode::ClassType(class) if !class.host_defined => Some(class.id),
+            _ => None,
+        }
+    }
+
     /// The value as a `str`.
     #[must_use]
     pub fn as_str(&self) -> Option<&'a str> {
@@ -780,6 +802,7 @@ impl<'a> ObjectRef<'a> {
             MontyNode::Function { name, .. } => write!(f, "<function '{name}' external>"),
             // a module's repr names it without listing its attrs, as CPython's does
             MontyNode::Module { name, .. } => write!(f, "<module {}>", StringRepr(name)),
+            MontyNode::Handle { type_name, .. } => write!(f, "<{type_name} handle>"),
             MontyNode::Repr(s) => write!(f, "Repr({})", StringRepr(s)),
             MontyNode::Cycle(placeholder) => f.write_str(placeholder),
             MontyNode::List(_)

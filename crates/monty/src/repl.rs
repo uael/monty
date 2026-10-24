@@ -159,6 +159,25 @@ impl MontyRepl {
         self
     }
 
+    /// Holds each value of the sandbox with no data form, such as a function,
+    /// an iterator or a coroutine, and each class, that crosses to the host
+    /// under a handle, until the host releases it with
+    /// [`release`](Self::release): such a value crosses as a
+    /// [`MontyObject::handle`], a class as its type object, and either one
+    /// handed back is the same object again. A session without handles gives
+    /// a value with no data form as its `repr()`.
+    #[must_use]
+    pub fn with_handles(mut self) -> Self {
+        self.heap.hold_handles();
+        self
+    }
+
+    /// The host holds the handle `id` no more, so the session lets go of the
+    /// value it held under it. Whether it held one.
+    pub fn release(&mut self, id: &MontyUuid) -> bool {
+        self.heap.release(id)
+    }
+
     /// Switches the sandbox working directory (initially `/`).
     ///
     /// `cwd` is an absolute POSIX virtual path, normalized here like
@@ -626,6 +645,7 @@ impl<'a> CheckedSource<'a> {
 impl Drop for MontyRepl {
     fn drop(&mut self) {
         self.globals.drain(..).drop_with(&mut self.heap);
+        self.heap.release_all();
     }
 }
 
@@ -840,6 +860,11 @@ impl ReplFunctionCall {
     /// Aborts the snippet with an uncatchable exception; see [`ReplOsCall::abort`].
     pub fn abort(self, exc: MontyException, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
         self.snapshot.abort(exc, print)
+    }
+
+    /// The host holds the handle `id` no more; see [`MontyRepl::release`].
+    pub fn release(&mut self, id: &MontyUuid) -> bool {
+        self.snapshot.repl.release(id)
     }
 }
 
