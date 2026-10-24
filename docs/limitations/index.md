@@ -25,7 +25,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - Simple classes: instance methods, `__init__`, `__repr__`/`__str__`, `__eq__`/`__hash__`, `__iter__`/`__next__`,
     `__contains__`, `__index__`, `__int__`/`__float__`, `__abs__`, `__round__`, `__floor__`/`__ceil__`/`__trunc__`,
     `__call__`, `__getitem__`/`__setitem__`, unary `+`/`-`/`~`, binary arithmetic and reflected operators,
-    class variables, and single inheritance from another sandbox class or a builtin exception
+    class variables, and single inheritance from another sandbox class, a builtin exception or `str`
 - `@dataclass`, with the `eq=` and `frozen=` options only (every other option raises `NotImplementedError`),
     `field()` (with `default=...` / `default_factory=...`) and `__post_init__`, but no `fields()` or `asdict()`, plus host
     class instances passed in and out (and host classes the sandbox may instantiate when granted)

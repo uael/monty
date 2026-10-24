@@ -52,7 +52,7 @@ mod unicode_type_data;
 pub mod union;
 
 pub(crate) use bytes::{Bytes, BytesIterator};
-pub(crate) use class::Class;
+pub(crate) use class::{BuiltinBase, Class};
 pub(crate) use complex::Complex;
 pub(crate) use csv::CsvObject;
 pub(crate) use deque::Deque;

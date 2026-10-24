@@ -24,6 +24,23 @@ use crate::{
     value::{EitherStr, Value},
 };
 
+/// The builtin type a class inherits, for the two a class may name as its base.
+///
+/// A builtin is not a heap object, so a class cannot hold a reference to one:
+/// it records which one it descends from instead. Resolved once at creation
+/// from the bases, and passed on to every class further down the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum BuiltinBase {
+    /// A builtin exception. `Some` is what makes an instance of the class
+    /// raisable, and the type every existing handler, message and host binding
+    /// keys off; the class's own name is carried alongside it so a traceback
+    /// still reads `Refused: why`.
+    Exception(ExcType),
+    /// `str`. An instance of the class is a string that carries the class, so
+    /// every string operation reads it as the string it is.
+    Str,
+}
+
 /// A user-defined class object created by a `class Foo: ...` statement.
 ///
 /// Holds the class name and a `namespace` [`Dict`] mapping member names to values:
@@ -53,14 +70,12 @@ pub(crate) struct Class {
     /// Defaults to empty, so a dump made before bases existed still loads.
     #[serde(default)]
     bases: Vec<HeapId>,
-    /// The builtin exception this class descends from, resolved once at
-    /// creation because the chain cannot change afterwards. `Some` is what
-    /// makes an instance of this class raisable, and the type every existing
-    /// handler, message and host binding keys off; the class's own name is
-    /// carried alongside it so a traceback still reads `Refused: why`.
-    /// Defaults to `None`, so a dump made before it existed still loads.
+    /// The builtin type this class descends from, resolved once at creation
+    /// because the chain cannot change afterwards, or `None` for a class that
+    /// descends from `object` alone. Defaults to `None`, so a dump made before
+    /// it existed still loads.
     #[serde(default)]
-    builtin_exc: Option<ExcType>,
+    base: Option<BuiltinBase>,
     /// Boundary identity, generated lazily the first time the class (or one of
     /// its instances) crosses to the host; dumped with the heap so it stays
     /// stable across restores.
@@ -70,21 +85,37 @@ pub(crate) struct Class {
 impl Class {
     /// Creates a new class object from its name and member namespace.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, builtin_exc: Option<ExcType>) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, base: Option<BuiltinBase>) -> Self {
         Self {
             name,
             namespace,
             bases,
-            builtin_exc,
+            base,
             uuid: None,
         }
+    }
+
+    /// The builtin type this class descends from, or `None` for a class that
+    /// descends from `object` alone.
+    #[must_use]
+    pub fn base(&self) -> Option<BuiltinBase> {
+        self.base
     }
 
     /// The builtin exception this class descends from, or `None` for a class
     /// whose instances are not exceptions.
     #[must_use]
     pub fn builtin_exc(&self) -> Option<ExcType> {
-        self.builtin_exc
+        match self.base {
+            Some(BuiltinBase::Exception(exc)) => Some(exc),
+            Some(BuiltinBase::Str) | None => None,
+        }
+    }
+
+    /// Whether instances of this class are strings.
+    #[must_use]
+    pub fn inherits_str(&self) -> bool {
+        matches!(self.base, Some(BuiltinBase::Str))
     }
 
     /// The base classes, as borrowed ids. Owned by this class.
@@ -120,12 +151,13 @@ impl Class {
 
     /// `__bases__`: the class this one was made with, as a tuple of one, since
     /// inheritance is single here. A class of the session stands as itself, a
-    /// builtin exception base as the type it is, and a class made with none as
-    /// `object`, which is what CPython reports for each.
+    /// builtin base as the type it is, and a class made with none as `object`,
+    /// which is what CPython reports for each.
     pub(crate) fn bases_tuple(&self, vm: &VM<'_>) -> Value {
         let items: SmallVec<[Value; TUPLE_INLINE_CAPACITY]> = if self.bases.is_empty() {
-            smallvec![match self.builtin_exc {
-                Some(exc) => Value::Builtin(Builtins::ExcType(exc)),
+            smallvec![match self.base {
+                Some(BuiltinBase::Exception(exc)) => Value::Builtin(Builtins::ExcType(exc)),
+                Some(BuiltinBase::Str) => Value::Builtin(Builtins::Type(Type::Str)),
                 None => Value::Builtin(Builtins::Type(Type::Object)),
             }]
         } else {

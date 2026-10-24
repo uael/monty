@@ -14,10 +14,15 @@ class Sub(Plain):
     pass
 
 
+class Word(str):
+    pass
+
+
 # === the base a class was made with ===
 assert Plain.__bases__ == (object,)
 assert Boom.__bases__ == (ValueError,)
 assert Sub.__bases__ == (Plain,)
+assert Word.__bases__ == (str,)
 assert Sub.__bases__[0] is Plain
 
 # === an instance has no __bases__ of its own ===
