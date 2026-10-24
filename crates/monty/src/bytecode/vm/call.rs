@@ -112,6 +112,20 @@ pub(crate) enum CallResult {
         call: OsFunctionCall,
         effect: PendingEffect,
     },
+    /// The call raises, and the handler must bind the object it raises rather
+    /// than one rebuilt from the error.
+    ///
+    /// `generator.throw(exc)` is the call that needs this: the exception is the
+    /// caller's own object, and the handler must bind that object, as it does
+    /// for `raise exc`. An error carries a message and not a Python value, so
+    /// it cannot carry the object; the raise goes to the loop instead, which
+    /// raises it the way `raise` does.
+    Raised {
+        error: Box<RunError>,
+        /// The object to bind, for a value worth keeping; see
+        /// [`VM::keeps_identity`].
+        value: Option<Value>,
+    },
 }
 
 impl CallResult {
@@ -178,6 +192,11 @@ impl<C: ContainsHeap> DropWithContext<C> for CallResult {
             Self::OsCall(call) => call.drop_with(heap),
             Self::AttrLookup { effect, .. } => effect.drop_with(heap),
             Self::FramePushed => {}
+            Self::Raised { value, .. } => {
+                if let Some(value) = value {
+                    value.drop_with(heap);
+                }
+            }
             Self::OsCallWithEffect { call, effect } => {
                 call.drop_with(heap);
                 // Discarded before it ever became a `FrameExit`.
@@ -457,15 +476,16 @@ impl<'h> VM<'h> {
         this.call_function(callable, args)?.finish_synchronously(this)
     }
 
-    /// Runs a generator to its next `yield` from Rust, for the builtins that
-    /// walk an iterator themselves (`list()`, `sorted()`, a comprehension).
+    /// Runs a generator to its next `yield` from Rust, for everything that
+    /// walks an iterator itself: `list()`, `sorted()`, a comprehension, `for`
+    /// and the `next()` builtin.
     ///
     /// The frame is spliced in exactly as [`resume_generator`](VM::resume_generator)
     /// does; only the driving differs, this being a nested `run()` in the shape
     /// [`evaluate_function`](Self::evaluate_function) uses. That is also its
-    /// limit: a generator driven from inside a builtin cannot suspend to the
-    /// host, the same restriction every synchronous re-entry here carries.
-    /// `for` and an explicit `next()` do not go through this.
+    /// limit: a generator driven this way cannot suspend to the host, the same
+    /// restriction every synchronous re-entry here carries. Only `send()` and
+    /// `__next__()`, which resume the frame on the VM's own loop, can.
     ///
     /// `None` means the generator finished, which is the exhaustion an iterator
     /// protocol reports by returning nothing rather than by raising.
@@ -542,7 +562,19 @@ impl<'h> VM<'h> {
 
     /// Converts a direct call suspension into a specific synchronous-context error.
     #[cold]
-    fn unsupported_call_result(&mut self, result: CallResult) -> RunError {
+    pub(super) fn unsupported_call_result(&mut self, result: CallResult) -> RunError {
+        // A raise is no suspension: it stands as it is here. Only the object it
+        // would have bound goes, as it does anywhere a nested run rebuilds an
+        // exception from the error alone.
+        let result = match result {
+            CallResult::Raised { error, value } => {
+                if let Some(value) = value {
+                    value.drop_with(self);
+                }
+                return *error;
+            }
+            other => other,
+        };
         let error = match &result {
             CallResult::External(function_name, _) => {
                 ExcType::not_implemented_synchronous_call("external function", function_name.as_str(self.interns))
@@ -572,7 +604,9 @@ impl<'h> VM<'h> {
                 return error;
             }
             CallResult::AwaitValue(_) => ExcType::not_implemented("cannot await a value in this synchronous context"),
-            CallResult::Value(_) | CallResult::FramePushed => unreachable!("completed calls are handled above"),
+            CallResult::Value(_) | CallResult::FramePushed | CallResult::Raised { .. } => {
+                unreachable!("completed calls and raises are handled above")
+            }
         };
         result.drop_with(self);
         error.into()
