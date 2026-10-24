@@ -86,9 +86,7 @@ fn abc_instance(obj: &Value, marker: StaticStrings, vm: &mut VM<'_>) -> RunResul
         // `__call__` included.
         StaticStrings::Callable => obj.is_callable(vm),
         StaticStrings::CoroutineType => held == Type::Coroutine,
-        // Monty has no generator functions, and a generator expression gives a
-        // `list`, so no value is a generator.
-        StaticStrings::Generator => false,
+        StaticStrings::Generator => held == Type::Generator,
         StaticStrings::Iterable => obj.py_is_iterable(vm),
         StaticStrings::IteratorType => obj.py_is_iterator(vm),
         StaticStrings::Mapping => matches!(held, Type::Dict | Type::DefaultDict | Type::Counter),
