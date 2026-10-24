@@ -6,11 +6,11 @@ Python.
 
 ## Implemented builtin functions
 
-`abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `eval`, `exec`, `filter`,
-`format`, `getattr`, `hasattr`, `hash`, `hex`, `id`, `isinstance`, `iter`, `len`,
-`locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`, `print`, `repr`,
-`reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
-`eval`, `exec` and `locals` are described in [eval_exec.md](eval_exec.md).
+`abs`, `all`, `any`, `bin`, `callable`, `chr`, `divmod`, `enumerate`, `eval`, `exec`,
+`filter`, `format`, `getattr`, `globals`, `hasattr`, `hash`, `hex`, `id`, `isinstance`,
+`iter`, `len`, `locals`, `map`, `max`, `min`, `next`, `oct`, `open`, `ord`, `pow`,
+`print`, `repr`, `reversed`, `round`, `setattr`, `sorted`, `sum`, `type`, `zip`.
+`eval`, `exec`, `globals` and `locals` are described in [eval_exec.md](eval_exec.md).
 
 ## Implemented type constructors (also builtins)
 
@@ -23,13 +23,13 @@ Python.
 These raise `NameError`:
 
 - **Code objects and imports**: `compile`, `__import__`.
-- **Namespace introspection**: `globals`, `vars`, `dir`.
+- **Namespace introspection**: `vars`, `dir`.
 - **Interactive**: `input`, `breakpoint`, `help`, and the other names that the `site` module adds:
     `exit`, `quit`, `copyright`, `credits`, `license`.
 - **Decorators / descriptors**: `classmethod`, `staticmethod`, `super`. (`property` is a name, but
     `@property` on functions is not recognized; use a method.)
 - **Construction / coercion**: `bytearray`, `memoryview`, `ascii`.
-- **Other**: `callable`, `delattr`, `issubclass`, `aiter`, `anext`, and the aliases of `OSError`:
+- **Other**: `delattr`, `issubclass`, `aiter`, `anext`, and the aliases of `OSError`:
     `IOError`, `EnvironmentError`, `WindowsError`.
 
 `super()` is the biggest practical omission: with no class inheritance either

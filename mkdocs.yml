@@ -45,7 +45,7 @@ nav:
       - Python language / parser: 'limitations/language.md'
       - Built-in functions: 'limitations/builtins.md'
       - complex: 'limitations/complex.md'
-      - eval(), exec() and locals(): 'limitations/eval_exec.md'
+      - eval(), exec(), globals() and locals(): 'limitations/eval_exec.md'
       - Classes: 'limitations/classes.md'
       - dataclasses: 'limitations/dataclasses.md'
       - Named tuples: 'limitations/namedtuple.md'
