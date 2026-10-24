@@ -781,6 +781,11 @@ pub enum StaticStrings {
     Compress,
     /// `complex.conjugate()` method.
     Conjugate,
+    /// The `contextvars.ContextVar` type.
+    #[strum(serialize = "ContextVar")]
+    ContextVar,
+    /// The `contextvars` module.
+    Contextvars,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
     /// `sys.copyright` attribute.
@@ -1904,6 +1909,8 @@ pub enum StaticStrings {
     Replace,
     /// `@dataclass(repr=...)`.
     Repr,
+    /// `ContextVar.reset()` method.
+    Reset,
     /// `resolution` class constant of the `datetime` classes.
     Resolution,
     /// `Path.resolve()` method — yields a host call.
@@ -1988,6 +1995,9 @@ pub enum StaticStrings {
     Sequence,
     /// `sys.version_info.serial` field.
     Serial,
+    /// `ContextVar.set()` method.
+    #[strum(serialize = "set")]
+    SetMethod,
     /// `typing.Set` marker.
     #[strum(serialize = "Set")]
     SetType,
@@ -2242,6 +2252,9 @@ pub enum StaticStrings {
     TopDown,
     /// Kwarg name `topdown` — `os.walk(topdown=...)`.
     Topdown,
+    /// The `contextvars.Token` type.
+    #[strum(serialize = "Token")]
+    Token,
     /// `Counter.total()` method.
     Total,
     /// `timedelta.total_seconds()` method.
