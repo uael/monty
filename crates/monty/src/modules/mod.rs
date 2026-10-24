@@ -19,6 +19,7 @@ pub(crate) mod base64;
 pub(crate) mod binascii;
 pub(crate) mod bisect;
 pub(crate) mod collections;
+pub(crate) mod collections_abc;
 pub(crate) mod copy;
 pub(crate) mod csv;
 pub(crate) mod dataclasses;
@@ -86,6 +87,9 @@ pub(crate) enum StandardLib {
     Random,
     /// The `copy` module providing `copy()` and `deepcopy()`.
     Copy,
+    /// The `collections.abc` module exposing the abstract base classes as
+    /// annotation markers.
+    CollectionsAbc,
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
@@ -128,6 +132,7 @@ impl StandardLib {
             StaticStrings::Binascii => Some(Self::Binascii),
             StaticStrings::Random => Some(Self::Random),
             StaticStrings::Copy => Some(Self::Copy),
+            StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
             StaticStrings::Time => Some(Self::Time),
             StaticStrings::Hashlib => Some(Self::Hashlib),
             StaticStrings::Bisect => Some(Self::Bisect),
@@ -169,6 +174,7 @@ impl StandardLib {
             Self::Binascii => binascii::create_module(vm),
             Self::Random => random::create_module(vm),
             Self::Copy => copy::create_module(vm),
+            Self::CollectionsAbc => collections_abc::create_module(vm),
             Self::Time => time::create_module(vm),
             Self::Hashlib => hashlib::create_module(vm),
             Self::Bisect => bisect::create_module(vm),
