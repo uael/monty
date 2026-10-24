@@ -320,7 +320,10 @@ fn classify(output: &HeapReadOutput<'_>) -> Copyability {
         // `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
         | HeapReadOutput::Union(_)
-        | HeapReadOutput::FunctionDefaults(_) => Copyability::Shared,
+        | HeapReadOutput::FunctionDefaults(_)
+        // A PEP 695 alias is immutable apart from the `__value__` it memoizes
+        // once, and CPython has no `__copy__` for one either.
+        | HeapReadOutput::TypeAliasType(_) => Copyability::Shared,
         // Refused, with the `TypeError` CPython's pickler raises. Views and
         // iterators are positions into something else; the rest are host
         // objects or interpreter internals with no Python-visible

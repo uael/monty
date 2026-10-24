@@ -176,6 +176,8 @@ macro_rules! heap_payloads {
             DirScan(boxed $crate::types::DirScan),
             /// Any `csv` object: a reader, writer, `DictReader`, `DictWriter` or dialect.
             Csv(boxed $crate::types::CsvObject),
+            /// PEP 695 `typing.TypeAliasType`: the value of `type X = ...`.
+            TypeAliasType(inline $crate::types::TypeAliasType),
         }
     };
 }
@@ -265,7 +267,9 @@ impl HeapData {
             | Self::GenericAlias(_)
             | Self::Union(_)
             | Self::LruCache(_)
-            | Self::Csv(_) => true,
+            | Self::Csv(_)
+            // An alias's memoized `__value__` can reach back to the alias itself.
+            | Self::TypeAliasType(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -335,6 +339,7 @@ impl HeapData {
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
             Self::HashObject(hash) => hash.algorithm().py_type(),
+            Self::TypeAliasType(_) => Type::TypeAliasType,
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::Union(_) => Type::Union,
             Self::LruCache(_) => Type::LruCacheWrapper,
@@ -729,6 +734,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Closure($value) => $body,
             Self::FunctionDefaults($value) => $body,
             Self::ExtFunction($value) => $body,
+            Self::TypeAliasType($value) => $body,
             $($custom)*
         }
     };
@@ -931,6 +937,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
 
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         match self {
+            Self::TypeAliasType(value) => value.py_iter(vm),
             Self::Str(value) => value.py_iter(vm),
             Self::Bytes(value) => value.py_iter(vm),
             Self::List(value) => value.py_iter(vm),

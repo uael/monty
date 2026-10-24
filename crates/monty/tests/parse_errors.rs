@@ -214,13 +214,13 @@ fn async_with_statement_returns_not_implemented_error() {
 #[test]
 fn error_display_format() {
     // Verify the Display format matches Python's exception output with traceback
-    let err = get_parse_err("type Alias = int");
+    let err = get_parse_err("class Foo(metaclass=type):\n    pass");
     assert_snapshot!(err, @r#"
     Traceback (most recent call last):
       File "test.py", line 1, in <module>
-        type Alias = int
-        ~~~~~~~~~~~~~~~~
-    NotImplementedError: The monty syntax parser does not yet support type aliases
+        class Foo(metaclass=type):
+            pass
+    NotImplementedError: The monty syntax parser does not yet support class inheritance and metaclasses
     "#);
 }
 
