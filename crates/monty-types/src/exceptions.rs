@@ -396,6 +396,15 @@ pub enum ExcType {
     /// A direct `Exception` subclass, named `_csv.Error` as in CPython.
     #[strum(serialize = "_csv.Error")]
     CsvError,
+
+    /// `asyncio.CancelledError`, the exception a cancelled await unwinds with.
+    ///
+    /// A direct `BaseException` subclass since Python 3.8, so `except
+    /// Exception:` does not swallow it. Named by the module path CPython
+    /// tracebacks print, which is also what keeps it importable-only: a bare
+    /// `CancelledError` is a `NameError` here as it is there.
+    #[strum(serialize = "asyncio.exceptions.CancelledError")]
+    CancelledError,
 }
 impl ExcType {
     /// Checks if this exception type is a subclass of another exception type.
@@ -415,8 +424,12 @@ impl ExcType {
         match handler_type {
             // BaseException catches all exceptions
             Self::BaseException => true,
-            // Exception catches everything except BaseException, and direct subclasses: KeyboardInterrupt, SystemExit
-            Self::Exception => !matches!(self, Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit),
+            // Exception catches everything except BaseException, and direct subclasses: KeyboardInterrupt, SystemExit,
+            // asyncio.CancelledError
+            Self::Exception => !matches!(
+                self,
+                Self::BaseException | Self::KeyboardInterrupt | Self::SystemExit | Self::CancelledError
+            ),
             // LookupError catches KeyError and IndexError
             Self::LookupError => matches!(self, Self::KeyError | Self::IndexError),
             // ArithmeticError catches ZeroDivisionError and OverflowError

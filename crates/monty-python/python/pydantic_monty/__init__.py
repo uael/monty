@@ -284,6 +284,7 @@ ExcType = Literal[
     'AssertionError',
     'MemoryError',
     'StopIteration',
+    'asyncio.exceptions.CancelledError',
     'SyntaxError',
     'TimeoutError',
     'TypeError',
