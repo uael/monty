@@ -21,7 +21,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{RunError, SimpleException},
-    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput},
+    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, Held},
     modules::dataclasses,
     types::{
         Complex, HostClass, HostClassType, LongInt, Module, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type,
@@ -190,7 +190,7 @@ impl GraphExporter {
             Value::Builtin(Builtins::Function(f)) => MontyNode::BuiltinFunction(*f),
             #[cfg(feature = "memory-model-checks")]
             Value::Dereferenced => panic!("Dereferenced found while exporting a value"),
-            _ => repr_node(value, vm),
+            _ => handle_node(value, vm),
         };
         self.push_node(node)
     }
@@ -206,6 +206,11 @@ impl GraphExporter {
         // A host class's type object *is* its shared class node.
         if matches!(vm.heap.get(id), HeapData::HostClassType(_)) {
             return self.host_class_node(id, vm);
+        }
+        // A session that holds handles gives a sandbox class as its type
+        // node, which it holds, so the host can call it.
+        if vm.heap.holds_handles() && matches!(vm.heap.get(id), HeapData::Class(_)) {
+            return self.sandbox_class_node(id, vm);
         }
         if self.in_progress.contains(&id) {
             let placeholder = match vm.heap.get(id) {
@@ -228,7 +233,12 @@ impl GraphExporter {
                 self.push(inner, vm)
             }
             output => {
-                let node = self.convert_heap_object(id, output, value, vm);
+                let node = match self.convert_heap_object(id, output, value, vm) {
+                    // An object that crosses as its `repr()` has no data form,
+                    // so a session that holds handles holds it instead.
+                    MontyNode::Repr(repr) => held_node(value, vm).unwrap_or(MontyNode::Repr(repr)),
+                    node => node,
+                };
                 self.push_node(node)
             }
         };
@@ -487,7 +497,7 @@ impl GraphExporter {
                 name: function.get(vm.heap).as_str().to_owned(),
                 docstring: None,
             },
-            _ => repr_node(value, vm),
+            _ => handle_node(value, vm),
         }
     }
 
@@ -503,9 +513,11 @@ impl GraphExporter {
         if let Some(node_id) = self.memo.get(&class_id) {
             return *node_id;
         }
+        let id = vm.heap.boundary_uuid(class_id);
+        vm.heap.hold(Held::Ref(class_id), Some(id));
         let node = MontyNode::ClassType(Box::new(ClassTypeNode {
             name: class_name(class_id, vm.heap, vm.interns).into_owned(),
-            id: vm.heap.boundary_uuid(class_id),
+            id,
             host_defined: false,
             is_dataclass: dataclasses::is_dataclass_class(class_id, vm),
             attrs: Vec::new(),
@@ -966,6 +978,10 @@ fn import_node(
             let exc = SimpleException::new(exc_type, arg);
             Ok(Value::Ref(vm.heap.allocate(HeapData::Exception(exc))))
         }
+        // A value the session holds for the host is the same object again.
+        MontyNode::Handle { id, type_name } => vm.heap.held(&id).ok_or_else(|| {
+            InvalidInputError::invalid_type(format!("'{type_name}' handle (id {id}) is no longer held"))
+        }),
         // A sandbox class the host hands back resolves to the class object
         // itself; a host class resolves to its single `HostClassType` entry,
         // and calling it (or a classmethod on it) suspends to the host, whose
@@ -1122,6 +1138,23 @@ fn snapshot_dict_pairs(dict: &Dict, heap: &Heap) -> Vec<(Value, Value)> {
     dict.iter()
         .map(|(key, value)| (key.clone_with_heap(heap), value.clone_with_heap(heap)))
         .collect()
+}
+
+/// A value with no data form as the handle its session holds it under, when
+/// the session holds handles; any other value, or any value of a session that
+/// holds none, as its `repr()`.
+fn handle_node(value: &Value, vm: &mut VM<'_>) -> MontyNode {
+    held_node(value, vm).unwrap_or_else(|| repr_node(value, vm))
+}
+
+/// A value with no data form as the handle its session holds it under, or
+/// `None` when the session holds no handles.
+fn held_node(value: &Value, vm: &mut VM<'_>) -> Option<MontyNode> {
+    let id = vm.heap.hold(Held::of(value)?, None)?;
+    Some(MontyNode::Handle {
+        id,
+        type_name: value.py_type_name(vm).into_owned(),
+    })
 }
 
 /// Converts a value to its repr node, falling back to a descriptive error

@@ -20,6 +20,8 @@ Examples include sandbox-defined class objects, functions and compiled `re` patt
 Iterators return type placeholders, and a host-function proxy returned from the sandbox becomes its name.
 Python and JavaScript hosts cannot distinguish these from ordinary sandbox strings with the same text.
 Rust hosts can distinguish the corresponding `MontyNode` variants.
+A Rust session opened with `MontyRepl::with_handles` instead holds each such value, and each sandbox class, under a
+handle until the host releases it, and the value handed back is the same object.
 Sandbox-defined class *instances* instead return structured proxies;
 see [classes](classes.md#crossing-the-host-boundary-pydantic_monty-pydanticmonty).
 
