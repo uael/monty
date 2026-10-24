@@ -845,6 +845,7 @@ impl Child {
             ReplProgress::OsCall(call) => call.abort(exc, PrintWriter::Callback(&mut print)),
             ReplProgress::NameLookup(lookup) => lookup.abort(exc, PrintWriter::Callback(&mut print)),
             ReplProgress::ResolveFutures(state) => state.abort(exc, PrintWriter::Callback(&mut print)),
+            ReplProgress::Returned { call, .. } => call.abort(exc, PrintWriter::Callback(&mut print)),
             ReplProgress::Complete { .. } => unreachable!("checked above"),
         };
         let event = self.drive(outcome);
@@ -1286,6 +1287,7 @@ fn suspension_event(progress: &mut ReplProgress) -> pb::ChildEvent {
             position: Some(state.position().into()),
         })),
         ReplProgress::Complete { .. } => unreachable!("Complete is handled before suspension_event"),
+        ReplProgress::Returned { .. } => unreachable!("the worker never makes a call of its own first"),
     }
 }
 
