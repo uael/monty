@@ -62,7 +62,10 @@ impl TypeChecker {
     ///
     /// # Arguments
     /// * `python_source` - The python source code to type check.
-    /// * `stubs_file` - Optional stubs file to use for type checking.
+    /// * `stubs_file` - Optional stubs file to use for type checking. A bare
+    ///   file (`stubs.pyi`) is opened for the source with a star import; a
+    ///   file inside a package (`furb/engine.pyi`) is a module the source
+    ///   imports by its own name, and nothing is prepended.
     /// * `config` - Configuration for the type checking diagnostics.
     ///
     /// # Returns
@@ -115,11 +118,15 @@ impl TypeChecker {
                     python_source.path, stubs_file.path
                 ));
             }
-            let stub_stem = stubs_file
-                .path
-                .split_once('.')
-                .map_or(stubs_file.path, |(before, _)| before);
-            writeln!(prefix, "from {stub_stem} import *").map_err(to_string)?;
+            // A stub inside a package stands as the module it names, for the
+            // source to import as it would any other.
+            if !stubs_file.path.contains('/') {
+                let stub_stem = stubs_file
+                    .path
+                    .split_once('.')
+                    .map_or(stubs_file.path, |(before, _)| before);
+                writeln!(prefix, "from {stub_stem} import *").map_err(to_string)?;
+            }
         }
         // Subtract the injected prefix from diagnostic spans to preserve the original positions.
         let (main_file, code_offset): (File, u32) = if prefix.is_empty() {
