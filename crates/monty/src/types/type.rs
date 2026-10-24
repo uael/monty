@@ -329,6 +329,9 @@ pub enum Type {
     /// A resolved `csv` dialect, CPython's `_csv.Dialect`.
     #[strum(serialize = "_csv.Dialect")]
     CsvDialect,
+    /// The running event loop that `asyncio.get_running_loop()` gives.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

@@ -1406,6 +1406,9 @@ pub enum MontyType {
     /// The wrapper `functools.lru_cache` / `functools.cache` returns.
     #[strum(serialize = "functools._lru_cache_wrapper")]
     LruCacheWrapper,
+    /// The running event loop that `asyncio.get_running_loop()` gives.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
 }
 
 impl fmt::Display for MontyType {
