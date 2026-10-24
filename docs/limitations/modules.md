@@ -1,19 +1,26 @@
 # Standard library modules
 
-Monty provides a fixed set of stdlib modules.
-Other imports request [host modules](#host-modules) and raise `ModuleNotFoundError` if none is provided.
-There is no `sys.path` or site-packages; sandboxed code cannot load additional modules itself.
+Monty provides a fixed set of stdlib modules. Other imports read `sys.modules` first, then request
+[host modules](#host-modules), and raise `ModuleNotFoundError` if neither has one.
+There is no `sys.path` or site-packages; sandboxed code cannot load additional modules itself, so a module of
+your own reaches the sandbox by being put in `sys.modules` or served as a host module.
 
 `os.path` (also importable as `posixpath`) is the only submodule.
 
-Every bundled import builds a fresh module object; there is no `sys.modules` cache.
-Thus `import math as a; import math as b` leaves `a is not b`, and changes such as `sys.argv.append(...)` do not
-survive the next import.
-Assigning a bundled module's attributes raises `AttributeError`, as in `sys.x = 1`.
-[Host modules](#host-modules) are module objects too, bound afresh by every import.
-The one exception is `random`'s module-level generator, which is session
-state: a `random.seed(...)` is still in effect after a later `import random`,
-in the next feed, and after a dump (see [random.md](random.md)).
+`sys.modules` is the session's own table, and `import` answers from it first, as
+in CPython. So a stdlib module is built once and every later import of that name
+finds the same object, across feeds and across a dump: `import math as a; import math as b` leaves `a is b`, and
+a change such as `sys.argv.append(...)` survives the next import. Binding a name in it is what
+makes `import <name>` work for anything else: `sys.modules['x'] = obj` then
+`import x` binds `obj`, whatever `obj` is, as CPython does.
+[Host modules](#host-modules) are module objects too, but the table does not keep them: each import of one asks
+the host again, unless the program put it in `sys.modules`.
+
+`import` and `from x import y` are the only readers of the table. `__import__` and `importlib`
+are absent, a dotted name is not split into parent packages, and a submodule does not go in the table.
+Assigning a bundled module's attributes raises `AttributeError`, as in `sys.x = 1`, so
+state is shared through a module a program built itself rather than through a
+stdlib one.
 
 ## Modules available
 

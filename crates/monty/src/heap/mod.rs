@@ -1017,11 +1017,20 @@ impl<'de> serde::Deserialize<'de> for Heap {
         }
         let fields = HeapFields::deserialize(deserializer)?;
         let mut entries = fields.entries;
+        let indexes = match restore_entries(&mut entries) {
+            Ok(indexes) => indexes,
+            Err(message) => {
+                // The entries never become a `Heap`, so its `Drop` does not clean them up.
+                #[cfg(feature = "memory-model-checks")]
+                release_entries(&mut entries);
+                return Err(D::Error::custom(message));
+            }
+        };
         let WeakIndexes {
             ext_function_cache,
             boundary_index,
             host_type_index,
-        } = restore_entries(&mut entries).map_err(D::Error::custom)?;
+        } = indexes;
         Ok(Self {
             entries,
             tracker: fields.tracker,
@@ -1808,12 +1817,18 @@ impl HeapReader<'_> {
 #[cfg(feature = "memory-model-checks")]
 impl Drop for Heap {
     fn drop(&mut self) {
-        for id in 0..self.entries.len() {
-            if let Some(mut entry) = self.entries.entry(HeapId::from_index(id)) {
-                // Mark all `Value::Ref` payloads as `Dereferenced` so they don't panic when dropped
-                py_dec_ref_ids_for_data(entry.get_mut().data.0.get_mut(), &mut Vec::new());
-                entry.free();
-            }
+        release_entries(&mut self.entries);
+    }
+}
+
+/// Frees each entry of `entries` after it marks its `Value::Ref` payloads as `Dereferenced`, so
+/// the bookkeeping of `memory-model-checks` does not panic when they drop.
+#[cfg(feature = "memory-model-checks")]
+fn release_entries(entries: &mut StableHeap<HeapEntry>) {
+    for id in 0..entries.len() {
+        if let Some(mut entry) = entries.entry(HeapId::from_index(id)) {
+            py_dec_ref_ids_for_data(entry.get_mut().data.0.get_mut(), &mut Vec::new());
+            entry.free();
         }
     }
 }

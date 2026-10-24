@@ -32,4 +32,4 @@ dropped = itertools.repeat([3, 4], 1)
 dropped = None
 
 len(out)
-# ref-counts={'itertools': 1, 'obj': 5, 'r': 1, 'out': 1, 'big': 2, 'counter': 1, 'first': 2, 'cyclic': 2, 'held': 1, 'stepped': 1}
+# ref-counts={'itertools': 2, 'obj': 5, 'r': 1, 'out': 1, 'big': 2, 'counter': 1, 'first': 2, 'cyclic': 2, 'held': 1, 'stepped': 1}
