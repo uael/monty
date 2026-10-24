@@ -168,6 +168,21 @@ pub(crate) trait ExcTypeExt: Sized {
         Self::type_error(format!("typing.Optional requires a single type. Got {repr}."))
     }
 
+    /// Creates the TypeError `isinstance()` raises for a
+    /// `typing` alias such as `Literal['a']`, which CPython's `typing` refuses
+    /// to check against.
+    #[must_use]
+    fn type_error_subscripted_generic_check() -> RunError {
+        Self::type_error("Subscripted generics cannot be used with class and instance checks")
+    }
+
+    /// Creates the TypeError for calling a `typing` form or an alias of one
+    /// (`Literal['a']()`), `form` being its name: `Cannot instantiate typing.Literal`.
+    #[must_use]
+    fn type_error_cannot_instantiate(form: &str) -> RunError {
+        Self::type_error(format!("Cannot instantiate {form}"))
+    }
+
     /// Creates the TypeError `isinstance()` raises for a `types.GenericAlias`
     /// second argument, which CPython refuses to check against.
     #[must_use]

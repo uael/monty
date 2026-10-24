@@ -315,10 +315,11 @@ fn classify(output: &HeapReadOutput<'_>) -> Copyability {
         | HeapReadOutput::HostClassType(_)
         | HeapReadOutput::Closure(_)
         | HeapReadOutput::DataclassMethod(_)
-        // Type forms: `list[int]` and `int | None`. Nothing can mutate one, so
-        // sharing is visible only to `is` — CPython rebuilds them through
-        // `operator.getitem`, see `limitations/copy.md`.
+        // Type forms: `list[int]`, `Literal['a']` and `int | None`. Nothing can
+        // mutate one, so sharing is visible only to `is` — CPython rebuilds them
+        // through `operator.getitem`, see `limitations/copy.md`.
         | HeapReadOutput::GenericAlias(_)
+        | HeapReadOutput::LiteralGenericAlias(_)
         | HeapReadOutput::Union(_)
         | HeapReadOutput::FunctionDefaults(_) => Copyability::Shared,
         // Refused, with the `TypeError` CPython's pickler raises. Views and

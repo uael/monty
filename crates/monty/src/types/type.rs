@@ -325,6 +325,10 @@ pub enum Type {
     /// A resolved `csv` dialect, CPython's `_csv.Dialect`.
     #[strum(serialize = "_csv.Dialect")]
     CsvDialect,
+    /// `typing._LiteralGenericAlias`, the type of `Literal['a']`. CPython
+    /// defines it in Python, so its `__name__` is `'_LiteralGenericAlias'`.
+    #[strum(serialize = "typing._LiteralGenericAlias")]
+    LiteralGenericAlias,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)

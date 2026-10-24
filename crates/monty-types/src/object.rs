@@ -1406,6 +1406,9 @@ pub enum MontyType {
     /// The wrapper `functools.lru_cache` / `functools.cache` returns.
     #[strum(serialize = "functools._lru_cache_wrapper")]
     LruCacheWrapper,
+    /// `typing._LiteralGenericAlias`, the type of `Literal['a']`.
+    #[strum(serialize = "typing._LiteralGenericAlias")]
+    LiteralGenericAlias,
 }
 
 impl fmt::Display for MontyType {

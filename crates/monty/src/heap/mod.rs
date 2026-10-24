@@ -2065,6 +2065,7 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
         HeapData::Csv(csv) => csv.for_each_child_id(on_child),
         HeapData::Partial(partial) => partial.for_each_child_id(on_child),
         HeapData::GenericAlias(alias) => alias.for_each_child_id(on_child),
+        HeapData::LiteralGenericAlias(alias) => alias.for_each_child_id(on_child),
         HeapData::Union(union) => union.for_each_child_id(on_child),
         HeapData::LruCache(cache) => cache.for_each_child_id(on_child),
         HeapData::Module(m) => {
@@ -2226,6 +2227,7 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::Csv(csv) => csv.py_dec_ref_ids(stack),
         HeapData::Partial(partial) => partial.py_dec_ref_ids(stack),
         HeapData::GenericAlias(alias) => alias.py_dec_ref_ids(stack),
+        HeapData::LiteralGenericAlias(alias) => alias.py_dec_ref_ids(stack),
         HeapData::Union(union) => union.py_dec_ref_ids(stack),
         HeapData::LruCache(cache) => cache.py_dec_ref_ids(stack),
         HeapData::Module(m) => m.py_dec_ref_ids(stack),

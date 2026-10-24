@@ -53,6 +53,9 @@ pub(crate) fn isinstance_check(obj: &Value, classinfo: &Value, vm: &mut VM<'_>) 
         Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::GenericAlias(_)) => {
             Err(ExcType::isinstance_parameterized_generic())
         }
+        Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::LiteralGenericAlias(_)) => {
+            Err(ExcType::type_error_subscripted_generic_check())
+        }
         // `int | None`: true when any member matches, tested in order.
         Value::Ref(id) if let HeapData::Union(union) = vm.heap.get(*id) => {
             let args = union.args(vm.heap);

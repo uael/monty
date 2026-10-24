@@ -176,6 +176,8 @@ macro_rules! heap_payloads {
             DirScan(boxed $crate::types::DirScan),
             /// Any `csv` object: a reader, writer, `DictReader`, `DictWriter` or dialect.
             Csv(boxed $crate::types::CsvObject),
+            /// A `typing._LiteralGenericAlias` such as `Literal['a', 'b']`.
+            LiteralGenericAlias(inline $crate::types::LiteralGenericAlias),
         }
     };
 }
@@ -263,6 +265,7 @@ impl HeapData {
             | Self::ExternalFuture(_)
             | Self::Partial(_)
             | Self::GenericAlias(_)
+            | Self::LiteralGenericAlias(_)
             | Self::Union(_)
             | Self::LruCache(_)
             | Self::Csv(_) => true,
@@ -314,6 +317,7 @@ impl HeapData {
                 | Self::Partial(_)
                 | Self::GenericAlias(_)
                 | Self::LruCache(_)
+                | Self::LiteralGenericAlias(_)
         )
     }
 
@@ -336,6 +340,7 @@ impl HeapData {
             Self::Random(_) => Type::Random,
             Self::HashObject(hash) => hash.algorithm().py_type(),
             Self::GenericAlias(_) => Type::GenericAlias,
+            Self::LiteralGenericAlias(_) => Type::LiteralGenericAlias,
             Self::Union(_) => Type::Union,
             Self::LruCache(_) => Type::LruCacheWrapper,
             Self::DictKeysView(_) => Type::DictKeys,
@@ -695,6 +700,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Random($value) => $body,
             Self::HashObject($value) => $body,
             Self::GenericAlias($value) => $body,
+            Self::LiteralGenericAlias($value) => $body,
             Self::Union($value) => $body,
             Self::LruCache($value) => $body,
             Self::Tuple($value) => $body,
@@ -984,6 +990,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             | Self::Random(_)
             | Self::HashObject(_)
             | Self::GenericAlias(_)
+            | Self::LiteralGenericAlias(_)
             | Self::Union(_)
             | Self::LruCache(_)
             | Self::Cell(_)

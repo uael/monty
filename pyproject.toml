@@ -109,6 +109,15 @@ extra-standard-library = ["tomllib"]
     "F506", # mixed positional and named placeholders - tests CPython's argument consumption order
     "F507", # placeholder/argument count mismatch - the point of the argument-count tests
 ]
+"crates/monty/test_cases/{typing__literal,refcount__literal_generic_alias}.py" = [
+    "B015", # pointless comparison - the comparison itself must raise
+    "PYI030", # literals in a union - the union of two literal aliases is what the test builds
+    "PYI061", # `Literal[None]` - its repr and arguments are under test
+    "PYI062", # duplicate literal member - the deduplication under test
+    "RUF041", # nested `Literal` - the flattening under test
+    "UP007", # `Union[X, Y]` - the old spelling is under test
+    "UP045", # `Optional[X]` - the old spelling is under test
+]
 "crates/monty/test_cases/*.py" = [
     "E722", # bare except - needed for testing try/except with bare except clauses
     "E711", # Comparison to `None` should be `cond is None`
