@@ -95,7 +95,7 @@ pub enum BuiltinsFunctions {
     // Super,
     // tuple - handled by Type enum
     Type,
-    // Vars,
+    // Vars - appended at the end, see below
     Zip,
     // __import__ - not planned
     // Appended out of alphabetical order: the discriminant is emitted as a
@@ -118,4 +118,6 @@ pub enum BuiltinsFunctions {
     Exec,
     /// `locals()`, appended after [`Self::Exec`].
     Locals,
+    /// `vars(object=...)`, appended after [`Self::Locals`].
+    Vars,
 }
