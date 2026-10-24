@@ -37,8 +37,8 @@ name a type in an annotation, and nothing else:
     and `Counter`. A class of your own is neither, where CPython lets one
     register. `issubclass(list, Sequence)` raises
     `TypeError: issubclass() arg 2 must be a class, or tuple of classes`.
-- **No value is a `Generator`**, because Monty has no generator functions, and
-    a generator expression gives a `list` (see [language.md](language.md)).
+- **A generator expression is no `Generator`**, because it gives a `list`
+    here (see [language.md](language.md)).
 - **`Iterator` reads False for `map`, `filter`, `zip`, `enumerate` and
     `reversed`**, which are eager here and give a `list`, so they read as a
     `Sequence` instead; see [builtins.md](builtins.md).

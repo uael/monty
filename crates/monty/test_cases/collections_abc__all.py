@@ -21,6 +21,10 @@ assert len(takes(1, 2)) == 2
 
 
 # === Each one answers `isinstance` from what the value is ===
+def gen_fn():
+    yield 1
+
+
 def plain():
     pass
 
@@ -35,14 +39,15 @@ assert isinstance(len, Callable)
 assert isinstance(Caller(), Callable)
 assert not isinstance(1, Callable)
 
-# Monty has no generator functions, so no value is a `Generator`.
+assert isinstance(gen_fn(), Generator)
 assert not isinstance([], Generator)
 assert not isinstance(iter([]), Generator)
 
 assert isinstance(iter([]), Iterator)
+assert isinstance(gen_fn(), Iterator)
 assert not isinstance([], Iterator)
 
-for value in ('s', b's', [], (), {}, set(), range(2), iter([])):
+for value in ('s', b's', [], (), {}, set(), range(2), iter([]), gen_fn()):
     assert isinstance(value, Iterable)
 assert not isinstance(1, Iterable)
 
