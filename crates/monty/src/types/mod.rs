@@ -18,6 +18,7 @@ pub mod dict_view;
 pub mod dir_scan;
 pub mod ext_function;
 pub mod file;
+pub mod generator;
 pub mod generic_alias;
 pub mod hash_table;
 pub mod hashlib;

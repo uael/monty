@@ -97,6 +97,7 @@ ALLOWED_CLASSES = {
     'TypeError',
     'ValueError',
     'StopIteration',
+    'GeneratorExit',
 }
 
 # Files to copy without filtering
