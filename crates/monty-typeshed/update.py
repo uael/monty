@@ -164,6 +164,7 @@ VERSIONS = """\
 _collections_abc: 3.3-
 _typeshed: 3.0-  # not present at runtime, only for type checking
 abc: 3.0-  # not importable at runtime, only for type checking
+ast: 3.0-
 asyncio: 3.4-
 base64: 3.0-
 binascii: 3.0-
