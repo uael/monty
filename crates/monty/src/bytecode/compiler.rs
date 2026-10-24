@@ -23,9 +23,9 @@ use crate::{
     builtins::{Builtins, BuiltinsFunctions},
     exception_private::{ExcType, RunError, SimpleException},
     expressions::{
-        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier,
-        ImportName, Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem, Submodule,
-        UnpackTarget,
+        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc,
+        Identifier, ImportName, Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem,
+        Submodule, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
@@ -663,6 +663,11 @@ impl<'a, 'i> Compiler<'a, 'i> {
             } => {
                 self.compile_expr(object)?;
                 self.emit_unpack_store(targets, *targets_position)?;
+            }
+            Node::Delete(targets) => {
+                for target in targets {
+                    self.compile_delete_target(target)?;
+                }
             }
             Node::OpAssign { target, op, value } => {
                 let Some(opcode) = operator_to_inplace_opcode(op) else {
@@ -3910,6 +3915,55 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// implicitly emits a delete on the bound name, but functions with 256+
     /// locals plus an `except as` are exotic enough that we surface a
     /// `SyntaxError` rather than introduce a new opcode just for this).
+    /// Compiles one `del` target.
+    ///
+    /// A name delete emits a load first: `DeleteLocal` and `DeleteCell`
+    /// overwrite unconditionally, and it is that load which raises the
+    /// `UnboundLocalError` CPython raises for a name that was never bound.
+    fn compile_delete_target(&mut self, target: &DeleteTarget) -> Result<(), CompileError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                // `DeleteName` and `DeleteGlobal` raise for themselves; only the
+                // two that overwrite unconditionally need the guarding load.
+                let needs_guard = match ident.scope {
+                    NameScope::Local => !self.is_module_scope,
+                    NameScope::Cell => true,
+                    NameScope::Global | NameScope::CompVar | NameScope::Name => false,
+                };
+                if needs_guard {
+                    self.compile_name(ident)?;
+                    self.code.set_location(ident.position, None);
+                    self.code.emit(Opcode::Pop)?;
+                }
+                self.code.set_location(ident.position, None);
+                self.compile_delete(ident)?;
+            }
+            DeleteTarget::Attr { object, attr, position } => {
+                let Some(name_id) = attr.string_id() else {
+                    return Err(CompileError::new(
+                        "internal error: attribute name in AST must be interned",
+                        *position,
+                    ));
+                };
+                let name_idx = check_name_index_u16(name_id, *position)?;
+                self.compile_expr(object)?;
+                self.code.set_location(*position, None);
+                self.code.emit_u16(Opcode::DeleteAttr, name_idx)?;
+            }
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                self.code.set_location(*position, None);
+                self.code.emit(Opcode::DeleteSubscr)?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_delete(&mut self, target: &Identifier) -> Result<(), CompileError> {
         let slot = target.namespace_id().as_u16();
         match target.scope {

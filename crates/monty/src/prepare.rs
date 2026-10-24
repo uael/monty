@@ -7,8 +7,8 @@ use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Signature},
     builtins::Builtins,
     expressions::{
-        AssignTarget, Callable, CaptureSource, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName,
-        MatchCase, NameScope, Node, Pattern, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
+        AssignTarget, Callable, CaptureSource, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc, Identifier,
+        ImportName, MatchCase, NameScope, Node, Pattern, PreparedFunctionDef, PreparedNode, SequenceItem, UnpackTarget,
     },
     fstring::{FStringPart, FormatSpec},
     intern::{CompileInterns, StringId},
@@ -874,6 +874,13 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 } => {
                     new_nodes.push(self.prepare_class_def(name, body, members, decorators, position)?);
                 }
+                Node::Delete(targets) => {
+                    let targets = targets
+                        .into_iter()
+                        .map(|t| self.prepare_delete_target(t))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    new_nodes.push(Node::Delete(targets));
+                }
                 Node::Global { names, position } => {
                     // At module level, `global` is a no-op since all variables are already global.
                     // In functions, the global declarations are already collected in the first pass
@@ -1619,6 +1626,31 @@ impl<'i, 'g> Prepare<'i, 'g> {
                 Ok(Some(self.get_id(ident)?))
             }
             None => Ok(None),
+        }
+    }
+
+    /// Resolves one `del` target: a name unbinds here, an object's attribute or
+    /// item is a read of that object followed by a removal.
+    fn prepare_delete_target(&mut self, target: DeleteTarget) -> Result<DeleteTarget, ParseError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                self.names_assigned_in_order.insert(ident.name_id);
+                Ok(DeleteTarget::Name(self.get_id_for_store_target(ident)?))
+            }
+            DeleteTarget::Attr { object, attr, position } => Ok(DeleteTarget::Attr {
+                object: self.prepare_expression(object)?,
+                attr,
+                position,
+            }),
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => Ok(DeleteTarget::Subscript {
+                object: self.prepare_expression(object)?,
+                index: self.prepare_expression(index)?,
+                position,
+            }),
         }
     }
 
@@ -2634,6 +2666,25 @@ fn collect_scope_info_from_node(
                 collect_assigned_names_from_expr(decorator, assigned_names, interner);
             }
         }
+        Node::Delete(targets) => {
+            // `del x` makes `x` local to this scope, exactly as an assignment
+            // does, which is why `del x` before any store is an
+            // `UnboundLocalError` rather than a `NameError`.
+            for target in targets {
+                match target {
+                    DeleteTarget::Name(ident) => {
+                        assigned_names.insert(ident.name_id);
+                    }
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_assigned_names_from_expr(object, assigned_names, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_assigned_names_from_expr(object, assigned_names, interner);
+                        collect_assigned_names_from_expr(index, assigned_names, interner);
+                    }
+                }
+            }
+        }
         Node::ClassDef { name, decorators, .. } => {
             // A class definition binds the class name in this scope, just like a `def`.
             // The class body is a separate scope (handled by the cell-var pass).
@@ -2937,6 +2988,21 @@ fn collect_cell_vars_from_node(
             // position, or one passed to a factory) can capture our locals too.
             for decorator in decorators {
                 collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
+            }
+        }
+        Node::Delete(targets) => {
+            // A lambda inside an index expression can capture our locals.
+            for target in targets {
+                match target {
+                    DeleteTarget::Name(_) => {}
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_cell_vars_from_expr(object, our_locals, cell_vars, interner);
+                        collect_cell_vars_from_expr(index, our_locals, cell_vars, interner);
+                    }
+                }
             }
         }
         Node::ClassDef { body, decorators, .. } => {
@@ -3540,6 +3606,22 @@ fn collect_referenced_names_from_node(
             // Decorators evaluate in *our* scope, so their names are ours to collect.
             for decorator in decorators {
                 collect_referenced_names_from_expr(decorator, referenced, interner);
+            }
+        }
+        Node::Delete(targets) => {
+            // Only the object and index expressions are read; the name form
+            // binds rather than references.
+            for target in targets {
+                match target {
+                    DeleteTarget::Name(_) => {}
+                    DeleteTarget::Attr { object, .. } => {
+                        collect_referenced_names_from_expr(object, referenced, interner);
+                    }
+                    DeleteTarget::Subscript { object, index, .. } => {
+                        collect_referenced_names_from_expr(object, referenced, interner);
+                        collect_referenced_names_from_expr(index, referenced, interner);
+                    }
+                }
             }
         }
         Node::ClassDef { decorators, .. } => {

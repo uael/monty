@@ -40,6 +40,7 @@ They exist for development and for agents debugging code that runs on Monty; mos
     see [modules.md](modules.md#host-modules)
 - Starred unpacking everywhere CPython allows it
 - Runtime generic aliases (`list[int]`) and `|` unions (`int | None`), see [typing.md](typing.md)
+- `del`, including `del obj.attr`, `del d[k]` and `del lst[i:j]`
 
 **Rejected at parse time**, with `NotImplementedError` before any code runs:
 
@@ -47,7 +48,6 @@ They exist for development and for agents debugging code that runs on Monty; mos
 - Decorators on methods — so no `@classmethod`, `@staticmethod`, `@property`
 - `yield` / `yield from` — there are no generator functions.
     Generator *expressions* parse, but currently materialise to a `list`
-- `del`, both `del x` and `del d[k]`
 - `try*` / `except*` exception groups
 - PEP 695 `type` aliases
 - `async with`, `async for` and async comprehensions
