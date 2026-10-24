@@ -771,7 +771,9 @@ impl MontyTypeExt for MontyType {
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
             Type::LruCacheWrapper => Self::LruCacheWrapper,
+            // No host-side code type: a code object crosses as its repr.
             Type::Random
+            | Type::Code
             | Type::HashlibHash
             | Type::HashlibHashXof
             | Type::Blake2b

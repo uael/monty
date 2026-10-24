@@ -44,7 +44,7 @@ pub enum BuiltinsFunctions {
     // Callable,
     Chr,
     // Classmethod,
-    // Compile,
+    // compile - appended below, out of alphabetical order
     // complex - handled by Type enum
     // Delattr,
     // dict - handled by Type enum
@@ -118,4 +118,7 @@ pub enum BuiltinsFunctions {
     Exec,
     /// `locals()`, appended after [`Self::Exec`].
     Locals,
+    /// `compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1)`,
+    /// appended after [`Self::Locals`].
+    Compile,
 }

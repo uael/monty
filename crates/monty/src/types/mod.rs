@@ -8,6 +8,7 @@
 pub mod bytes;
 pub mod callable_iterator;
 pub mod class;
+mod code;
 pub mod complex;
 pub mod csv;
 pub mod date;
@@ -55,6 +56,7 @@ pub mod union;
 
 pub(crate) use bytes::{Bytes, BytesIterator};
 pub(crate) use class::Class;
+pub(crate) use code::{Code, CodeMode};
 pub(crate) use complex::Complex;
 pub(crate) use csv::CsvObject;
 pub(crate) use deque::Deque;

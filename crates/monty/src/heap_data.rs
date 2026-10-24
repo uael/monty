@@ -74,6 +74,8 @@ macro_rules! heap_payloads {
             Range(inline $crate::types::Range),
             /// A slice object such as `slice(1, 10, 2)`.
             Slice(inline $crate::types::Slice),
+            /// A code object, what `compile()` answers and `eval()`/`exec()` take.
+            Code(boxed $crate::types::Code),
             /// An exception instance such as `ValueError('message')`.
             #[serde(rename = "X")]
             Exception(inline $crate::exception_private::SimpleException),
@@ -275,6 +277,7 @@ impl HeapData {
             | Self::Bytes(_)
             | Self::Range(_)
             | Self::Slice(_)
+            | Self::Code(_)
             | Self::Exception(_)
             | Self::DataclassParams(_)
             | Self::StringIterator(_)
@@ -352,6 +355,7 @@ impl HeapData {
             Self::Cell(_) => Type::Cell,
             Self::Range(_) => Type::Range,
             Self::Slice(_) => Type::Slice,
+            Self::Code(_) => Type::Code,
             Self::Exception(e) => Type::Exception(e.exc_type()),
             Self::HostClass(_) => Type::HostClass,
             Self::HostClassType(_) => Type::Type,
@@ -704,6 +708,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::FrozenSet($value) => $body,
             Self::Range($value) => $body,
             Self::Slice($value) => $body,
+            Self::Code($value) => $body,
             Self::HostClass($value) => $body,
             Self::HostClassType($value) => $body,
             Self::Class($value) => $body,
@@ -957,6 +962,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::FrozenSet(value) => value.py_iter(vm),
             Self::Range(value) => value.py_iter(vm),
             Self::Slice(value) => value.py_iter(vm),
+            Self::Code(value) => value.py_iter(vm),
             Self::HostClass(value) => value.py_iter(vm),
             Self::HostClassType(value) => value.py_iter(vm),
             Self::Class(value) => value.py_iter(vm),
@@ -1024,6 +1030,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::FrozenSet(value) => value.py_next(vm),
             Self::Range(value) => value.py_next(vm),
             Self::Slice(value) => value.py_next(vm),
+            Self::Code(value) => value.py_next(vm),
             Self::HostClass(value) => value.py_next(vm),
             Self::HostClassType(value) => value.py_next(vm),
             Self::Class(value) => value.py_next(vm),
