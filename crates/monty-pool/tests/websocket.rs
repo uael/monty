@@ -1296,6 +1296,7 @@ async fn rejected_raw_load_keeps_the_suspension_count() {
                         message: Some("protocol violation: Load requires a session that has not started".to_owned()),
                         traceback: vec![].into(),
                         data: None,
+                        user_type: None,
                     }),
                 })),
                 max_suspensions: Some(1),
@@ -2010,6 +2011,7 @@ async fn refused_restore_keeps_the_session_id() {
                 exception: Some(pb::RaisedException {
                     exc_type: "RuntimeError".to_owned(),
                     message: Some("unknown session".to_owned()),
+                    user_type: None,
                     traceback: vec![].into(),
                     data: None,
                 }),

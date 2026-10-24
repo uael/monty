@@ -53,6 +53,14 @@ pub(crate) struct Class {
     /// Defaults to empty, so a dump made before bases existed still loads.
     #[serde(default)]
     bases: Vec<HeapId>,
+    /// The builtin exception this class descends from, resolved once at
+    /// creation because the chain cannot change afterwards. `Some` is what
+    /// makes an instance of this class raisable, and the type every existing
+    /// handler, message and host binding keys off; the class's own name is
+    /// carried alongside it so a traceback still reads `Refused: why`.
+    /// Defaults to `None`, so a dump made before it existed still loads.
+    #[serde(default)]
+    builtin_exc: Option<ExcType>,
     /// Boundary identity, generated lazily the first time the class (or one of
     /// its instances) crosses to the host; dumped with the heap so it stays
     /// stable across restores.
@@ -62,13 +70,21 @@ pub(crate) struct Class {
 impl Class {
     /// Creates a new class object from its name and member namespace.
     #[must_use]
-    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>) -> Self {
+    pub fn new(name: EitherStr, namespace: Dict, bases: Vec<HeapId>, builtin_exc: Option<ExcType>) -> Self {
         Self {
             name,
             namespace,
             bases,
+            builtin_exc,
             uuid: None,
         }
+    }
+
+    /// The builtin exception this class descends from, or `None` for a class
+    /// whose instances are not exceptions.
+    #[must_use]
+    pub fn builtin_exc(&self) -> Option<ExcType> {
+        self.builtin_exc
     }
 
     /// The base classes, as borrowed ids. Owned by this class.
@@ -103,12 +119,15 @@ impl Class {
     }
 
     /// `__bases__`: the class this one was made with, as a tuple of one, since
-    /// inheritance is single here. A class of the session stands as itself,
-    /// and a class made with none as `object`, which is what CPython reports
-    /// for each.
+    /// inheritance is single here. A class of the session stands as itself, a
+    /// builtin exception base as the type it is, and a class made with none as
+    /// `object`, which is what CPython reports for each.
     pub(crate) fn bases_tuple(&self, vm: &VM<'_>) -> Value {
         let items: SmallVec<[Value; TUPLE_INLINE_CAPACITY]> = if self.bases.is_empty() {
-            smallvec![Value::Builtin(Builtins::Type(Type::Object))]
+            smallvec![match self.builtin_exc {
+                Some(exc) => Value::Builtin(Builtins::ExcType(exc)),
+                None => Value::Builtin(Builtins::Type(Type::Object)),
+            }]
         } else {
             self.bases
                 .iter()
