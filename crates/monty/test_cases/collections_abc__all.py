@@ -1,0 +1,60 @@
+# `collections.abc` exports seven names, which answer `isinstance` and nothing
+# else. See `limitations/collections.md`.
+from collections import Counter, abc, defaultdict, deque, namedtuple
+from collections.abc import Callable, Coroutine, Generator, Iterable, Iterator, Mapping, Sequence
+
+# === Every exported name resolves, from either import form ===
+for name in (Callable, Coroutine, Generator, Iterable, Iterator, Mapping, Sequence):
+    assert name is not None
+
+assert abc.Callable is Callable
+assert abc.Sequence is Sequence
+
+# === Annotations name them without evaluating them ===
+
+
+def takes(f: Callable[[int], int], m: Mapping) -> Iterable:
+    return [f, m]
+
+
+assert len(takes(1, 2)) == 2
+
+
+# === Each one answers `isinstance` from what the value is ===
+def plain():
+    pass
+
+
+class Caller:
+    def __call__(self):
+        return 1
+
+
+assert isinstance(plain, Callable)
+assert isinstance(len, Callable)
+assert isinstance(Caller(), Callable)
+assert not isinstance(1, Callable)
+
+# Monty has no generator functions, so no value is a `Generator`.
+assert not isinstance([], Generator)
+assert not isinstance(iter([]), Generator)
+
+assert isinstance(iter([]), Iterator)
+assert not isinstance([], Iterator)
+
+for value in ('s', b's', [], (), {}, set(), range(2), iter([])):
+    assert isinstance(value, Iterable)
+assert not isinstance(1, Iterable)
+
+Point = namedtuple('Point', 'x y')
+for value in ('s', b's', [], (), range(2), deque([1]), Point(1, 2)):
+    assert isinstance(value, Sequence)
+assert not isinstance({}, Sequence)
+
+for value in ({}, Counter(), defaultdict(int)):
+    assert isinstance(value, Mapping)
+assert not isinstance([], Mapping)
+
+# === A tuple of them works, as any classinfo tuple does ===
+assert isinstance([], (Mapping, Sequence))
+assert not isinstance(1, (Mapping, Sequence))
