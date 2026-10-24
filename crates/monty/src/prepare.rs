@@ -869,10 +869,11 @@ impl<'i, 'g> Prepare<'i, 'g> {
                     name,
                     body,
                     members,
+                    bases,
                     decorators,
                     position,
                 } => {
-                    new_nodes.push(self.prepare_class_def(name, body, members, decorators, position)?);
+                    new_nodes.push(self.prepare_class_def(name, body, members, bases, decorators, position)?);
                 }
                 Node::Global { names, position } => {
                     // At module level, `global` is a no-op since all variables are already global.
@@ -1869,6 +1870,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
         name: Identifier,
         body: RawFunctionDef,
         members: Vec<Identifier>,
+        bases: Vec<ExprLoc>,
         decorators: Vec<ExprLoc>,
         position: CodeRange,
     ) -> Result<PreparedNode, ParseError> {
@@ -1876,7 +1878,12 @@ impl<'i, 'g> Prepare<'i, 'g> {
         self.names_assigned_in_order.insert(name.name_id);
         let name = self.get_id(name)?;
 
-        // Decorators evaluate in the enclosing scope, not the class body.
+        // Bases and decorators both evaluate in the enclosing scope, not the
+        // class body. Bases first, because they are written first.
+        let bases = bases
+            .into_iter()
+            .map(|b| self.prepare_expression(b))
+            .collect::<Result<Vec<_>, ParseError>>()?;
         let decorators = decorators
             .into_iter()
             .map(|d| self.prepare_expression(d))
@@ -2006,6 +2013,7 @@ impl<'i, 'g> Prepare<'i, 'g> {
             name,
             body: body_def,
             members,
+            bases,
             decorators,
             position,
         })
@@ -2634,13 +2642,19 @@ fn collect_scope_info_from_node(
                 collect_assigned_names_from_expr(decorator, assigned_names, interner);
             }
         }
-        Node::ClassDef { name, decorators, .. } => {
+        Node::ClassDef {
+            name,
+            bases,
+            decorators,
+            ..
+        } => {
             // A class definition binds the class name in this scope, just like a `def`.
             // The class body is a separate scope (handled by the cell-var pass).
             assigned_names.insert(name.name_id);
-            // Decorators evaluate in *this* scope, so a walrus in one binds here.
-            for decorator in decorators {
-                collect_assigned_names_from_expr(decorator, assigned_names, interner);
+            // Bases and decorators evaluate in *this* scope, so a walrus in one
+            // binds here.
+            for expr in bases.iter().chain(decorators) {
+                collect_assigned_names_from_expr(expr, assigned_names, interner);
             }
         }
         Node::Try(Try {
@@ -2939,16 +2953,22 @@ fn collect_cell_vars_from_node(
                 collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
             }
         }
-        Node::ClassDef { body, decorators, .. } => {
+        Node::ClassDef {
+            body,
+            bases,
+            decorators,
+            ..
+        } => {
             // The class body is a nested scope of *this* scope, like a `def`: any
             // of our locals referenced from the class-var values or (transitively)
             // the method bodies becomes a cell var. `collect_cell_vars_from_function`
             // recurses into the nested method bodies for us.
             collect_cell_vars_from_function(&body.signature, &body.body, our_locals, cell_vars, interner);
-            // A nested scope inside a decorator expression (a lambda in decorator
-            // position, or one passed to a factory) can capture our locals too.
-            for decorator in decorators {
-                collect_cell_vars_from_expr(decorator, our_locals, cell_vars, interner);
+            // A nested scope inside a base or decorator expression (a lambda in
+            // decorator position, or one passed to a factory) can capture our
+            // locals too.
+            for expr in bases.iter().chain(decorators) {
+                collect_cell_vars_from_expr(expr, our_locals, cell_vars, interner);
             }
         }
         // Recurse into control flow structures
@@ -3542,12 +3562,12 @@ fn collect_referenced_names_from_node(
                 collect_referenced_names_from_expr(decorator, referenced, interner);
             }
         }
-        Node::ClassDef { decorators, .. } => {
+        Node::ClassDef { bases, decorators, .. } => {
             // The class body is a separate scope and the name is a binding, so
-            // neither is a reference here — but decorators evaluate in *our*
-            // scope, so their names are ours to collect.
-            for decorator in decorators {
-                collect_referenced_names_from_expr(decorator, referenced, interner);
+            // neither is a reference here — but bases and decorators evaluate in
+            // *our* scope, so their names are ours to collect.
+            for expr in bases.iter().chain(decorators) {
+                collect_referenced_names_from_expr(expr, referenced, interner);
             }
         }
         Node::Try(Try {

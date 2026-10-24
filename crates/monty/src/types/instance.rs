@@ -1,8 +1,9 @@
 use std::{borrow::Cow, fmt::Write};
 
 use monty_types::MontyUuid;
+use smallvec::SmallVec;
 
-use super::{Dict, LazyHeapSet, PyTrait, Type, attribute_name_value};
+use super::{Dict, LazyHeapSet, PyTrait, Type, allocate_string, allocate_tuple, attribute_name_value};
 use crate::{
     args::{ArgValues, KwargsValues},
     boundary_uuid::create_uuid,
@@ -22,6 +23,7 @@ use crate::{
         copy::{Memo, PyDeepCopy, deep_copy, deep_copy_attrs},
         dataclasses,
     },
+    types::class::class_default,
     value::{EitherStr, Value},
 };
 
@@ -53,6 +55,17 @@ impl Instance {
             class,
             attrs,
             uuid: None,
+        }
+    }
+
+    /// An instance of `class` that crosses under `uuid`, the identity the
+    /// host handed it in by.
+    #[must_use]
+    pub(crate) fn crossed(class: HeapId, attrs: Dict, uuid: MontyUuid) -> Self {
+        Self {
+            class,
+            attrs,
+            uuid: Some(uuid),
         }
     }
 
@@ -409,7 +422,12 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Instance> {
             defer_drop!(s, vm);
             Ok(f.write_str(s.to_str(vm)?)?)
         } else {
-            self.py_default_repr_fmt(f, vm)
+            match class_builtin_exc(class_id, vm) {
+                // An exception reads `Refused('why')`, as CPython's
+                // `BaseException.__repr__` writes it.
+                Some(_) => Ok(f.write_str(&exception_repr(self_id, vm)?)?),
+                None => self.py_default_repr_fmt(f, vm),
+            }
         }
     }
 
@@ -694,7 +712,79 @@ pub(crate) fn instance_repr(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value
 pub(crate) fn instance_str(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Value> {
     match instance_call_str_dunder(self_id, "__str__", vm)? {
         Some(s) => Ok(s),
+        // An exception renders as `BaseException.__str__` does: its lone
+        // argument, nothing at all, or the whole `args` tuple.
+        None if class_builtin_exc(instance_class(self_id, vm), vm).is_some() => {
+            let text = exception_message(self_id, vm)?;
+            Ok(allocate_string(text, vm.heap))
+        }
         None => instance_repr(self_id, vm),
+    }
+}
+
+/// What `BaseException.__str__` makes of an exception's `args`: its lone
+/// argument, nothing at all, or the whole tuple's repr.
+///
+/// Used both for `str(exc)` inside the sandbox and for the message a raise
+/// records, which is why it never dispatches a user `__str__`: a raise cannot
+/// afford to run sandbox code while it is unwinding.
+pub(crate) fn exception_message(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<String> {
+    let args = exception_args(self_id, vm);
+    defer_drop!(args, vm);
+    match args.as_slice() {
+        [] => Ok(String::new()),
+        [only] => {
+            let text = only.py_str(vm)?;
+            defer_drop!(text, vm);
+            Ok(text.to_str(vm)?.to_owned())
+        }
+        many => {
+            let items = many.iter().map(|v| v.clone_with_heap(vm.heap)).collect();
+            let tuple = allocate_tuple(items, vm.heap);
+            defer_drop!(tuple, vm);
+            let text = tuple.py_repr(vm)?;
+            defer_drop!(text, vm);
+            Ok(text.to_str(vm)?.to_owned())
+        }
+    }
+}
+
+/// `repr(exc)` for an instance of a sandbox exception class: the class name
+/// applied to its `args`, as `BaseException.__repr__` writes it.
+pub(crate) fn exception_repr(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<String> {
+    let name = class_name(instance_class(self_id, vm), vm.heap, vm.interns).into_owned();
+    let args = exception_args(self_id, vm);
+    defer_drop!(args, vm);
+    // An argument list, not a tuple: `Refused('why')` has no trailing comma.
+    let mut rendered = String::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        let text = arg.py_repr(vm)?;
+        defer_drop!(text, vm);
+        rendered.push_str(text.to_str(vm)?);
+    }
+    Ok(format!("{name}({rendered})"))
+}
+
+/// The positional arguments an exception instance was constructed with.
+///
+/// Read from the instance's own `args` attribute, which its constructor binds,
+/// so a class that overwrote `args` reports what it wrote. Answers an empty
+/// list for anything that is not a tuple, which is what CPython's own
+/// `BaseException.__str__` effectively does with a replaced `args`.
+pub(crate) fn exception_args(self_id: HeapId, vm: &mut VM<'_>) -> Vec<Value> {
+    let Some(args) = instance_attr(self_id, "args", vm) else {
+        return Vec::new();
+    };
+    defer_drop!(args, vm);
+    match args {
+        Value::Ref(id) => match vm.heap.get(*id) {
+            HeapData::Tuple(tuple) => tuple.as_slice().iter().map(|v| v.clone_with_heap(vm.heap)).collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 
@@ -883,11 +973,14 @@ pub(crate) fn class_defines_not_none(class_id: HeapId, dunder: &str, vm: &VM<'_>
 /// `None` member apart from an absent one — CPython's `has_explicit_hash` does
 /// — want this rather than either check.
 pub(crate) fn class_dunder<'v>(class_id: HeapId, dunder: &str, vm: &'v VM<'_>) -> Option<&'v Value> {
-    namespace_member(class_id, dunder, vm.heap, vm.interns)
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| namespace_member(id, dunder, vm.heap, vm.interns))
 }
 
-/// [`class_dunder`] from a bare heap and interns, for a dump upgrade that runs
-/// before any VM exists.
+/// The member `name` of the namespace of `class_id` alone, from a bare heap and
+/// interns, for a dump upgrade that runs before any VM exists. A dump that
+/// needs the upgrade predates inheritance, so no base holds the member.
 pub(crate) fn namespace_member<'v>(
     class_id: HeapId,
     name: &str,
@@ -901,7 +994,7 @@ pub(crate) fn namespace_member<'v>(
 }
 
 /// Returns the `HeapId` of `self_id`'s class object.
-fn instance_class(self_id: HeapId, vm: &VM<'_>) -> HeapId {
+pub(crate) fn instance_class(self_id: HeapId, vm: &VM<'_>) -> HeapId {
     match vm.heap.get(self_id) {
         HeapData::Instance(inst) => inst.class,
         _ => unreachable!("instance_class called on non-instance heap value"),
@@ -952,15 +1045,73 @@ fn instance_user_hash(self_id: HeapId, vm: &mut VM<'_>) -> RunResult<Option<Hash
 }
 
 /// Looks up a member in a class namespace and clones it out, or `None` if absent.
-fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+///
+/// A class attribute Monty synthesizes rather than keeping in a namespace is
+/// read last, as CPython reads one the class itself binds first; see
+/// [`class_default`].
+pub(crate) fn class_member(class_id: HeapId, name: &str, vm: &VM<'_>) -> Option<Value> {
+    class_chain(class_id, vm)
+        .into_iter()
+        .find_map(|id| match vm.heap.get(id) {
+            HeapData::Class(class) => class
+                .namespace()
+                .get_by_str(name, vm.heap, vm.interns)
+                .map(|v| v.clone_with_heap(vm.heap)),
+            _ => None,
+        })
+        .or_else(|| class_default(name, vm))
+}
+
+/// A class and its bases, derived class first.
+///
+/// The single point every member, dunder, `isinstance` and `issubclass` lookup
+/// walks, so none of them can disagree about what a class inherits. The chain
+/// is acyclic by construction: a base must already exist when the class naming
+/// it is created, so it can never reach forward to the class itself. The depth
+/// cap is a belt-and-braces bound against a chain rebuilt from crafted snapshot
+/// data.
+pub(crate) fn class_chain(class_id: HeapId, vm: &VM<'_>) -> SmallVec<[HeapId; 4]> {
+    let mut chain = SmallVec::new();
+    let mut next = Some(class_id);
+    while let Some(id) = next {
+        if chain.len() >= MAX_CLASS_CHAIN {
+            break;
+        }
+        chain.push(id);
+        next = match vm.heap.get(id) {
+            HeapData::Class(class) => class.bases().first().copied(),
+            _ => None,
+        };
+    }
+    chain
+}
+
+/// The builtin exception `class_id` descends from, or `None` when its
+/// instances are not exceptions.
+///
+/// Resolved once at class creation, so this is a field read rather than a walk.
+pub(crate) fn class_builtin_exc(class_id: HeapId, vm: &VM<'_>) -> Option<ExcType> {
     match vm.heap.get(class_id) {
-        HeapData::Class(class) => class
-            .namespace()
-            .get_by_str(name, vm.heap, vm.interns)
-            .map(|v| v.clone_with_heap(vm.heap)),
+        HeapData::Class(class) => class.builtin_exc(),
         _ => None,
     }
 }
+
+/// The builtin exception an *instance* descends from, or `None` for a value
+/// that is not a sandbox exception.
+pub(crate) fn instance_builtin_exc(value: &Value, vm: &VM<'_>) -> Option<ExcType> {
+    let Value::Ref(id) = value else { return None };
+    let HeapData::Instance(inst) = vm.heap.get(*id) else {
+        return None;
+    };
+    class_builtin_exc(inst.class(), vm)
+}
+
+/// How far a class chain is walked before it is treated as broken.
+///
+/// Unreachable from Python: a chain is built one base at a time from classes
+/// that already exist, so it is as deep as the source says and no deeper.
+const MAX_CLASS_CHAIN: usize = 100;
 
 /// Returns a class object's name for error messages / repr.
 ///

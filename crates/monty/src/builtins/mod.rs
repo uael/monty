@@ -19,6 +19,7 @@ mod hash;
 mod hex;
 mod id;
 pub(crate) mod isinstance;
+mod issubclass;
 pub(crate) mod iter;
 mod len;
 mod locals;
@@ -155,6 +156,7 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Hex => hex::builtin_hex(vm, args),
             Self::Id => id::builtin_id(vm, args),
             Self::Isinstance => isinstance::builtin_isinstance(vm, args),
+            Self::Issubclass => issubclass::builtin_issubclass(vm, args),
             Self::Len => len::builtin_len(vm, args),
             Self::Map => map::builtin_map(vm, args),
             Self::Max => min_max::builtin_max(vm, args),

@@ -60,6 +60,7 @@ use crate::{
     types::{
         Dict, PyTrait, SessionRandom,
         file::{apply_buffer_load, apply_buffer_store, apply_file_next, apply_open_name, apply_write_position},
+        instance::instance_builtin_exc,
         random::SEED_BYTES,
         str::allocate_string,
     },
@@ -1864,12 +1865,11 @@ impl<'h> VM<'h> {
                     // Re-raise an instance as-is so `raise e` preserves `e`'s
                     // identity, like CPython. A bare type or non-exception has
                     // nothing to reuse and rebuilds from the error.
-                    let raised = match &exc {
-                        Value::Ref(id) if matches!(self.heap.get(*id), HeapData::Exception(_)) => Some(exc),
-                        _ => {
-                            exc.drop_with(self);
-                            None
-                        }
+                    let raised = if self.keeps_identity(&exc) {
+                        Some(exc)
+                    } else {
+                        exc.drop_with(self);
+                        None
                     };
                     if let Some(result) = self.handle_exception_with_value(error, raised) {
                         return Err(result);
@@ -2343,6 +2343,36 @@ impl<'h> VM<'h> {
         yield_if_parked!(self);
         // Exception was caught, continue execution
         self.run_external()
+    }
+
+    /// Raises `exception`, which the host handed in, at the call the VM stands
+    /// at, as a `raise` statement there would: an exception object keeps its
+    /// identity, and anything else raises `TypeError`.
+    pub(crate) fn raise_from_host(&mut self, exception: Value) -> Result<FrameExit, RunError> {
+        let error = self.make_exception(&exception, true);
+        let raised = if self.keeps_identity(&exception) {
+            Some(exception)
+        } else {
+            exception.drop_with(self);
+            None
+        };
+        if let Some(uncaught_error) = self.handle_exception_with_value(error, raised) {
+            return Err(uncaught_error);
+        }
+        yield_if_parked!(self);
+        self.run_external()
+    }
+
+    /// True for an exception instance, so `raise e` and a raise of the host
+    /// keep `e`'s identity as CPython does. An instance of a sandbox exception
+    /// class is kept for the same reason: the handler must bind the object
+    /// that was raised, with its own attributes, not a rebuilt base. A bare
+    /// type and a value that is no exception have nothing worth keeping.
+    fn keeps_identity(&self, exception: &Value) -> bool {
+        let Value::Ref(id) = exception else {
+            return false;
+        };
+        matches!(self.heap.get(*id), HeapData::Exception(_)) || instance_builtin_exc(exception, self).is_some()
     }
 
     // ========================================================================
