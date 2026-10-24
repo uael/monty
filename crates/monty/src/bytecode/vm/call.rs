@@ -304,6 +304,17 @@ impl<'h> VM<'h> {
         this.call_function(callable, args)
     }
 
+    /// Whether a method reads its first argument whole: `join` of a str or of
+    /// bytes, and `extend` of a list. A generator there fills a list on the
+    /// VM's own loop first, and the method runs on the list.
+    pub(super) fn method_reads_whole(&self, obj: &Value, name_id: StringId) -> bool {
+        match EitherStr::Interned(name_id).static_string(self.interns) {
+            Some(StaticStrings::Join) => matches!(obj.py_type(self), Type::Str | Type::Bytes),
+            Some(StaticStrings::Extend) => obj.py_type(self) == Type::List,
+            _ => false,
+        }
+    }
+
     /// Executes `CallAttr` opcode.
     ///
     /// Pops the object and arguments from the stack, calls the attribute,
@@ -476,16 +487,18 @@ impl<'h> VM<'h> {
         this.call_function(callable, args)?.finish_synchronously(this)
     }
 
-    /// Runs a generator to its next `yield` from Rust, for everything that
-    /// walks an iterator itself: `list()`, `sorted()`, a comprehension, `for`
-    /// and the `next()` builtin.
+    /// Runs a generator to its next `yield` from Rust, for what still walks an
+    /// iterator from Rust: an iterator that wraps a generator, as `enumerate()`
+    /// and `map()` do, and the builtins that read no generator themselves.
     ///
     /// The frame is spliced in exactly as [`resume_generator`](VM::resume_generator)
     /// does; only the driving differs, this being a nested `run()` in the shape
     /// [`evaluate_function`](Self::evaluate_function) uses. That is also its
     /// limit: a generator driven this way cannot suspend to the host, the same
-    /// restriction every synchronous re-entry here carries. Only `send()` and
-    /// `__next__()`, which resume the frame on the VM's own loop, can.
+    /// restriction every synchronous re-entry here carries. A read on the VM's
+    /// own loop can: `send()`, `__next__()`, `next()`, a `for`, `any()`,
+    /// `all()` and the reads of a whole iterable; see
+    /// [`read_generator`](VM::read_generator).
     ///
     /// `None` means the generator finished, which is the exhaustion an iterator
     /// protocol reports by returning nothing rather than by raising.

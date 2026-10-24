@@ -36,15 +36,19 @@ here can hold.
     not. An explicit `close()` runs them, and a generator driven to exhaustion
     runs them normally, where they stand.
 
-- **A generator that something walks for you cannot suspend to the host.**
-    `gen.send(...)` and `gen.__next__()` put the generator's frame on the VM's
-    own stack, so a host call inside the body suspends the session as it would
-    anywhere. Everything else that walks an iterator does it through a nested
-    run of the VM loop: `for`, the `next()` builtin, `list()`, `tuple()`,
-    `sum()`, `sorted()` and a comprehension. A host suspension cannot cross that
-    boundary, so it is reported inside the generator as a `NotImplementedError`
-    that names the external function. This is the restriction every synchronous
-    re-entry in Monty carries, not one generators add.
+- **A generator that a lazy builtin walks cannot suspend to the host.**
+    `send()`, `__next__()`, `for`, a comprehension, unpacking, the `next()`,
+    `any()` and `all()` builtins, `str.join()`, `list.extend()`, and `list()`,
+    `tuple()`, `set()`, `frozenset()`, `dict()`, `sum()`, `sorted()`, `min()`
+    and `max()` of one iterable all step the generator's frame on the VM's own
+    loop, so a host call inside the body suspends the session as it would
+    anywhere, and the read survives a dump. A builtin that wraps the generator
+    in an iterator of its own, as `map()`, `filter()`, `zip()` or
+    `enumerate()` does, still walks it through a nested run of the VM loop. A
+    host suspension cannot cross that boundary, so it is reported inside the
+    generator as a `NotImplementedError` that names the external function. This
+    is the restriction every synchronous re-entry in Monty carries, not one
+    generators add.
 
 - **A returned value reaches a `yield from` but not a `StopIteration`.**
     `return value` inside a generator body gives that value to a `yield from`

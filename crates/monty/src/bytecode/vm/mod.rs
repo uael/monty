@@ -32,7 +32,7 @@ use scheduler::Scheduler;
 use crate::{
     args::ArgValues,
     asyncio::{CallId, TaskId},
-    builtins::Builtins,
+    builtins::{Builtins, BuiltinsFunctions},
     bytecode::{
         code::{Code, LocationEntry},
         op::{MATCH_KEYS_REST, Opcode, decode_assert_flags},
@@ -58,9 +58,9 @@ use crate::{
     parse::CodeRange,
     run::{Program, SessionTables, VmEnv},
     types::{
-        Dict, PyTrait, SessionRandom,
+        Dict, PyTrait, SessionRandom, Type,
         file::{apply_buffer_load, apply_buffer_store, apply_file_next, apply_open_name, apply_write_position},
-        generator::{Delegation, GeneratorState},
+        generator::{Delegation, GeneratorState, Reader, Resumer},
         random::SEED_BYTES,
         str::allocate_string,
     },
@@ -115,6 +115,22 @@ macro_rules! catch {
         }
         yield_if_parked!($self);
     }};
+}
+
+/// Reads a generator at a slot of the stack whole before the instruction that
+/// is about to run reads it; see [`VM::fill_generator`]. The loop goes on in
+/// the generator's frame, or in the handler of what refused to resume it.
+macro_rules! fill_first {
+    ($self:expr, $slot:expr) => {
+        match $self.fill_generator($slot) {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(err) => {
+                catch!($self, err);
+                continue;
+            }
+        }
+    };
 }
 
 /// Applies a relative jump offset to the current frame IP.
@@ -358,14 +374,10 @@ pub struct CallFrame<'code> {
     /// `cleanup_frame_state`, or taken by `serialize` for a snapshot.
     namespace: Option<Box<FrameNamespace>>,
 
-    /// Where to send the resumer when this generator's body returns, for a
-    /// frame a `yield from` is delegating to.
-    ///
-    /// `None` for a generator resumed by `next()` or `send()`, whose resumer
-    /// hears `StopIteration` instead. `Some(ip)` carries the delegation's exit
-    /// offset, and the returned value goes to the resumer in place of the
-    /// receiver rather than being lost with the frame.
-    delegated_return: Option<usize>,
+    /// Who resumed this generator's frame, which says where its yields and
+    /// its return go; see [`Resumer`]. [`Resumer::Call`] for every frame that
+    /// runs no generator.
+    resumer: Resumer,
 
     /// The `yield from` this frame is inside, for the frame that waits on the
     /// delegation rather than the one that runs it.
@@ -438,7 +450,7 @@ impl<'code> CallFrame<'code> {
             is_initializer: false,
             import_from_module: None,
             generator: None,
-            delegated_return: None,
+            resumer: Resumer::Call,
             delegating: None,
         }
     }
@@ -496,7 +508,7 @@ impl<'code> CallFrame<'code> {
             is_parked: false,
             namespace,
             generator: None,
-            delegated_return: None,
+            resumer: Resumer::Call,
             delegating: None,
             is_initializer: false,
             import_from_module: None,
@@ -646,10 +658,9 @@ pub struct SerializedFrame {
     #[serde(default)]
     generator: Option<HeapId>,
 
-    /// Where the resumer resumes when this generator returns, for a frame a
-    /// `yield from` is delegating to (see `CallFrame.delegated_return`).
+    /// Who resumed this generator's frame (see `CallFrame.resumer`).
     #[serde(default)]
-    delegated_return: Option<usize>,
+    resumer: Resumer,
 
     /// The `yield from` this frame waits on (see `CallFrame.delegating`).
     #[serde(default)]
@@ -683,7 +694,7 @@ impl CallFrame<'_> {
             call_offset: self.call_offset,
             is_initializer: self.is_initializer,
             generator: self.generator,
-            delegated_return: self.delegated_return,
+            resumer: self.resumer,
             delegating: self.delegating,
             namespace: mem::take(&mut self.namespace),
             import_from_module: self.import_from_module,
@@ -997,7 +1008,7 @@ impl<'h> VM<'h> {
                     is_initializer: sf.is_initializer,
                     import_from_module: sf.import_from_module,
                     generator: sf.generator,
-                    delegated_return: sf.delegated_return,
+                    resumer: sf.resumer,
                     delegating: sf.delegating,
                 }
             })
@@ -1593,6 +1604,7 @@ impl<'h> VM<'h> {
                     try_catch!(self, self.build_slice());
                 }
                 Opcode::ListExtend => {
+                    fill_first!(self, self.stack.len() - 1);
                     try_catch!(self, self.list_extend());
                 }
                 Opcode::ListToTuple => {
@@ -1613,6 +1625,7 @@ impl<'h> VM<'h> {
                 }
                 Opcode::SetExtend => {
                     let depth = self.current_frame.fetch_u8() as usize;
+                    fill_first!(self, self.stack.len() - 1);
                     try_catch!(self, self.set_extend(depth));
                 }
                 // Comprehension Building - append/add/set items during iteration
@@ -1747,6 +1760,18 @@ impl<'h> VM<'h> {
                 }
                 Opcode::ForIter => {
                     let offset = self.current_frame.fetch_i16();
+                    // A generator steps on the VM's own loop, as `send()`
+                    // resumes one, so a call to the host in its body suspends
+                    // the run. The generator stays on the stack as the loop's.
+                    if let Some(gen_id) = self.unfinished_generator(self.peek()) {
+                        let end = self
+                            .current_frame
+                            .ip
+                            .checked_add_signed(offset.into())
+                            .expect("ForIter offset resolved to a negative or overflowing IP");
+                        try_catch!(self, self.read_generator(gen_id, Reader::Loop(end)));
+                        continue;
+                    }
                     // Iterator implementations return heap objects from `py_iter`.
                     let Value::Ref(heap_id) = *self.peek() else {
                         return Err(RunError::internal("ForIter: expected iterator ref on stack"));
@@ -1788,16 +1813,29 @@ impl<'h> VM<'h> {
                 // Function Calls
                 Opcode::CallFunction => {
                     let arg_count = self.current_frame.fetch_u8() as usize;
+                    let first = self.stack.len() - arg_count;
+                    if matches!(self.stack[first - 1], Value::Builtin(b) if b.reads_whole(arg_count)) {
+                        fill_first!(self, first);
+                    }
                     handle_call_result!(self, self.exec_call_function(arg_count));
                 }
                 Opcode::CallBuiltinFunction => {
                     let (builtin_id, arg_count) = self.current_frame.fetch_u8_u8();
-                    let result = self.exec_call_builtin_function(builtin_id, arg_count as usize);
+                    let arg_count = arg_count as usize;
+                    if BuiltinsFunctions::from_repr(builtin_id)
+                        .is_some_and(|function| Builtins::Function(function).reads_whole(arg_count))
+                    {
+                        fill_first!(self, self.stack.len() - arg_count);
+                    }
+                    let result = self.exec_call_builtin_function(builtin_id, arg_count);
                     handle_call_result!(self, result);
                 }
                 Opcode::CallBuiltinType => {
                     let (type_id, arg_count) = self.current_frame.fetch_u8_u8();
                     let arg_count = arg_count as usize;
+                    if Type::callable_from_u8(type_id).is_some_and(|t| Builtins::Type(t).reads_whole(arg_count)) {
+                        fill_first!(self, self.stack.len() - arg_count);
+                    }
 
                     handle_call_result!(self, self.exec_call_builtin_type(type_id, arg_count));
                 }
@@ -1806,6 +1844,10 @@ impl<'h> VM<'h> {
                     let (pos_count, kw_count) = self.current_frame.fetch_u8_u8();
                     let (pos_count, kw_count) = (pos_count as usize, kw_count as usize);
 
+                    let first = self.stack.len() - kw_count - pos_count;
+                    if matches!(self.stack[first - 1], Value::Builtin(b) if b.reads_whole(pos_count)) {
+                        fill_first!(self, first);
+                    }
                     handle_call_result!(self, self.exec_call_function_kw(pos_count, kw_count));
                 }
                 Opcode::CallAttr => {
@@ -1815,6 +1857,10 @@ impl<'h> VM<'h> {
                     let name_id = StringId::from_index(name_idx);
                     let arg_count = arg_count as usize;
 
+                    let first = self.stack.len() - arg_count;
+                    if arg_count > 0 && self.method_reads_whole(&self.stack[first - 1], name_id) {
+                        fill_first!(self, first);
+                    }
                     handle_call_result!(self, self.exec_call_attr(name_id, arg_count));
                 }
                 Opcode::CallAttrKw => {
@@ -1824,6 +1870,10 @@ impl<'h> VM<'h> {
                     let name_id = StringId::from_index(name_idx);
                     let (pos_count, kw_count) = (pos_count as usize, kw_count as usize);
 
+                    let first = self.stack.len() - kw_count - pos_count;
+                    if pos_count > 0 && self.method_reads_whole(&self.stack[first - 1], name_id) {
+                        fill_first!(self, first);
+                    }
                     handle_call_result!(self, self.exec_call_attr_kw(name_id, pos_count, kw_count));
                 }
                 Opcode::CallFunctionExtended => {
@@ -1992,11 +2042,13 @@ impl<'h> VM<'h> {
                     // Taken, not read: the `Send` before a delegation's `Yield`
                     // sets it afresh on every step of the loop.
                     let delegating = self.current_frame.delegating.take();
+                    let resumer = self.current_frame.resumer;
                     if self.suspend_generator(gen_id, value, delegating) {
                         // Driven by a nested `run()`, which takes the value the
                         // suspend left on the resumer's stack.
                         return Ok(FrameExit::Return(self.pop()));
                     }
+                    try_catch!(self, self.generator_yielded(gen_id, resumer));
                 }
 
                 Opcode::Send => {
@@ -2017,40 +2069,26 @@ impl<'h> VM<'h> {
                 }
 
                 Opcode::ReturnValue => {
-                    // A generator body that returns is exhausted, and its
-                    // resumer hears `StopIteration` rather than the value.
-                    // A generator a `yield from` is delegating to hands its
-                    // value to the delegation rather than ending it: the
-                    // resumer resumes past the loop with the result in place of
-                    // the receiver.
-                    if let Some(gen_id) = self.current_frame.generator
-                        && let Some(done_ip) = self.current_frame.delegated_return
-                    {
-                        let value = self.pop();
-                        let stop = self.pop_frame();
-                        self.finish_generator(gen_id);
-                        // `Send` already took the value it passed in, so only
-                        // the receiver is left for the result to replace.
-                        self.finish_delegation(done_ip, value);
-                        if stop {
-                            return Ok(FrameExit::Return(self.pop()));
-                        }
-                        continue;
-                    }
+                    // A generator body that returns is exhausted, and the
+                    // resumer its frame carried says where the end goes; see
+                    // `generator_returned`.
                     if let Some(gen_id) = self.current_frame.generator {
+                        let resumer = self.current_frame.resumer;
                         let value = self.pop();
                         let stop = self.pop_frame();
                         self.finish_generator(gen_id);
-                        value.drop_with(self);
-                        let exhausted = ExcType::stop_iteration();
+                        let ended = self.generator_returned(resumer, value);
                         if stop {
-                            // Driven by a nested `run()`, whose boundary this
-                            // exception must not unwind past.
-                            return Err(exhausted);
+                            // Driven by a nested `run()`, whose boundary the
+                            // end must not pass.
+                            return ended.map(|()| FrameExit::Return(self.pop()));
                         }
-                        catch!(self, exhausted);
-                        // The handler is now current, so the rest of this arm,
-                        // which belongs to an ordinary return, must not run.
+                        if let Err(err) = ended {
+                            catch!(self, err);
+                        }
+                        // The resumer goes on where the end left it, so the
+                        // rest of this arm, which belongs to an ordinary
+                        // return, must not run.
                         continue;
                     }
                     let value = self.pop();
@@ -2141,10 +2179,12 @@ impl<'h> VM<'h> {
                 // Unpacking - route through exception handling
                 Opcode::UnpackSequence => {
                     let count = self.current_frame.fetch_u8() as usize;
+                    fill_first!(self, self.stack.len() - 1);
                     try_catch!(self, self.unpack_sequence(count));
                 }
                 Opcode::UnpackEx => {
                     let (before, after) = self.current_frame.fetch_u8_u8();
+                    fill_first!(self, self.stack.len() - 1);
                     try_catch!(self, self.unpack_ex(before as usize, after as usize));
                 }
                 // Pattern matching
@@ -2714,6 +2754,130 @@ impl<'h> VM<'h> {
         Ok(CallResult::FramePushed)
     }
 
+    /// The generator a value is, when it is one with values left to give.
+    ///
+    /// A finished generator gives none, so whatever reads it is done at once
+    /// and needs no frame.
+    pub(crate) fn unfinished_generator(&self, value: &Value) -> Option<HeapId> {
+        let Value::Ref(id) = *value else { return None };
+        match self.heap.get(id) {
+            HeapData::Generator(generator) if generator.state != GeneratorState::Done => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Resumes a generator on the VM's own loop for a reader that holds it on
+    /// top of its stack, as `send()` resumes one, so a call to the host in its
+    /// body suspends the run as it would anywhere.
+    ///
+    /// The frame carries the reader, so its yields and its return go where the
+    /// reader says; see [`Reader`].
+    pub(crate) fn read_generator(&mut self, gen_id: HeapId, reader: Reader) -> RunResult<CallResult> {
+        let resumed = self.resume_generator(gen_id, Value::None)?;
+        self.current_frame.resumer = Resumer::Reader(reader);
+        Ok(resumed)
+    }
+
+    /// Reads the generator at `slot` of the stack whole before the
+    /// instruction about to run reads it.
+    ///
+    /// A new list takes the generator's place, the generator fills the list on
+    /// the VM's own loop, and the instruction runs again, on the list. Returns
+    /// `false`, and changes nothing, when no unfinished generator stands at the
+    /// slot.
+    pub(super) fn fill_generator(&mut self, slot: usize) -> RunResult<bool> {
+        let Some(gen_id) = self.unfinished_generator(&self.stack[slot]) else {
+            return Ok(false);
+        };
+        self.build_list(0);
+        let list = self.peek().clone_with_heap(self.heap);
+        let generator = mem::replace(&mut self.stack[slot], list);
+        self.push(generator);
+        self.current_frame.ip = self.instruction_ip;
+        self.read_generator(gen_id, Reader::Fill)?;
+        Ok(true)
+    }
+
+    /// Hands what a generator just yielded, on top of the stack, to the
+    /// resumer that its frame carried.
+    ///
+    /// A fill adds the value to its list and resumes the generator again, a
+    /// test resumes it again or ends with its answer, and `next()` takes the
+    /// value in place of the generator and the default. Every other resumer
+    /// takes the value where it lies.
+    fn generator_yielded(&mut self, gen_id: HeapId, resumer: Resumer) -> RunResult<()> {
+        let Resumer::Reader(reader) = resumer else {
+            return Ok(());
+        };
+        match reader {
+            Reader::Loop(_) => {}
+            Reader::Fill => {
+                self.list_append(1)?;
+                self.read_generator(gen_id, reader)?;
+            }
+            Reader::Test(all) => {
+                let value = self.pop();
+                let truth = value.py_bool(self);
+                value.drop_with(self);
+                if truth? == all {
+                    self.read_generator(gen_id, reader)?;
+                } else {
+                    self.pop().drop_with(self);
+                    self.push(Value::Bool(!all));
+                }
+            }
+            Reader::Next(default) => {
+                let value = self.pop();
+                self.pop().drop_with(self);
+                if default {
+                    self.pop().drop_with(self);
+                }
+                self.push(value);
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends the read of a generator whose body returned `value`, as the
+    /// resumer that its frame carried says.
+    ///
+    /// `send()` hears `StopIteration`, a `yield from` takes the value in place
+    /// of its receiver, and a reader lets the generator go from its stack: a
+    /// `for` goes on past its loop, a fill leaves its list for the instruction
+    /// to run again on, a test gives its answer, and `next()` gives its default
+    /// or hears `StopIteration`.
+    fn generator_returned(&mut self, resumer: Resumer, value: Value) -> RunResult<()> {
+        let reader = match resumer {
+            Resumer::Call => {
+                value.drop_with(self);
+                return Err(ExcType::stop_iteration());
+            }
+            Resumer::Delegation(done_ip) => {
+                // `Send` already took the value it passed in, so only the
+                // receiver is left for the result to replace.
+                self.finish_delegation(done_ip, value);
+                return Ok(());
+            }
+            Resumer::Reader(reader) => reader,
+        };
+        value.drop_with(self);
+        self.pop().drop_with(self);
+        match reader {
+            Reader::Loop(end) => {
+                self.current_frame.ip = end;
+                self.instruction_ip = end;
+            }
+            // The other reference stands in the operands of the instruction,
+            // where the ip already stands.
+            Reader::Fill => self.pop().drop_with(self),
+            Reader::Test(all) => self.push(Value::Bool(all)),
+            Reader::Next(false) => return Err(ExcType::stop_iteration()),
+            // The default under the generator is the answer.
+            Reader::Next(true) => {}
+        }
+        Ok(())
+    }
+
     /// Where a generator is in its life.
     fn generator_state(&self, gen_id: HeapId) -> GeneratorState {
         let HeapData::Generator(generator) = self.heap.get(gen_id) else {
@@ -2799,7 +2963,7 @@ impl<'h> VM<'h> {
         for (id, delegation) in chain {
             self.splice_generator_frame(id)?;
             let frame = self.current_frame_mut();
-            frame.delegated_return = waiting.map(|above| above.done_ip);
+            frame.resumer = waiting.map_or(Resumer::Call, |above| Resumer::Delegation(above.done_ip));
             if let Some(delegation) = delegation {
                 frame.ip = delegation.yield_ip;
                 frame.delegating = Some(delegation);
@@ -2926,7 +3090,7 @@ impl<'h> VM<'h> {
         if matches!(self.heap.get(receiver_id), HeapData::Generator(_)) {
             return match self.resume_generator(receiver_id, sent) {
                 Ok(CallResult::FramePushed) => {
-                    self.current_frame.delegated_return = Some(done_ip);
+                    self.current_frame.resumer = Resumer::Delegation(done_ip);
                     Ok(())
                 }
                 // A generator already finished has nothing left to delegate to,
