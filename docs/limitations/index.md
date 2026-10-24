@@ -73,6 +73,7 @@ The following modules are present:
 
 | Module        | Divergences                      |
 | ------------- | -------------------------------- |
+| `ast`         | [ast.md](ast.md)                 |
 | `asyncio`     | [asyncio.md](asyncio.md)         |
 | `base64`      | [base64.md](base64.md)           |
 | `binascii`    | [base64.md](base64.md)           |

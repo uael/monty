@@ -50,6 +50,10 @@ pub struct CodeBuilder {
     /// Set when the body holds a `yield` or a `yield from`, making the built
     /// [`Code`] a generator body; see [`CodeBuilder::mark_generator`].
     is_generator: bool,
+    /// Whether the body awaits, so a snippet compiled with
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` becomes a coroutine rather than running
+    /// where it stands.
+    is_coroutine: bool,
 }
 
 impl CodeBuilder {
@@ -457,6 +461,7 @@ impl CodeBuilder {
             self.exception_table,
             local_names,
             self.is_generator,
+            self.is_coroutine,
         )
     }
 
@@ -467,6 +472,11 @@ impl CodeBuilder {
     /// does not make a generator; see `Expr::Await`.
     pub fn mark_generator(&mut self) {
         self.is_generator = true;
+    }
+
+    /// Marks the body one that awaits; see [`CodeBuilder::is_coroutine`].
+    pub fn mark_coroutine(&mut self) {
+        self.is_coroutine = true;
     }
 
     /// Records the current location in the location table if set.
