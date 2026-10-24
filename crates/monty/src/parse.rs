@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, fmt};
+use std::{borrow::Cow, cmp::Ordering, fmt, mem};
 
 use ahash::AHashSet;
 use monty_types::{FormatComplex, FormatFloat, MontyException, StackFrame, StringRepr, bytes_repr};
@@ -17,6 +17,7 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::{
     args::{ArgExprs, CallArg, CallKwarg, Kwarg},
+    builtins::Builtins,
     exception_private::{ExcType, ExcTypeExt, RunError, SimpleException},
     expressions::{
         AssignTarget, Callable, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier, ImportName, Literal,
@@ -27,7 +28,10 @@ use crate::{
     source_map::{SourceMap, StackFrameExt},
     source_nesting::{ast_depth_exceeded, nesting_bound_exceeded},
     stringize::stringize_annotation,
-    types::long_int::{INT_MAX_STR_DIGITS, bigint_cmp_f64, check_bigint_str_digits_limit},
+    types::{
+        Type,
+        long_int::{INT_MAX_STR_DIGITS, bigint_cmp_f64, check_bigint_str_digits_limit},
+    },
     value::EitherStr,
 };
 
@@ -138,7 +142,7 @@ impl ParsedSignature {
 /// Contains the function name, signature, and body as parsed AST nodes.
 /// During the prepare phase, this is transformed into `PreparedFunctionDef`
 /// with resolved names and scope information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawFunctionDef {
     /// The function name identifier (not yet resolved to a namespace index).
     pub name: Identifier,
@@ -1704,19 +1708,10 @@ impl<'a, 'i> Parser<'a, 'i> {
             AstExpr::Generator(ast::ExprGenerator {
                 elt, generators, range, ..
             }) => {
-                // TODO: When proper generators are implemented, this should produce
-                // Expr::Generator instead of Expr::ListComp. Currently we treat generator
-                // expressions as list comprehensions since we don't have generator support.
-                let elt = Box::new(self.parse_expression(*elt)?);
+                let position = self.convert_range(range);
+                let elt = self.parse_expression(*elt)?;
                 let generators = self.parse_comprehension_generators(generators)?;
-                Ok(ExprLoc::new(
-                    self.convert_range(range),
-                    Expr::ListComp {
-                        elt,
-                        generators,
-                        captured_slots: Vec::new(),
-                    },
-                ))
+                self.parse_generator_expression(elt, generators, position, range)
             }
             AstExpr::Await(a) => {
                 let value = self.parse_expression(*a.value)?;
@@ -2260,6 +2255,98 @@ impl<'a, 'i> Parser<'a, 'i> {
                 Ok(Comprehension { target, iter, ifs })
             })
             .collect()
+    }
+
+    /// Writes a generator expression out as a call of an implicit generator
+    /// function, which is what makes it lazy.
+    ///
+    /// The loops and the filters become `for` and `if` statements around a
+    /// `yield` of the element, innermost last, and the outermost iterable
+    /// leaves the body: it is read where the expression is written, as CPython
+    /// reads it, and its iterator arrives as the one parameter. So
+    /// `(x for x in y if c)` becomes `<genexpr>(iter(y))` of
+    /// `def <genexpr>(.0): for x in .0: if c: yield x`.
+    ///
+    /// `.0` is the name CPython gives that parameter. No Python name can be
+    /// spelled that way, so it can collide with nothing in the body.
+    ///
+    /// Each `for` and each `if` is one more level of the tree, so each one is
+    /// charged to the same depth budget that bounds nesting written out in the
+    /// source. Without that, a flat line of clauses would build a tree deeper
+    /// than [`MAX_NESTING_DEPTH`] and overflow the host stack in the phases
+    /// that walk it. The budget is given back on success, so a later sibling
+    /// pays nothing for this one.
+    fn parse_generator_expression(
+        &mut self,
+        elt: ExprLoc,
+        mut generators: Vec<Comprehension>,
+        position: CodeRange,
+        range: TextRange,
+    ) -> Result<ExprLoc, ParseError> {
+        let mut levels: u16 = 0;
+        for comp in &generators {
+            for _ in 0..=comp.ifs.len() {
+                self.decr_depth_remaining(|| range)?;
+                levels += 1;
+            }
+        }
+
+        let name_id = self.interner.intern("<genexpr>");
+        let param_id = self.interner.intern(".0");
+        let first = generators
+            .first_mut()
+            .expect("ruff gives a generator expression at least one generator");
+        let outer = mem::replace(
+            &mut first.iter,
+            ExprLoc::new(position, Expr::Name(Identifier::new(param_id, position))),
+        );
+
+        let mut body = vec![Node::Expr(ExprLoc::new(elt.position, Expr::Yield(Some(Box::new(elt)))))];
+        for comp in generators.into_iter().rev() {
+            for cond in comp.ifs.into_iter().rev() {
+                body = vec![Node::If {
+                    test: cond,
+                    body,
+                    or_else: Vec::new(),
+                }];
+            }
+            body = vec![Node::For {
+                target: comp.target,
+                iter: comp.iter,
+                body,
+                or_else: Vec::new(),
+            }];
+        }
+
+        let signature = ParsedSignature {
+            args: vec![ParsedParam {
+                name: param_id,
+                default: None,
+            }],
+            ..ParsedSignature::default()
+        };
+        let iterator = ExprLoc::new(
+            outer.position,
+            Expr::Call {
+                callable: Callable::Builtin(Builtins::Type(Type::Iterator)),
+                args: Box::new(ArgExprs::One(outer)),
+            },
+        );
+        self.depth_remaining += levels;
+        Ok(ExprLoc::new(
+            position,
+            Expr::IndirectCall {
+                callable: Box::new(ExprLoc::new(
+                    position,
+                    Expr::GenExprRaw {
+                        name_id,
+                        signature,
+                        body,
+                    },
+                )),
+                args: Box::new(ArgExprs::One(iterator)),
+            },
+        ))
     }
 
     /// Parses an f-string value into expression parts.
