@@ -367,7 +367,7 @@ mod tests {
     fn serialized_components_match_dump_version() {
         assert_eq!(
             opcode_fingerprint(),
-            0xa78a_9e6c_3fab_abed,
+            0xcb9f_f8c5_c3df_1dea,
             "opcodes changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(opcode_fingerprint())
         );
@@ -393,14 +393,14 @@ mod tests {
         );
         assert_eq!(
             variant_name_fingerprint(&type_names),
-            0x482e_2879_5906_a694,
+            0xd22b_749e_f95e_8dcc,
             "Type variants changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(variant_name_fingerprint(&type_names))
         );
         let monty_type_names = serde_variant_names(MontyType::VARIANTS, &[MontyType::Exception(ExcType::ValueError)]);
         assert_eq!(
             variant_name_fingerprint(&monty_type_names),
-            0x83d0_7660_e7c8_86bd,
+            0x902e_8812_bb04_9363,
             "MontyType variants changed for dump version {DUMP_VERSION}, actual: {}",
             grouped_hex(variant_name_fingerprint(&monty_type_names))
         );

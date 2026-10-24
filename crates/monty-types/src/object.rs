@@ -1406,6 +1406,13 @@ pub enum MontyType {
     /// The wrapper `functools.lru_cache` / `functools.cache` returns.
     #[strum(serialize = "functools._lru_cache_wrapper")]
     LruCacheWrapper,
+    /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
+    /// Qualified like `re.Match` so the host-boundary name matches the runtime type.
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
 }
 
 impl fmt::Display for MontyType {

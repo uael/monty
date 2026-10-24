@@ -176,6 +176,12 @@ macro_rules! heap_payloads {
             DirScan(boxed $crate::types::DirScan),
             /// Any `csv` object: a reader, writer, `DictReader`, `DictWriter` or dialect.
             Csv(boxed $crate::types::CsvObject),
+            /// PEP 750 `string.templatelib.Template`: a `t"..."` literal's value.
+            Template(inline $crate::types::Template),
+            /// PEP 750 `string.templatelib.Interpolation`: one `{...}` field of a
+            /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
+            /// payload ceiling for a type nothing hot allocates.
+            Interpolation(boxed $crate::types::Interpolation),
         }
     };
 }
@@ -265,7 +271,10 @@ impl HeapData {
             | Self::GenericAlias(_)
             | Self::Union(_)
             | Self::LruCache(_)
-            | Self::Csv(_) => true,
+            | Self::Csv(_)
+            // A template holds arbitrary interpolated values.
+            | Self::Template(_)
+            | Self::Interpolation(_) => true,
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
             Self::Str(_)
@@ -334,6 +343,8 @@ impl HeapData {
             Self::Dict(_) => Type::Dict,
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
+            Self::Template(_) => Type::Template,
+            Self::Interpolation(_) => Type::Interpolation,
             Self::HashObject(hash) => hash.algorithm().py_type(),
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::Union(_) => Type::Union,
@@ -729,6 +740,8 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Closure($value) => $body,
             Self::FunctionDefaults($value) => $body,
             Self::ExtFunction($value) => $body,
+            Self::Template($value) => $body,
+            Self::Interpolation($value) => $body,
             $($custom)*
         }
     };
@@ -931,6 +944,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
 
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         match self {
+            Self::Template(value) => value.py_iter(vm),
+            Self::Interpolation(value) => value.py_iter(vm),
             Self::Str(value) => value.py_iter(vm),
             Self::Bytes(value) => value.py_iter(vm),
             Self::List(value) => value.py_iter(vm),

@@ -781,6 +781,8 @@ pub enum StaticStrings {
     Compress,
     /// `complex.conjugate()` method.
     Conjugate,
+    /// `Interpolation.conversion` attribute.
+    Conversion,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
     /// `sys.copyright` attribute.
@@ -1068,6 +1070,8 @@ pub enum StaticStrings {
     Expm1,
     /// `random.expovariate()` function.
     Expovariate,
+    /// `Interpolation.expression` attribute.
+    Expression,
     /// `extend()` method, shared by `list` and `deque`.
     Extend,
     /// `deque.extendleft()` method.
@@ -1142,6 +1146,8 @@ pub enum StaticStrings {
     Followlinks,
     /// Kwarg name `format` — `date.strftime(format=...)`, `datetime.strftime(format=...)`.
     Format,
+    /// `Interpolation.format_spec` attribute.
+    FormatSpec,
     /// `fp` parameter of `json.load()` / `json.dump()`.
     Fp,
     /// `math.frexp()` function.
@@ -1306,6 +1312,11 @@ pub enum StaticStrings {
     IntMaxStrDigits,
     /// `sys.flags.interactive` field.
     Interactive,
+    /// The `string.templatelib.Interpolation` type.
+    #[strum(serialize = "Interpolation")]
+    InterpolationClass,
+    /// `Template.interpolations` attribute.
+    Interpolations,
     /// `set.intersection()` method.
     Intersection,
     /// `Path.is_absolute()` method, answered without host I/O.
@@ -2126,9 +2137,15 @@ pub enum StaticStrings {
     /// `strict_mode` parameter of `binascii.a2b_base64()`.
     #[strum(serialize = "strict_mode")]
     StrictMode,
-    /// `match.string`
+    /// `match.string`, and the name of the `string` package that holds
+    /// `string.templatelib`.
     #[strum(serialize = "string")]
     StringAttr,
+    /// The dotted name of the `string.templatelib` module, which its repr shows.
+    #[strum(serialize = "string.templatelib")]
+    StringTemplatelib,
+    /// `Template.strings` attribute.
+    Strings,
     /// `strip()` method, shared by `str` and `bytes`.
     Strip,
     /// `datetime.strptime()` classmethod.
@@ -2185,6 +2202,12 @@ pub enum StaticStrings {
     TeeType,
     /// `file.tell()` method.
     Tell,
+    /// The `string.templatelib.Template` type.
+    #[strum(serialize = "Template")]
+    TemplateClass,
+    /// `string.templatelib`, as the attribute `string` binds the submodule to.
+    #[strum(serialize = "templatelib")]
+    Templatelib,
     /// `time.thread_time()` function.
     ThreadTime,
     /// `time.thread_time_ns()` function.
@@ -2342,6 +2365,9 @@ pub enum StaticStrings {
     /// `validate` parameter of `base64.b64decode()`.
     #[strum(serialize = "validate")]
     Validate,
+    /// `Interpolation.value` attribute, distinct from [`Self::Values`].
+    #[strum(serialize = "value")]
+    ValueAttr,
     /// `dict.values()` method.
     Values,
     /// `sys.flags.verbose` field.

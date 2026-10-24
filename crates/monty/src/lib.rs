@@ -40,6 +40,7 @@ mod source_nesting;
 mod str_format;
 mod string_builder;
 mod stringize;
+mod tstring;
 mod types;
 mod value;
 mod virtual_path;

@@ -58,7 +58,7 @@ use crate::{
     parse::CodeRange,
     run::{Program, SessionTables, VmEnv},
     types::{
-        Dict, PyTrait, SessionRandom,
+        Dict, PyTrait, SessionRandom, allocate_interpolation, allocate_template,
         file::{apply_buffer_load, apply_buffer_store, apply_file_next, apply_open_name, apply_write_position},
         random::SEED_BYTES,
         str::allocate_string,
@@ -1608,6 +1608,22 @@ impl<'h> VM<'h> {
                     let name_idx = self.current_frame.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
+                }
+                Opcode::BuildInterpolation => {
+                    // Stack order: value, expression, conversion, format_spec (TOS)
+                    let format_spec = self.pop();
+                    let conversion = self.pop();
+                    let expression = self.pop();
+                    let value = self.pop();
+                    let interpolation = allocate_interpolation(value, expression, conversion, format_spec, self);
+                    self.push(interpolation);
+                }
+                Opcode::BuildTemplate => {
+                    // Stack order: strings tuple, interpolations tuple (TOS)
+                    let interpolations = self.pop();
+                    let strings = self.pop();
+                    let template = allocate_template(strings, interpolations, self);
+                    self.push(template);
                 }
                 // Control Flow - use self.current_frame.ip directly for jumps
                 Opcode::Jump => {

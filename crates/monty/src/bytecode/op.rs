@@ -598,6 +598,14 @@ pub enum Opcode {
     /// becomes `[v, a, b, c]`. Operand: u8 n. The inverse of `LiftToTop`; the
     /// pattern compiler uses it to park a capture under the pattern's temporaries.
     SinkTop = 129,
+
+    // === PEP 750 template construction ===
+    /// Pop format_spec, conversion, expression and value (in that order from
+    /// TOS) and push one `string.templatelib.Interpolation`.
+    BuildInterpolation = 130,
+    /// Pop the interpolations tuple then the strings tuple, push a
+    /// `string.templatelib.Template`.
+    BuildTemplate = 131,
 }
 
 /// `LoadName` flag: the load is in call position, so an unresolved name under
@@ -704,6 +712,8 @@ impl Opcode {
             | Self::BeforeWith
             | Self::WithExit
             | Self::WithExceptStart
+            | Self::BuildInterpolation
+            | Self::BuildTemplate
             | Self::BuildCell => OperandShape::None,
             Self::LoadLocal
             | Self::StoreLocal
@@ -960,6 +970,10 @@ impl Opcode {
             (ListToTuple, Operand::None) => 0,
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
+            // Four field values in, one `Interpolation` out.
+            (BuildInterpolation, Operand::None) => -3,
+            // Two tuples in, one `Template` out.
+            (BuildTemplate, Operand::None) => -1,
             (GetIter | Await, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,

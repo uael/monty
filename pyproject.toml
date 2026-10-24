@@ -87,6 +87,15 @@ exclude-newer = "7 days"
 # Apply CA distrust updates immediately (CVE-2026-111943).
 exclude-newer-package = { certifi = "0 days" }
 
+# The datatest harness runs `crates/monty/test_cases/` against CPython 3.14 only
+# (see `.python-version`), so a fixture may use syntax newer than the package's
+# own `requires-python` floor. Listed per file rather than for the whole
+# directory: raising the target for every fixture also changes how ruff
+# *formats* unrelated ones (3.14 allows unparenthesized `except` groups).
+[tool.ruff.per-file-target-version]
+# PEP 750 t-strings.
+"crates/monty/test_cases/tstring__all.py" = "py314"
+
 [tool.ruff.lint]
 extend-select = [
     "Q",      # https://docs.astral.sh/ruff/rules/#flake8-quotes-q
@@ -208,6 +217,9 @@ exclude = [
     # their TypeError messages
     "crates/monty/test_cases/functools__reduce.py",
     "crates/monty/test_cases/functools__partial.py",
+    # deliberately calls `Template`/`Interpolation` with wrong arguments to pin
+    # their TypeError and ValueError messages
+    "crates/monty/test_cases/tstring__construct.py",
     # deliberately subscripts types with the wrong arity and with non-type
     # arguments to pin `types.GenericAlias` behaviour
     "crates/monty/test_cases/generic_alias.py",
