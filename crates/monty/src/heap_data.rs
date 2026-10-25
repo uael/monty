@@ -177,6 +177,8 @@ macro_rules! heap_payloads {
             DirScan(boxed $crate::types::DirScan),
             /// Any `csv` object: a reader, writer, `DictReader`, `DictWriter` or dialect.
             Csv(boxed $crate::types::CsvObject),
+            /// The event loop that `asyncio.get_running_loop()` gives.
+            EventLoop(inline $crate::types::EventLoop),
         }
     };
 }
@@ -291,7 +293,8 @@ impl HeapData {
             | Self::TimeDelta(_)
             | Self::TimeZone(_)
             | Self::Random(_)
-            | Self::HashObject(_) => false,
+            | Self::HashObject(_)
+            | Self::EventLoop(_) => false,
         }
     }
 
@@ -336,6 +339,7 @@ impl HeapData {
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
             Self::HashObject(hash) => hash.algorithm().py_type(),
+            Self::EventLoop(_) => Type::EventLoop,
             Self::GenericAlias(_) => Type::GenericAlias,
             Self::Union(_) => Type::Union,
             Self::LruCache(_) => Type::LruCacheWrapper,
@@ -721,6 +725,7 @@ macro_rules! heap_read_output_py_trait_forward {
             Self::Closure($value) => $body,
             Self::FunctionDefaults($value) => $body,
             Self::ExtFunction($value) => $body,
+            Self::EventLoop($value) => $body,
             $($custom)*
         }
     };
@@ -941,6 +946,7 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
             Self::Itertools(value) => value.py_iter(vm),
             Self::DirScan(value) => value.py_iter(vm),
             Self::Csv(value) => value.py_iter(vm),
+            Self::EventLoop(value) => value.py_iter(vm),
             Self::Tuple(value) => value.py_iter(vm),
             Self::NamedTuple(value) => value.py_iter(vm),
             Self::Dict(value) => value.py_iter(vm),
