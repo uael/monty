@@ -10,7 +10,6 @@ use smallvec::SmallVec;
 use crate::{
     exception_private::RunError,
     heap::{ContainsHeap, DropWithContext, HeapId},
-    intern::FunctionId,
     value::Value,
 };
 
@@ -55,68 +54,6 @@ impl TaskId {
     #[inline]
     pub fn is_main(self) -> bool {
         self.0 == 0
-    }
-}
-
-/// Coroutine execution state (single-shot semantics).
-///
-/// Coroutines in Monty follow single-shot semantics - they can only be awaited once.
-/// This differs from Python generators which can be resumed multiple times.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CoroutineState {
-    /// Coroutine has been created but not yet awaited.
-    New,
-    /// Coroutine is currently executing (has been awaited).
-    Running,
-    /// Coroutine has finished execution.
-    Completed,
-}
-
-/// A coroutine object representing an async function call result.
-///
-/// Created when an `async def` function is called. Argument binding happens at call time;
-/// awaiting the coroutine starts execution. Coroutines use single-shot semantics -
-/// they can only be awaited once.
-///
-/// # Namespace Layout
-///
-/// The `namespace` vector is pre-sized to match the function's namespace size and contains:
-/// ```text
-/// [params...][cell_vars...][free_vars...][locals...]
-/// ```
-/// - Parameter slots are filled with bound argument values at call time
-/// - Cell/free var slots contain `Value::Ref` to captured cells
-/// - Local slots start as `Value::Undefined`
-///
-/// When the coroutine is awaited, these values are pushed onto the VM's stack
-/// as inline locals, and a new frame is pushed to execute the async function body.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Coroutine {
-    /// The async function to execute.
-    pub func_id: FunctionId,
-    /// Pre-bound namespace values (sized to function namespace).
-    /// Contains bound parameters, captured cells, and uninitialized locals.
-    pub namespace: Vec<Value>,
-    /// Current execution state.
-    pub state: CoroutineState,
-    /// Owned reference to the `exec()` / `eval()` globals dict the async
-    /// function was defined under; `None` when its globals are module slots.
-    pub globals: Option<HeapId>,
-}
-impl Coroutine {
-    /// Creates a new coroutine for an async function call.
-    ///
-    /// # Arguments
-    /// * `func_id` - The async function to execute
-    /// * `namespace` - Pre-bound namespace with parameters and captured variables
-    /// * `globals` - The function's globals dict, already inc_ref'd for this coroutine
-    pub fn new(func_id: FunctionId, namespace: Vec<Value>, globals: Option<HeapId>) -> Self {
-        Self {
-            func_id,
-            namespace,
-            state: CoroutineState::New,
-            globals,
-        }
     }
 }
 
@@ -248,7 +185,7 @@ impl<C: ContainsHeap> DropWithContext<C> for Awaiter {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GatherFuture {
     /// Heap ids of items to gather. Each id points to an awaitable
-    /// `HeapData` entry (currently `Coroutine` or `ExternalFuture`); the
+    /// `HeapData` entry (currently a coroutine or an `ExternalFuture`); the
     /// kind is recovered with `heap.read(id)` at gather-await time.
     ///
     /// Set once at construction and never mutated. The gather inc_refs each
