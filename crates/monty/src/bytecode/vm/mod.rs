@@ -2650,7 +2650,6 @@ impl<'h> VM<'h> {
         let ip = generator.ip;
         let saved = mem::take(&mut generator.stack);
         let saved_exceptions = mem::take(&mut generator.exception_stack);
-        let globals = generator.globals;
         generator.state = GeneratorState::Running;
         drop(handle);
 
@@ -2660,7 +2659,15 @@ impl<'h> VM<'h> {
         self.exception_stack
             .extend(saved_exceptions.into_iter().map(CaughtException::Value));
 
-        let namespace = function_namespace(globals, &*self.heap);
+        // The frame borrows the object's namespace for as long as it runs, so
+        // both hold a reference on every dict in it.
+        let HeapData::Generator(generator) = self.heap.get(gen_id) else {
+            unreachable!("checked above")
+        };
+        let namespace = generator
+            .namespace
+            .as_deref()
+            .map(|n| Box::new(n.clone_owned(&*self.heap)));
         let mut frame = CallFrame::new_function(
             code,
             stack_base,

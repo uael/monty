@@ -12,8 +12,8 @@ use monty_types::{InvalidInputError, MontyException, ResourceError, ResourceTrac
 use smallvec::{SmallVec, smallvec};
 
 use super::{
-    AwaitResult, CallFrame, CallResult, FrameExit, Opcode, VM, frame_code, function_namespace,
-    recursion::frame_recursion_depth, stack_index,
+    AwaitResult, CallFrame, CallResult, FrameExit, Opcode, VM, frame_code, recursion::frame_recursion_depth,
+    stack_index,
 };
 use crate::{
     args::ArgValues,
@@ -679,10 +679,10 @@ impl<'h> VM<'h> {
         // never lifts its frame back into the object, so the object keeps
         // nothing while the task runs and `handle_task_completion` ends it.
         let func_id = coro.get(self.heap).func_id;
-        let globals = coro.get(self.heap).globals;
         let saved = coro.get_mut(self.heap);
         saved.state = GeneratorState::Running;
         let namespace_values: Vec<Value> = mem::take(&mut saved.stack);
+        let namespace = saved.namespace.take();
         drop(coro);
 
         // Push locals onto stack and push frame directly (can't use start_coroutine_frame
@@ -695,7 +695,6 @@ impl<'h> VM<'h> {
         self.stack.extend(namespace_values);
 
         let exc_stack_base = self.exception_stack.len();
-        let namespace = function_namespace(globals, &*self.heap);
         self.current_frame = CallFrame::new_function(
             code,
             stack_base,

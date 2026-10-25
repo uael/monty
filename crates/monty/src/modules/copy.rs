@@ -296,6 +296,7 @@ fn classify(output: &HeapReadOutput<'_>) -> Copyability {
         | HeapReadOutput::Complex(_)
         | HeapReadOutput::Range(_)
         | HeapReadOutput::Slice(_)
+        | HeapReadOutput::Code(_)
         | HeapReadOutput::RePattern(_)
         | HeapReadOutput::ReMatch(_)
         | HeapReadOutput::Exception(_)

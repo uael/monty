@@ -783,6 +783,8 @@ pub enum StaticStrings {
     Conjugate,
     /// `copy()` method, shared by `list`, `dict` and `set`; also the `copy` module and `copy.copy()`.
     Copy,
+    /// Module name for `import ast`.
+    Ast,
     /// `asyncio.current_task()` function.
     #[strum(serialize = "current_task")]
     CurrentTask,
@@ -926,6 +928,8 @@ pub enum StaticStrings {
     Dklen,
     /// `field(doc=...)`, CPython's per-field docstring.
     Doc,
+    /// Kwarg name `dont_inherit` — `compile(dont_inherit=...)`.
+    DontInherit,
     /// `sys.dont_write_bytecode` attribute.
     DontWriteBytecode,
     /// `re.DOTALL` flag
@@ -1103,7 +1107,7 @@ pub enum StaticStrings {
     Fieldnames,
     /// Kwarg name `file` — `open(file=...)`.
     File,
-    /// Kwarg name `filename` — `os.path.getsize(filename=...)`, `os.path.realpath(filename=...)`.
+    /// Kwarg name `filename` — `compile(filename=...)`, `os.path.getsize(filename=...)`, `os.path.realpath(filename=...)`.
     Filename,
     /// `zip_longest(fillvalue=...)` keyword.
     Fillvalue,
@@ -1185,6 +1189,9 @@ pub enum StaticStrings {
     Gammavariate,
     /// `asyncio.gather()` function.
     Gather,
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT`, the one name of `ast` Monty has.
+    #[strum(serialize = "PyCF_ALLOW_TOP_LEVEL_AWAIT")]
+    PyCfAllowTopLevelAwait,
     /// `asyncio.get_running_loop()` function.
     #[strum(serialize = "get_running_loop")]
     GetRunningLoop,
