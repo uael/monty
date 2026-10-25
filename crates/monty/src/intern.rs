@@ -921,7 +921,7 @@ pub enum StaticStrings {
     Dist,
     /// `dklen` parameter of `hashlib.pbkdf2_hmac()`.
     Dklen,
-    /// `field(doc=...)`, CPython's per-field docstring.
+    /// `field(doc=...)`, CPython's per-field docstring, and the `doc` parameter of `property()`.
     Doc,
     /// `sys.dont_write_bytecode` attribute.
     DontWriteBytecode,
@@ -1089,11 +1089,17 @@ pub enum StaticStrings {
     FalseRepr,
     /// `fanout` parameter of `hashlib.blake2b()`.
     Fanout,
+    /// `fdel` parameter of `property()`.
+    Fdel,
+    /// `fget` parameter of `property()`.
+    Fget,
     /// `dataclasses.field()` function, and the `Field` type name.
     Field,
     /// `namedtuple(field_names=...)` keyword argument.
     #[strum(serialize = "field_names")]
     FieldNames,
+    /// `fields` parameter of `monty.instance()`.
+    Fields,
     /// `csv.field_size_limit()` function.
     FieldSizeLimit,
     /// `fieldnames` parameter and attribute of `csv.DictReader` / `csv.DictWriter`.
@@ -1165,6 +1171,8 @@ pub enum StaticStrings {
     /// `typing.FrozenSet` marker.
     #[strum(serialize = "FrozenSet")]
     FrozenSet,
+    /// `fset` parameter of `property()`.
+    Fset,
     /// `Path.__fspath__()` method, answered without host I/O.
     #[strum(serialize = "__fspath__")]
     Fspath,
@@ -1300,6 +1308,8 @@ pub enum StaticStrings {
     InsortLeft,
     /// `insort_right` in the bisect module.
     InsortRight,
+    /// `monty.instance()` function.
+    Instance,
     /// `sys.flags.inspect` field.
     Inspect,
     /// `sys.flags.int_max_str_digits` field.
@@ -1608,7 +1618,8 @@ pub enum StaticStrings {
     MonotonicNs,
     /// `date` / `datetime` `month` attribute and constructor kwarg.
     Month,
-    /// Value of `sys.platform`.
+    /// Value of `sys.platform`, and the `monty` module: what this interpreter
+    /// does that CPython does not.
     Monty,
     /// The value of `sys.copyright`.
     #[strum(serialize = "Copyright (c) Pydantic Services Inc. 2026 to present")]
@@ -1876,6 +1887,8 @@ pub enum StaticStrings {
     Real,
     /// `os.path.realpath()` function.
     Realpath,
+    /// `monty.rebound()` function.
+    Rebound,
     /// Kwarg name `recurse_symlinks` — `Path.glob(recurse_symlinks=...)`.
     RecurseSymlinks,
     /// `functools.reduce()` function.
@@ -2171,7 +2184,8 @@ pub enum StaticStrings {
     Tan,
     /// `math.tanh()` function.
     Tanh,
-    /// Destination keyword for Path.rename and Path.replace.
+    /// Destination keyword for Path.rename and Path.replace, and the parameter
+    /// `target` of `monty.rebound()`.
     Target,
     /// `math.tau` constant
     Tau,

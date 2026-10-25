@@ -20,7 +20,7 @@ use crate::{
     intern::Interns,
     modules::{
         ModuleFunctions,
-        copy::{Memo, PyDeepCopy, deep_copy, deep_copy_attrs},
+        copy::{Memo, PyDeepCopy, deep_copy, deep_copy_attrs, held, owned_id},
         dataclasses,
     },
     types::class::class_default,
@@ -158,6 +158,22 @@ impl<'h> HeapReadMut<'h, Instance> {
         if let Some(exc) = dataclasses::frozen_assignment_error(class_id, &name, vm) {
             [name, value].drop_with(vm);
             return Err(exc);
+        }
+        // A `@property` is a data descriptor: it owns the name on the class, so
+        // a write cannot quietly shadow it with an instance attribute. Monty
+        // stores no setter, so every property is read-only.
+        if let Some(attr) = name.as_either_str(vm.heap) {
+            let attr = attr.as_str(vm.interns).to_owned();
+            if let Some(member) = class_member(class_id, &attr, vm) {
+                let is_property =
+                    matches!(member, Value::Ref(id) if matches!(vm.heap.get(id), HeapData::ClassProperty(_)));
+                member.drop_with(vm);
+                if is_property {
+                    let class = class_name(class_id, vm.heap, vm.interns).into_owned();
+                    [name, value].drop_with(vm);
+                    return Err(ExcType::attribute_error_no_setter(&attr, &class));
+                }
+            }
         }
         self.set_attr_unchecked(name, value, vm)
     }
@@ -632,6 +648,19 @@ impl HeapItem for BoundMethod {
 pub(crate) fn instance_getattr(self_id: HeapId, attr: &EitherStr, vm: &mut VM<'_>) -> RunResult<CallResult> {
     let attr_str = attr.as_str(vm.interns);
     if let Some(value) = instance_attr(self_id, attr_str, vm) {
+        // A `@property` is computed on every read, so the member is the getter
+        // rather than the answer. The call goes through the ordinary call path,
+        // which lets the getter push a frame and even suspend to the host.
+        if let Value::Ref(id) = value
+            && let HeapData::ClassProperty(property) = vm.heap.get(id)
+        {
+            let fget = property.fget().clone_with_heap(vm.heap);
+            value.drop_with(vm);
+            vm.heap.inc_ref(self_id);
+            let result = vm.call_function(&fget, ArgValues::One(Value::Ref(self_id)));
+            fget.drop_with(vm);
+            return result;
+        }
         Ok(CallResult::Value(value))
     } else {
         let class_id = instance_class(self_id, vm);
@@ -1072,7 +1101,20 @@ impl<'h> PyDeepCopy<'h> for HeapRead<'h, Instance> {
         if let Some(copy) = instance_call_copy_hook(id, "__deepcopy__", Some(memo.dict_value(vm)), vm)? {
             Ok(copy)
         } else {
-            let copy_id = self.allocate_empty_like(vm);
+            // A pass that makes again what was made under a dict makes the
+            // class again too, so an instance of it is one of the copy.
+            let copy_id = match memo.rebinding() {
+                Some(_) => {
+                    let class = held(self.get(vm.heap).class(), vm);
+                    let copied = deep_copy(&class, memo, vm);
+                    class.drop_with(vm);
+                    let mut copied = copied?;
+                    let class = owned_id(&mut copied);
+                    vm.heap
+                        .allocate(HeapData::Instance(Box::new(Instance::new(class, Dict::new()))))
+                }
+                None => self.allocate_empty_like(vm),
+            };
             deep_copy_attrs(id, copy_id, source, memo, vm)
         }
     }
@@ -1090,6 +1132,24 @@ impl<'h> PyDeepCopy<'h> for HeapRead<'h, BoundMethod> {
         let instance = self.get(vm.heap).instance.clone_with_heap(vm.heap);
         let copied = deep_copy(&instance, memo, vm);
         instance.drop_with(vm);
-        Ok(self.allocate_like(copied?, vm))
+        let instance = copied?;
+        // A pass that makes again what was made under a dict makes the
+        // function again too, so a method of a class made again is the copy's.
+        if memo.rebinding().is_none() {
+            return Ok(self.allocate_like(instance, vm));
+        }
+        let func = self.get(vm.heap).func.clone_with_heap(vm.heap);
+        let copied = deep_copy(&func, memo, vm);
+        func.drop_with(vm);
+        let func = match copied {
+            Ok(func) => func,
+            Err(e) => {
+                instance.drop_with(vm);
+                return Err(e);
+            }
+        };
+        Ok(Value::Ref(
+            vm.heap.allocate(HeapData::BoundMethod(BoundMethod { instance, func })),
+        ))
     }
 }
