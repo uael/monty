@@ -39,4 +39,4 @@ else:
         deep(arg)
 
 len(arg)
-# ref-counts={'functools': 1, 'sys': 1, 'arg': 1, 'bound': 31, 'deep': 1}
+# ref-counts={'functools': 2, 'sys': 2, 'arg': 1, 'bound': 31, 'deep': 1}

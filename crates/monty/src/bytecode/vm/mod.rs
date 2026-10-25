@@ -47,6 +47,7 @@ use crate::{
         json::{JsonStringCache, apply_json_load},
         random::apply_seed_random,
         re::RePatternCache,
+        table::ModuleTable,
         time::apply_clock_reading,
     },
     name_map::NameMap,
@@ -769,6 +770,11 @@ pub struct VM<'h> {
     /// [`globals`](Self::globals) when runtime-compiled code binds a new name.
     pub(crate) global_names: &'h mut NameMap,
 
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Borrowed mutably because an import binds a name in it.
+    pub(crate) modules: &'h mut ModuleTable,
+
     /// Print output writer, borrowed so callers retain access to collected output.
     pub(crate) print_writer: PrintWriter<'h>,
 
@@ -877,7 +883,11 @@ impl<'h> VM<'h> {
         heap: &'h mut HeapReader<'h>,
         print_writer: PrintWriter<'h>,
     ) -> Self {
-        let SessionTables { global_names, interns } = tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = tables;
         Self {
             stack: Vec::with_capacity(64),
             globals,
@@ -886,6 +896,7 @@ impl<'h> VM<'h> {
             heap,
             interns,
             global_names,
+            modules,
             print_writer,
             exception_stack: Vec::new(),
             instruction_ip: 0,
@@ -917,7 +928,11 @@ impl<'h> VM<'h> {
         heap: &'h mut HeapReader<'h>,
         print_writer: PrintWriter<'h>,
     ) -> Self {
-        let SessionTables { global_names, interns } = tables;
+        let SessionTables {
+            global_names,
+            interns,
+            modules,
+        } = tables;
         // Reconstruct call frames from serialized form
         let frames: Vec<CallFrame<'_>> = snapshot
             .frames
@@ -956,6 +971,7 @@ impl<'h> VM<'h> {
             heap,
             interns,
             global_names,
+            modules,
             print_writer,
             exception_stack: snapshot.exception_stack,
             instruction_ip: snapshot.instruction_ip,
@@ -2043,7 +2059,7 @@ impl<'h> VM<'h> {
                     let module_id = self.current_frame.fetch_u16();
                     // for the `LoadAttrImport`s of a `from ... import`; harmless for a bare `import`
                     self.current_frame.import_from_module = Some(StringId::from_index(module_id));
-                    handle_call_result!(self, Ok(self.load_module(module_id)));
+                    handle_call_result!(self, self.load_module(module_id));
                 }
                 // Context Managers
                 Opcode::BeforeWith => {
@@ -2059,15 +2075,28 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Loads a top-level built-in or suspends with [`OsFunctionCall::Import`].
-    /// The host's value becomes the module; `NotFound` raises `ModuleNotFoundError`.
-    /// `LoadSubmodule` resolves the remaining dotted components.
-    fn load_module(&mut self, module_id: u16) -> CallResult {
+    /// Loads a top-level module, or suspends with [`OsFunctionCall::Import`] for
+    /// a module that only the host can give.
+    ///
+    /// `sys.modules` answers first, as in CPython, so a module is built once
+    /// per session and a name that a program put there is found. A standard
+    /// module that is not there yet is built and remembered. The host's value
+    /// for an import becomes the module, and its `NotFound` raises
+    /// `ModuleNotFoundError`. `LoadSubmodule` resolves the remaining dotted
+    /// components.
+    fn load_module(&mut self, module_id: u16) -> RunResult<CallResult> {
         let name_id = StringId::from_index(module_id);
-        match self.interns.static_string(name_id).and_then(StandardLib::from_static) {
-            Some(module) => CallResult::Value(Value::Ref(module.create(self))),
-            None => CallResult::OsCall(OsFunctionCall::Import(self.interns.get_str(name_id).to_owned())),
+        if let Some(held) = self.imported(name_id) {
+            return Ok(CallResult::Value(held));
         }
+        let Some(module) = self.interns.static_string(name_id).and_then(StandardLib::from_static) else {
+            let name = self.interns.get_str(name_id).to_owned();
+            return Ok(CallResult::OsCall(OsFunctionCall::Import(name)));
+        };
+        let heap_id = module.create(self);
+        let held = Value::Ref(heap_id);
+        self.remember(name_id, held.clone_with_heap(self.heap))?;
+        Ok(CallResult::Value(held))
     }
 
     /// Resumes execution after an external call completes.
