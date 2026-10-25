@@ -22,6 +22,8 @@ ALLOWED_FUNCTIONS = {
     'any',
     'bin',
     'chr',
+    # Not yet regenerated into the vendored stub: see limitations/builtins.md.
+    'compile',
     'divmod',
     'eval',
     'exec',
