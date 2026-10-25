@@ -47,9 +47,8 @@ pub struct Code {
     /// generator rather than running it.
     ///
     /// A property of the compiled code, the way CPython's `CO_GENERATOR` is:
-    /// [`CodeBuilder`](crate::bytecode::builder::CodeBuilder) raises it when it
-    /// emits [`Opcode::Yield`](crate::bytecode::op::Opcode::Yield), so it cannot
-    /// drift from the instructions it describes.
+    /// the compiler raises it for each `yield` and `yield from` it compiles,
+    /// through [`CodeBuilder::mark_generator`](crate::bytecode::builder::CodeBuilder::mark_generator).
     #[serde(default)]
     is_generator: bool,
 }

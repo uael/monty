@@ -28,6 +28,11 @@ same way; see [asyncio.md](asyncio.md) for where the two part.
     does.
 - **`throw()` takes an exception instance only.** CPython also accepts the
     older `throw(type, value, traceback)` form, deprecated there since 3.12.
+- **A `yield` that an unconditional `return` makes unreachable does not make a
+    generator.** `def f(): return; yield` is an ordinary function returning
+    `None` here, where CPython makes it a generator that stops at once; dead
+    code is dropped before the body is read for a `yield`. A `yield` under
+    `if False:` is reachable code to the reader and does make one.
 
 ## Divergences
 
