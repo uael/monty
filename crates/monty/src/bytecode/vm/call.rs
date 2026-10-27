@@ -521,8 +521,9 @@ impl<'h> VM<'h> {
     }
 
     /// Runs a generator to its next `yield` from Rust, for what still walks an
-    /// iterator from Rust: an iterator that wraps a generator, as `enumerate()`
-    /// and `map()` do, and the builtins that read no generator themselves.
+    /// iterator from Rust: an iterator that wraps a generator, as an
+    /// `itertools` adaptor does, and the builtins that read no generator
+    /// themselves.
     ///
     /// The frame is spliced in exactly as [`resume_generator`](VM::resume_generator)
     /// does; only the driving differs, this being a nested `run()` in the shape

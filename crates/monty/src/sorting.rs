@@ -7,17 +7,48 @@
 //!
 //! This module provides [`sort_indices`] for the comparison step and
 //! [`apply_permutation`] for the in-place rearrangement step.
+//!
+//! A sort with a key computes the keys in [`SORT_BY_KEY_SOURCE`], a frame on
+//! the VM's own loop, so a key may call the host and suspend the run.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, mem};
 
 use crate::{
     args::{ArgValues, FromArgs, LaxBool},
-    bytecode::VM,
+    builtins::Builtins,
+    bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
+    frozen::{FrozenFunction, FrozenFunctions},
+    heap::HeapReadOutput,
+    modules::ModuleFunctions,
     types::{CmpOrder, PyTrait},
     value::Value,
 };
+
+/// The sort with a key of `sorted()` and `list.sort()`.
+///
+/// It calls the key on each item in order, as CPython does, then sorts the
+/// private list `items` by the keys. `original` is the list that `list.sort()`
+/// detached, which takes the items back whether the sort ends or raises, or
+/// `None` for `sorted()`, which answers `items`.
+pub(crate) const SORT_BY_KEY_SOURCE: &str = r"
+def __monty_sort_by_key(items, key, reverse, original, order, restore, base_exception):
+    keys = []
+    if original is None:
+        for item in items:
+            keys.append(key(item))
+        order(items, keys, reverse)
+        return items
+    try:
+        for item in items:
+            keys.append(key(item))
+        order(items, keys, reverse)
+    except base_exception:
+        restore(original, items, False)
+        raise
+    restore(original, items, True)
+";
 
 /// Argument shape for `list.sort(*, key=None, reverse=False)` and, by
 /// extension, the kwargs accepted by the `sorted()` builtin. Both fields
@@ -34,58 +65,115 @@ struct ListSortArgs {
     reverse: LaxBool,
 }
 
-/// Parses `key`/`reverse` kwargs and sorts `items` in place. The single
-/// entry point for sorting used by both `list.sort` and the `sorted()`
-/// builtin — sharing here is what makes unknown-kwarg errors uniformly
-/// read `sort() got an unexpected keyword argument 'X'` (matching
-/// CPython, whose `sorted` delegates to `list.sort` internally).
-pub fn parse_and_sort(items: &mut [Value], args: ArgValues, vm: &mut VM<'_>) -> RunResult<()> {
+/// Parses the `key`/`reverse` kwargs of a sort. The single entry point for
+/// both `list.sort` and the `sorted()` builtin — sharing here is what makes
+/// unknown-kwarg errors uniformly read `sort() got an unexpected keyword
+/// argument 'X'` (matching CPython, whose `sorted` delegates to `list.sort`
+/// internally). `key=None` gives no key.
+pub fn parse_sort_args(args: ArgValues, vm: &mut VM<'_>) -> RunResult<(Option<Value>, bool)> {
     let ListSortArgs { key, reverse } = ListSortArgs::from_args(args, vm)?;
-    let key_fn = match key {
-        Some(v) if matches!(v, Value::None) => {
-            v.drop_with(vm);
-            None
-        }
+    let key = match key {
+        Some(Value::None) => None,
         other => other,
     };
-    defer_drop!(key_fn, vm);
-    sort_values(items, key_fn.as_ref(), reverse.bool(), vm)
+    Ok((key, reverse.bool()))
 }
 
-/// Sorts a vector of values, with optional key function.
-pub fn sort_values(values: &mut [Value], key_fn: Option<&Value>, reverse: bool, vm: &mut VM<'_>) -> RunResult<()> {
-    if let Some(f) = key_fn {
-        // Sort by key function: compute all the keys, sort an index buffer, then
-        // rearrange the original values in-place according to the sorted indices.
-        let mut indices = (0..values.len()).collect::<Vec<_>>();
-        let keys: Vec<Value> = Vec::with_capacity(values.len());
-        defer_drop_mut!(keys, vm);
+/// Starts the sort with a key of the private list `items`, as a frame of
+/// [`SORT_BY_KEY_SOURCE`] on the VM's own loop.
+///
+/// `original` is the list that `list.sort()` detached the items from, or
+/// `None` for `sorted()`, whose call answers `items`.
+pub fn sort_by_key(items: Value, key: Value, reverse: bool, original: Value, vm: &mut VM<'_>) -> RunResult<CallResult> {
+    vm.call_frozen_exact(
+        FrozenFunction::SortByKey,
+        [
+            items,
+            key,
+            Value::Bool(reverse),
+            original,
+            Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::OrderByKeys)),
+            Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::RestoreSorted)),
+            Value::Builtin(Builtins::ExcType(ExcType::BaseException)),
+        ],
+    )
+}
 
-        // Each key call re-enters `run()` with a fresh dispatch countdown, so a
-        // short key reaches no checkpoint: this is the pass's only clock poll.
-        for (i, item) in values.iter().enumerate() {
-            vm.heap.tracker.check_time_every(i)?;
-            let item = item.clone_with_heap(vm);
-            keys.push(vm.evaluate_function(f, ArgValues::One(item))?);
-        }
+/// Sorts a vector of values by the values themselves, with no key.
+pub fn sort_values(values: &mut [Value], reverse: bool, vm: &mut VM<'_>) -> RunResult<()> {
+    let mut sort_result: RunResult<()> = Ok(());
+    let mut n = 0usize;
+    values.sort_by(|a, b| {
+        n += 1;
+        compare_values(n, a, b, reverse, &mut sort_result, vm)
+    });
+    sort_result
+}
 
-        // 2. Sort indices by comparing key values (or values themselves if no key)
-        sort_indices(&mut indices, keys, reverse, vm)?;
+/// Arguments of the private helper that sorts a list by its keys.
+#[derive(FromArgs)]
+#[from_args(name = "order_by_keys")]
+struct OrderByKeysArgs {
+    #[from_args(pos_only)]
+    items: Value,
+    #[from_args(pos_only)]
+    keys: Value,
+    #[from_args(pos_only)]
+    reverse: Value,
+}
 
-        // 3. Rearrange values in-place in the detached buffer.
-        apply_permutation(values, &mut indices);
+/// Sorts the private list `items` in place by the list `keys`, which holds
+/// the key of each item at its index, for [`SORT_BY_KEY_SOURCE`].
+///
+/// Both lists are private to that frame, so no Python code reaches them while
+/// the comparisons run.
+pub(crate) fn call_order_by_keys(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let OrderByKeysArgs { items, keys, reverse } = OrderByKeysArgs::from_args(args, vm)?;
+    defer_drop!(items, vm);
+    defer_drop!(keys, vm);
+    let reverse = matches!(reverse, Value::Bool(true));
+    let values = take_list_items(items, vm);
+    defer_drop_mut!(values, vm);
+    let key_values = take_list_items(keys, vm);
+    defer_drop_mut!(key_values, vm);
+    assert_eq!(
+        values.len(),
+        key_values.len(),
+        "a sort by key has one key for each item"
+    );
+    let mut indices = (0..values.len()).collect::<Vec<_>>();
+    let sorted = sort_indices(&mut indices, key_values, reverse, vm);
+    apply_permutation(values, &mut indices);
+    put_list_items(items, mem::take(values), vm);
+    sorted.map(|()| Value::None)
+}
 
-        Ok(())
-    } else {
-        // With no key function can sort directly on the original array
-        let mut sort_result: RunResult<()> = Ok(());
-        let mut n = 0usize;
-        values.sort_by(|a, b| {
-            n += 1;
-            compare_values(n, a, b, reverse, &mut sort_result, vm)
-        });
-        sort_result
+/// Takes the items out of the list `list`, which stays empty.
+pub(crate) fn take_list_items(list: &Value, vm: &mut VM<'_>) -> Vec<Value> {
+    let Value::Ref(id) = *list else {
+        unreachable!("a frozen sort passes lists")
+    };
+    let HeapReadOutput::List(list) = vm.heap.read(id) else {
+        unreachable!("a frozen sort passes lists")
+    };
+    mem::take(list.get_mut(vm.heap).as_vec_mut())
+}
+
+/// Puts `items` into the list `list` in place of what it holds, and gives
+/// back what it held.
+pub(crate) fn put_list_items(list: &Value, items: Vec<Value>, vm: &mut VM<'_>) -> Vec<Value> {
+    let Value::Ref(id) = *list else {
+        unreachable!("a frozen sort passes lists")
+    };
+    let HeapReadOutput::List(list) = vm.heap.read(id) else {
+        unreachable!("a frozen sort passes lists")
+    };
+    let has_refs = items.iter().any(|v| matches!(v, Value::Ref(_)));
+    let held = mem::replace(list.get_mut(vm.heap).as_vec_mut(), items);
+    if has_refs {
+        list.get_mut(vm.heap).set_contains_refs();
     }
+    held
 }
 
 /// Sorts a vector of indices by comparing items at those positions.

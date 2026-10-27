@@ -98,8 +98,8 @@ divergences. `repr(Point)` is `<class 'Point'>` where CPython gives
 - **A `default_factory` cannot call an external or `os` function**; a
     missing-key access then raises `NotImplementedError`. Plain factories (`int`,
     `list`, `lambda`, ordinary functions) work. This applies to every callback
-    Monty invokes mid-expression (the `key=` of `sorted`/`min`/`max`, `map`,
-    `filter`, `__repr__`), not just defaultdict.
+    Monty invokes synchronously mid-expression (a `__repr__`, for one; see
+    [classes.md](classes.md)), not just defaultdict.
 - **Crosses the host boundary as a plain `dict`**: the `default_factory` is a
     function and cannot cross, so sending the dict back yields a plain `dict`.
 

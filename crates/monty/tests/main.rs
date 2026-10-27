@@ -467,19 +467,24 @@ for _ in range(3):
     assert_eq!(runner.run_no_limits(vec![]).unwrap(), MontyObject::int(42));
 }
 
-/// Rejected suspensions are raised inside the key function's frame, where an
-/// ordinary `try`/`except` can catch them and let the sort complete.
+/// A `__hash__` that a dict calls while it probes its table runs in a nested
+/// run of the VM, which no call to the host can cross. The rejected
+/// suspension is raised inside the `__hash__` frame, where an ordinary
+/// `try`/`except` can catch it and let the dict complete.
 #[test]
-fn not_implemented_in_sort_key_catchable_inside_key_fn() {
+fn not_implemented_in_hash_catchable_inside_hash() {
     let code = "
-def key_fn(x):
-    try:
-        ext_fn()
-    except NotImplementedError:
-        return -x
-    return 0
+class Key:
+    def __init__(self, x):
+        self.x = x
+    def __hash__(self):
+        try:
+            ext_fn()
+        except NotImplementedError:
+            return self.x
+        return 0
 
-sorted([1, 2, 3], key=key_fn)
+[k.x for k in {Key(3): 1, Key(2): 2}]
 ";
     let mut ex = MontyRun::new(
         code.to_owned(),
@@ -491,25 +496,23 @@ sorted([1, 2, 3], key=key_fn)
     let result = ex
         .run_no_limits(vec![MontyObject::function("ext_fn".to_owned(), None)])
         .unwrap();
-    assert_eq!(
-        result,
-        MontyObject::list([MontyObject::int(3), MontyObject::int(2), MontyObject::int(1)])
-    );
+    assert_eq!(result, MontyObject::list([MontyObject::int(3), MontyObject::int(2)]));
 }
 
-/// An uncaught key-function error returns to the sorting call before an outer
-/// handler runs, preserving the synchronous evaluation boundary.
+/// An uncaught error in a `__hash__` returns to the dict that called it before
+/// an outer handler runs, preserving the synchronous evaluation boundary.
 #[test]
-fn not_implemented_in_sort_key_catchable_outside_key_fn() {
+fn not_implemented_in_hash_catchable_outside_hash() {
     let code = "
 seen = []
 
-def key_fn(x):
-    seen.append(x)
-    ext_fn()
+class Key:
+    def __hash__(self):
+        seen.append('hash')
+        ext_fn()
 
 try:
-    sorted([1, 2], key=key_fn)
+    {Key(): 1}
 except NotImplementedError:
     seen.append('caught')
 seen.append('after')
@@ -528,17 +531,17 @@ seen
     assert_eq!(
         result,
         MontyObject::list([
-            MontyObject::int(1),
+            MontyObject::string("hash".to_owned()),
             MontyObject::string("caught".to_owned()),
             MontyObject::string("after".to_owned()),
         ])
     );
 }
 
-/// The traceback identifies `list.sort()` and its key function without a context prefix.
+/// The traceback identifies the dict and the `__hash__` it called without a context prefix.
 #[test]
-fn not_implemented_in_list_sort_key_has_traceback() {
-    let code = "[1, 2].sort(key=lambda x: ext_fn())";
+fn not_implemented_in_hash_has_traceback() {
+    let code = "class Key:\n    def __hash__(self):\n        return ext_fn()\n\n{Key(): 1}";
     let mut ex = MontyRun::new(
         code.to_owned(),
         "test.py",
@@ -551,12 +554,12 @@ fn not_implemented_in_list_sort_key_has_traceback() {
         .unwrap_err();
     assert_snapshot!(err.to_string(), @r#"
     Traceback (most recent call last):
-      File "test.py", line 1, in <module>
-        [1, 2].sort(key=lambda x: ext_fn())
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      File "test.py", line 1, in <lambda>
-        [1, 2].sort(key=lambda x: ext_fn())
-                                  ~~~~~~~~
+      File "test.py", line 5, in <module>
+        {Key(): 1}
+                ~
+      File "test.py", line 3, in __hash__
+        return ext_fn()
+               ~~~~~~~~
     NotImplementedError: external function 'ext_fn' cannot suspend in this synchronous context
     "#);
 }
