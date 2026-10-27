@@ -142,32 +142,33 @@ fn multiline_preview_mixed_indentation_not_dedented() {
     );
 }
 
-/// A class whose `__init__` is bound to an external function cannot suspend:
-/// non-plain-function `__init__` runs synchronously via `evaluate_function`,
-/// which cannot yield to the host, so the call raises `NotImplementedError`
-/// (documented in `limitations/classes.md`). Kept as a Rust-side test because
-/// on CPython the external is a real function and construction would succeed,
-/// so the comparative test-case suite cannot cover it.
+/// A class whose `__init__` is bound to an external function calls it on the
+/// VM's own loop, so the call suspends to the host as it would anywhere, and
+/// the construction answers the instance once the host answers `None`.
 #[test]
-fn external_function_as_init_raises_not_implemented() {
-    let code = "class Foo:\n    __init__ = ext_fn\n\nFoo()";
-    let mut ex = MontyRun::new(
+fn external_function_as_init_suspends() {
+    let code = "class Foo:\n    __init__ = ext_fn\n\ntype(Foo(1)).__name__";
+    let runner = MontyRun::new(
         code.to_owned(),
         "test.py",
         vec!["ext_fn".to_owned()],
         CompileOptions::default(),
     )
     .unwrap();
-    let err = ex
-        .run_no_limits(vec![MontyObject::function("ext_fn".to_owned(), None)])
-        .unwrap_err();
-    assert_snapshot!(err, @r#"
-    Traceback (most recent call last):
-      File "test.py", line 4, in <module>
-        Foo()
-        ~~~~~
-    NotImplementedError: external function 'ext_fn' cannot suspend in this synchronous context
-    "#);
+    let progress = runner
+        .start(
+            vec![MontyObject::function("ext_fn".to_owned(), None)],
+            ResourceTracker::default(),
+            PrintWriter::Stdout,
+        )
+        .unwrap();
+    let call = progress.into_function_call().expect("the __init__ reaches the host");
+    assert_eq!(call.function_name, "ext_fn");
+    assert_eq!(call.args.arg(0).unwrap(), MontyObject::int(1));
+    let done = call
+        .resume(ExtFunctionResult::Return(MontyObject::none()), PrintWriter::Stdout)
+        .unwrap();
+    assert_eq!(done.into_complete(), Some(MontyObject::string("Foo".to_owned())));
 }
 
 /// `functools.reduce` runs its callback from a frozen Python frame, allowing

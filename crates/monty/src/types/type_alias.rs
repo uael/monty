@@ -5,10 +5,13 @@ use std::{cell::RefCell, fmt::Write};
 use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
+    defer_drop,
     exception_private::RunResult,
+    frozen::{FrozenFunction, FrozenFunctions},
     hash::{HashValue, identity_hash},
-    heap::{HeapId, HeapItem, HeapObjectRead},
+    heap::{HeapId, HeapItem, HeapObjectRead, HeapReadOutput},
     intern::{StaticStrings, StringId},
+    modules::ModuleFunctions,
     types::{LazyHeapSet, PyTrait, Type},
     value::{EitherStr, Value},
 };
@@ -85,14 +88,14 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, TypeAliasType> {
         if let Some(ss) = attr.static_string(vm.interns) {
             return match ss {
                 StaticStrings::DunderName => Ok(Some(CallResult::Value(Value::InternString(self.get(vm.heap).name)))),
-                StaticStrings::DunderValue => self.alias_value(vm).map(|v| Some(CallResult::Value(v))),
+                StaticStrings::DunderValue => self.alias_value(vm).map(Some),
                 _ => Ok(None),
             };
         }
         // Slow path: a name built at runtime is a heap str.
         match attr.as_str(vm.interns) {
             "__name__" => Ok(Some(CallResult::Value(Value::InternString(self.get(vm.heap).name)))),
-            "__value__" => self.alias_value(vm).map(|v| Some(CallResult::Value(v))),
+            "__value__" => self.alias_value(vm).map(Some),
             _ => Ok(None),
         }
     }
@@ -101,10 +104,9 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, TypeAliasType> {
 impl<'h> HeapObjectRead<'h, TypeAliasType> {
     /// `__value__`: the memoized value, or the thunk's first (and only) result.
     ///
-    /// The thunk re-enters the VM, so nothing borrowed from the heap entry (the
-    /// `RefCell` memo included) may be held across the call. The alias itself
-    /// stays alive because every `py_getattr` caller owns a reference to it.
-    fn alias_value(&self, vm: &mut VM<'h>) -> RunResult<Value> {
+    /// The thunk runs in a frame of [`VALUE_SOURCE`] on the VM's own loop, so a
+    /// thunk that calls the host suspends the run; the frame holds the alias.
+    fn alias_value(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         let cached = self
             .get(vm.heap)
             .value
@@ -112,23 +114,47 @@ impl<'h> HeapObjectRead<'h, TypeAliasType> {
             .as_ref()
             .map(|value| value.clone_with_heap(vm.heap));
         if let Some(cached) = cached {
-            return Ok(cached);
+            return Ok(CallResult::Value(cached));
         }
 
         let thunk = self.get(vm.heap).thunk.clone_with_heap(vm.heap);
-        let evaluated = vm.evaluate_function(&thunk, ArgValues::Empty);
-        thunk.drop_with(vm);
-        let evaluated = evaluated?;
-
-        let result = evaluated.clone_with_heap(vm.heap);
-        // A self-referential alias can have memoized during the call above; that
-        // value is replaced (and released) so identity stays with the last write.
-        let previous = self.get(vm.heap).value.replace(Some(evaluated));
-        if let Some(previous) = previous {
-            previous.drop_with(vm);
-        }
-        Ok(result)
+        let id = self.id();
+        vm.heap.inc_ref(id);
+        vm.call_frozen_exact(
+            FrozenFunction::TypeAliasValue,
+            [
+                Value::Ref(id),
+                thunk,
+                Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::TypeAliasRemember)),
+            ],
+        )
     }
+}
+
+/// The first read of `__value__`, which runs on the VM's own loop as a frame of
+/// its own: the thunk gives the value, which the alias then keeps.
+pub(crate) const VALUE_SOURCE: &str = r"
+def __monty_type_alias_value(alias, thunk, remember):
+    return remember(alias, thunk())
+";
+
+/// Keeps the value that the thunk of an alias gave, and gives it back, for
+/// [`VALUE_SOURCE`].
+///
+/// A self-referential alias can have memoized during the thunk; that value is
+/// replaced (and released) so identity stays with the last write.
+pub(crate) fn call_remember(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let (alias, evaluated) = args.get_two_args("remember", vm.heap)?;
+    defer_drop!(alias, vm);
+    let Some(HeapReadOutput::TypeAliasType(alias)) = alias.read_heap(vm) else {
+        unreachable!("a frozen alias read passes its alias")
+    };
+    let result = evaluated.clone_with_heap(vm.heap);
+    let previous = alias.get(vm.heap).value.replace(Some(evaluated));
+    if let Some(previous) = previous {
+        previous.drop_with(vm);
+    }
+    Ok(result)
 }
 
 impl HeapItem for TypeAliasType {

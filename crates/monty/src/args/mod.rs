@@ -17,11 +17,11 @@ use crate::{
     bytecode::VM,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     expressions::{ExprLoc, Identifier},
-    heap::{ContainsHeap, DropWithContext, Heap},
+    heap::{ContainsHeap, DropWithContext, Heap, HeapData},
     intern::{Interns, StringId},
     object_bridge::{CallArgsExt, GraphExporter},
     parse::ParseError,
-    types::{Dict, dict::DictIntoIter},
+    types::{Dict, allocate_tuple, dict::DictIntoIter, tuple::TupleVec},
     value::Value,
 };
 
@@ -224,6 +224,22 @@ impl ArgValues {
     fn unexpected_kwargs_error(kwargs: KwargsValues, method_name: &str, heap: &mut Heap) -> RunError {
         kwargs.drop_with(heap);
         ExcType::type_error_no_kwargs(method_name)
+    }
+
+    /// Moves the arguments into a tuple of the positionals and a dict of the
+    /// keywords, for a frozen function that calls `f(*args, **kwargs)`.
+    pub(crate) fn into_tuple_and_dict(self, vm: &mut VM<'_>) -> RunResult<(Value, Value)> {
+        let (positional, keywords) = self.into_parts();
+        let positional: TupleVec = positional.collect();
+        let args = allocate_tuple(positional, vm.heap);
+        let pairs: Vec<(Value, Value)> = keywords.into_iter().collect();
+        match Dict::from_pairs(pairs, vm) {
+            Ok(dict) => Ok((args, Value::Ref(vm.heap.allocate(HeapData::Dict(dict))))),
+            Err(err) => {
+                args.drop_with(vm);
+                Err(err)
+            }
+        }
     }
 
     /// Exports the arguments into one arena for delivery to an external

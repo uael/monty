@@ -11,8 +11,8 @@
 //! - [`fp`] reaches the file object the `load` / `dump` variants take
 
 mod dump;
-mod fp;
-mod load;
+pub(crate) mod fp;
+pub(crate) mod load;
 mod string_cache;
 
 pub(crate) use load::apply_json_load;

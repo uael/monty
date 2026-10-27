@@ -13,12 +13,12 @@ use crate::{
     bytecode::{CallResult, Compiler, VM},
     exception_private::RunResult,
     intern::{CompileInterns, FunctionId, Interns},
-    modules::functools,
+    modules::{bisect, collections::defaultdict, dataclasses, functools, json, os_path},
     name_map::NameMap,
     parse::parse_with_interner,
     prepare::prepare_with_existing_names,
     sorting,
-    types::{iter, list, lru_cache},
+    types::{csv, instance, iter, list, lru_cache, re_pattern, type_alias},
 };
 
 /// Identifies an internal implementation with one authoritative source definition.
@@ -52,6 +52,36 @@ pub(crate) enum FrozenFunction {
     /// Step the iterables of `zip()` together, when one of them is a generator.
     #[serde(rename = "builtins.zip")]
     Zip,
+    /// Search a sorted sequence by a key, for `bisect` and `insort`.
+    #[serde(rename = "bisect.bisect_key")]
+    BisectKey,
+    /// Call the factory of a `defaultdict` for a key it misses, and store its value.
+    #[serde(rename = "collections.defaultdict.__missing__")]
+    DefaultdictMissing,
+    /// Run the factories and the `__post_init__` of a dataclass `__init__`.
+    #[serde(rename = "dataclasses.__init__")]
+    DataclassInit,
+    /// Call the `write` method of the file of `json.dump()`.
+    #[serde(rename = "json.dump_write")]
+    JsonWrite,
+    /// Call the `read` method of the file of `json.load()` and parse what it gives.
+    #[serde(rename = "json.load_read")]
+    JsonRead,
+    /// Compare the inode and the device of two stat results.
+    #[serde(rename = "os.path.samestat")]
+    Samestat,
+    /// Write each row of `writerows()` through `writerow()`, for a target that is not a file.
+    #[serde(rename = "_csv.writer.writerows")]
+    CsvWriterows,
+    /// Call a callable `repl` of `re.sub()` on each match.
+    #[serde(rename = "re.sub_callable")]
+    ReSub,
+    /// Run the thunk of a type alias on the first read of its `__value__`.
+    #[serde(rename = "typing.TypeAliasType.__value__")]
+    TypeAliasValue,
+    /// Call an `__init__` that is no plain function, and answer the instance.
+    #[serde(rename = "type.__call__.__init__")]
+    Init,
 }
 
 impl FrozenFunction {
@@ -81,6 +111,16 @@ impl FrozenFunction {
         Ok((id, overlay))
     }
 
+    /// Whether a frame of this implementation charges the recursion budget.
+    ///
+    /// Most implementations call a function of the user, whose frame charges
+    /// it. The call of an exotic `__init__` can push no frame of the user at
+    /// all: a class bound as `__init__` instantiates itself again, so only its
+    /// own frames bound that cycle, as the native re-entry limit bounded it.
+    pub(crate) fn charges_recursion(self) -> bool {
+        matches!(self, Self::Init)
+    }
+
     /// Selects one self-contained function; dependencies arrive as arguments, not globals.
     fn source(self) -> &'static str {
         match self {
@@ -93,6 +133,16 @@ impl FrozenFunction {
             Self::SortByKey => sorting::SORT_BY_KEY_SOURCE,
             Self::MinMaxKey => min_max::MIN_MAX_KEY_SOURCE,
             Self::Zip => zip::ZIP_SOURCE,
+            Self::BisectKey => bisect::BISECT_KEY_SOURCE,
+            Self::DefaultdictMissing => defaultdict::MISSING_SOURCE,
+            Self::DataclassInit => dataclasses::INIT_SOURCE,
+            Self::JsonWrite => json::fp::WRITE_SOURCE,
+            Self::JsonRead => json::fp::READ_SOURCE,
+            Self::Samestat => os_path::SAMESTAT_SOURCE,
+            Self::CsvWriterows => csv::writer::WRITEROWS_SOURCE,
+            Self::ReSub => re_pattern::SUB_SOURCE,
+            Self::TypeAliasValue => type_alias::VALUE_SOURCE,
+            Self::Init => instance::INIT_SOURCE,
         }
     }
 }
@@ -114,6 +164,22 @@ pub(crate) enum FrozenFunctions {
     RestoreSorted,
     /// Whether a key of `min()` or `max()` wins over the best key so far.
     KeyWins,
+    /// Check the bounds of a search with a key and give its end.
+    BisectBounds,
+    /// Compare two keys of a search with a key.
+    BisectLess,
+    /// Store the fields of a dataclass instance.
+    DataclassStore,
+    /// Give the bound `__post_init__` of a dataclass instance, or `None`.
+    DataclassPostInit,
+    /// Parse what the `read` method of the file of `json.load()` gave.
+    JsonParse,
+    /// Put the pieces that a callable `repl` of `re.sub()` gave in place of their matches.
+    ReSubJoin,
+    /// Keep the value that the thunk of a type alias gave.
+    TypeAliasRemember,
+    /// Check that an `__init__` returned `None`.
+    InitReturned,
 }
 
 /// Dispatches private helpers using the same argument ownership rules as public natives.
@@ -125,5 +191,13 @@ pub(crate) fn call_helper(function: FrozenFunctions, args: ArgValues, vm: &mut V
         FrozenFunctions::OrderByKeys => sorting::call_order_by_keys(args, vm).map(CallResult::Value),
         FrozenFunctions::RestoreSorted => list::call_restore_sorted(args, vm).map(CallResult::Value),
         FrozenFunctions::KeyWins => min_max::call_key_wins(args, vm).map(CallResult::Value),
+        FrozenFunctions::BisectBounds => bisect::call_bounds(args, vm).map(CallResult::Value),
+        FrozenFunctions::BisectLess => bisect::call_less(args, vm).map(CallResult::Value),
+        FrozenFunctions::DataclassStore => dataclasses::call_store(args, vm).map(CallResult::Value),
+        FrozenFunctions::DataclassPostInit => dataclasses::call_post_init(args, vm).map(CallResult::Value),
+        FrozenFunctions::JsonParse => json::load::call_parse(args, vm).map(CallResult::Value),
+        FrozenFunctions::ReSubJoin => re_pattern::call_sub_join(args, vm).map(CallResult::Value),
+        FrozenFunctions::TypeAliasRemember => type_alias::call_remember(args, vm).map(CallResult::Value),
+        FrozenFunctions::InitReturned => instance::call_init_returned(args, vm).map(CallResult::Value),
     }
 }

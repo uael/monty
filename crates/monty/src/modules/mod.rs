@@ -318,7 +318,7 @@ impl ModuleFunctions {
             Self::Frozen(functions) => frozen::call_helper(functions, args, vm),
             Self::Time(functions) => time::call(vm, functions, args),
             Self::Hashlib(functions) => hashlib::call(vm, functions, args).map(CallResult::Value),
-            Self::Bisect(functions) => bisect::call(vm, functions, args).map(CallResult::Value),
+            Self::Bisect(functions) => bisect::call(vm, functions, args),
             Self::Csv(functions) => csv::call(vm, functions, args),
             Self::Tomllib(functions) => tomllib::call(vm, functions, args),
             Self::Monty(functions) => monty::call(vm, functions, args).map(CallResult::Value),

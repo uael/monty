@@ -29,12 +29,14 @@ use crate::{
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
+    frozen::{FrozenFunction, FrozenFunctions},
     hash::HashValue,
     heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapRead, HeapReadMut, HeapReadOutput},
     intern::{StaticStrings, StringId},
     modules::ModuleFunctions,
+    sorting::take_list_items,
     types::{
-        Class, Dict, Instance, LazyHeapSet, Module, PyTrait,
+        Class, Dict, Instance, LazyHeapSet, List, Module, PyTrait,
         host_class::{host_class_type, write_dataclass_repr},
         instance::{class_defines, class_dunder, class_name, instance_attr},
         tuple::{TupleVec, allocate_tuple},
@@ -789,36 +791,127 @@ pub(crate) fn dataclass_init<'h>(
     let HeapReadOutput::Instance(instance) = vm.heap.read(*instance_id) else {
         unreachable!("the caller just allocated the instance")
     };
-    let values = bind_dataclass_fields(vm, class, fields_id, &fields, args)?;
-    store_bound_fields(&instance, &fields, values, vm)?;
-    run_post_init(*instance_id, class, vm)?;
-    Ok(CallResult::Value(guard.into_inner()))
+    let (values, factories) = bind_dataclass_fields(vm, class, fields_id, &fields, args)?;
+    if factories.iter().all(|f| matches!(f, Value::None)) && !defines_post_init(class, vm) {
+        store_bound_fields(&instance, &fields, values, vm)?;
+        return Ok(CallResult::Value(guard.into_inner()));
+    }
+    drop(instance);
+    let names: TupleVec = fields.iter().map(|(name, _)| Value::InternString(*name)).collect();
+    let names = allocate_tuple(names, vm.heap);
+    let values = Value::Ref(vm.heap.allocate(HeapData::List(List::new(values))));
+    let factories = Value::Ref(vm.heap.allocate(HeapData::List(List::new(factories))));
+    let (instance, vm) = guard.into_parts();
+    vm.call_frozen_exact(
+        FrozenFunction::DataclassInit,
+        [
+            instance,
+            names,
+            values,
+            factories,
+            Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::DataclassStore)),
+            Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::DataclassPostInit)),
+        ],
+    )
 }
 
-/// Calls the class's `__post_init__` once every field is stored, as CPython's
-/// generated `__init__` ends by doing.
+/// The body of the synthesized `__init__` once its arguments are bound, which
+/// runs on the VM's own loop as a frame of its own, so a `default_factory` and
+/// a `__post_init__` that call the host suspend the run.
 ///
-/// Looked up in the class namespace at each construction, where CPython decides
-/// at decoration, so a hook attached afterwards runs too.
-/// Runs through [`VM::evaluate_function`], like a `default_factory`, so it
-/// cannot suspend on an external or OS call where a hand-written `__init__`
-/// can — documented in `limitations/dataclasses.md`. Its return value is
-/// discarded, and anything it raises propagates out of the constructor, leaving
-/// the half-built instance to the caller's guard.
-fn run_post_init<'h>(instance_id: HeapId, class: &HeapRead<'h, Class>, vm: &mut VM<'h>) -> RunResult<()> {
+/// The factories run in field order, then every field is stored, then the
+/// `__post_init__` runs, as CPython's generated `__init__` does.
+pub(crate) const INIT_SOURCE: &str = r"
+def __monty_dataclass_init(instance, names, values, factories, store, post_init):
+    index = 0
+    for factory in factories:
+        if factory is not None:
+            values[index] = factory()
+        index += 1
+    store(instance, names, values)
+    hook = post_init(instance)
+    if hook is not None:
+        hook()
+    return instance
+";
+
+/// Whether the class defines `__post_init__` in its own namespace.
+///
+/// Looked up at each construction, where CPython decides at decoration, so a
+/// hook attached afterwards runs too.
+fn defines_post_init<'h>(class: &HeapRead<'h, Class>, vm: &VM<'h>) -> bool {
     let post_init_name: &'static str = StaticStrings::PostInit.into();
-    let namespace = class.get(vm.heap).namespace();
-    if namespace.get_by_str(post_init_name, vm.heap, vm.interns).is_none() {
-        return Ok(());
-    }
-    // Read as an attribute, so the method arrives bound to the instance.
-    let Some(post_init) = instance_attr(instance_id, StaticStrings::PostInit.into(), vm) else {
-        return Ok(());
+    class
+        .get(vm.heap)
+        .namespace()
+        .get_by_str(post_init_name, vm.heap, vm.interns)
+        .is_some()
+}
+
+/// Arguments of the private helper that stores the fields of a dataclass.
+#[derive(FromArgs)]
+#[from_args(name = "store")]
+struct StoreArgs {
+    #[from_args(pos_only)]
+    instance: Value,
+    #[from_args(pos_only)]
+    names: Value,
+    #[from_args(pos_only)]
+    values: Value,
+}
+
+/// Stores one value per field on the instance `__dict__`, for [`INIT_SOURCE`];
+/// see [`store_bound_fields`].
+pub(crate) fn call_store(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let StoreArgs {
+        instance,
+        names,
+        values,
+    } = StoreArgs::from_args(args, vm)?;
+    defer_drop!(instance, vm);
+    defer_drop!(names, vm);
+    defer_drop!(values, vm);
+    let fields: Vec<(StringId, bool)> = match names.read_heap(vm) {
+        Some(HeapReadOutput::Tuple(names)) => names
+            .get(vm.heap)
+            .as_slice()
+            .iter()
+            .map(|name| match name {
+                Value::InternString(id) => (*id, false),
+                _ => unreachable!("a frozen dataclass init passes interned field names"),
+            })
+            .collect(),
+        _ => unreachable!("a frozen dataclass init passes a tuple of names"),
     };
-    defer_drop!(post_init, vm);
-    let result = vm.evaluate_function(post_init, ArgValues::Empty)?;
-    result.drop_with(vm);
-    Ok(())
+    let stored = take_list_items(values, vm);
+    let Some(HeapReadOutput::Instance(target)) = instance.read_heap(vm) else {
+        unreachable!("a frozen dataclass init passes its instance")
+    };
+    store_bound_fields(&target, &fields, stored, vm)?;
+    Ok(Value::None)
+}
+
+/// Gives the `__post_init__` of the instance, bound to it, or `None` when its
+/// class defines none, for [`INIT_SOURCE`].
+///
+/// Read as an attribute once every field is stored, so the method arrives
+/// bound to the instance, as CPython's generated `__init__` reads it. Anything
+/// it raises propagates out of the constructor.
+pub(crate) fn call_post_init(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let instance = args.get_one_arg("post_init", vm.heap)?;
+    defer_drop!(instance, vm);
+    let Value::Ref(instance_id) = *instance else {
+        unreachable!("a frozen dataclass init passes its instance")
+    };
+    let class_id = instance_class(instance_id, vm);
+    let HeapReadOutput::Class(class) = vm.heap.read(class_id) else {
+        unreachable!("an instance has a class")
+    };
+    if !defines_post_init(&class, vm) {
+        return Ok(Value::None);
+    }
+    drop(class);
+    Ok(instance_attr(instance_id, StaticStrings::PostInit.into(), vm).unwrap_or(Value::None))
 }
 
 /// Stores one bound value per field on the instance `__dict__`, consuming
@@ -862,7 +955,7 @@ fn bind_dataclass_fields<'h>(
     fields_id: HeapId,
     fields: &[(StringId, bool)],
     args: ArgValues,
-) -> Result<Vec<Value>, RunError> {
+) -> Result<(Vec<Value>, Vec<Value>), RunError> {
     let n_fields = fields.len();
     let init_name = format!("{}.__init__", class.get(vm.heap).name().as_str(vm.interns));
     let (pos_iter, kwargs) = args.into_parts();
@@ -922,33 +1015,33 @@ fn bind_dataclass_fields<'h>(
         return Err(ExcType::type_error_missing_positional_with_names(&init_name, &refs));
     }
 
-    // Factories run in field order, and only for a field left unbound. Each
-    // entry is taken out of the plan as it is used, so an error part-way leaves
-    // the guard only the ones still to come.
+    // A field left unbound takes its default now, or its factory, which the
+    // caller runs in field order: `None` stands in its value until then, and in
+    // the factories of every other field.
+    let mut factories = Vec::with_capacity(plan.len());
     for idx in 0..plan.len() {
-        // Each factory re-enters `run()` with a fresh dispatch countdown, so a
-        // short one reaches no checkpoint: this is the construction's only clock
-        // poll, as it is for the sorting key loop.
-        vm.heap.tracker.check_time_every(idx)?;
+        let init = mem::replace(&mut plan[idx], FieldInit::Unsupplied);
         if values[idx].is_some() {
+            init.drop_with(vm);
+            factories.push(Value::None);
             continue;
         }
-        values[idx] = Some(match mem::replace(&mut plan[idx], FieldInit::Unsupplied) {
-            FieldInit::Default(default) => default,
-            FieldInit::Factory(factory) => {
-                defer_drop!(factory, vm);
-                vm.evaluate_function(factory, ArgValues::Empty)?
-            }
+        let (value, factory) = match init {
+            FieldInit::Default(default) => (default, Value::None),
+            FieldInit::Factory(factory) => (Value::None, factory),
             FieldInit::Unsupplied => unreachable!("the missing check rejected every unsupplied field"),
-        });
+        };
+        values[idx] = Some(value);
+        factories.push(factory);
     }
     drop(plan_guard);
 
-    Ok(guard
+    let values = guard
         .into_inner()
         .into_iter()
         .map(|v| v.expect("all fields bound"))
-        .collect())
+        .collect();
+    Ok((values, factories))
 }
 
 /// Fills the named slots of `values` from the keyword arguments.

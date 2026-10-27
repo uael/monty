@@ -188,7 +188,7 @@ pub(super) fn call(vm: &mut VM<'_>, function: ReFunctions, args: ArgValues) -> R
         ReFunctions::Match => call_match(vm, args).map(CallResult::Value),
         ReFunctions::Fullmatch => call_fullmatch(vm, args).map(CallResult::Value),
         ReFunctions::Findall => call_findall(vm, args).map(CallResult::Value),
-        ReFunctions::Sub => call_sub(vm, args).map(CallResult::Value),
+        ReFunctions::Sub => call_sub(vm, args),
         ReFunctions::Split => call_split(vm, args).map(CallResult::Value),
         ReFunctions::Finditer => call_finditer(vm, args).map(CallResult::Value),
         ReFunctions::Escape => call_escape(vm, args).map(CallResult::Value),
@@ -262,7 +262,7 @@ fn call_findall(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// The pattern resolves *before* `count` is validated, so a bad pattern (or flags
 /// with a compiled pattern) wins over a bad count — as in CPython, where `_compile`
 /// runs before `Pattern.sub` parses its arguments.
-fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let ReSubArgs {
         pattern,
         repl,
@@ -283,7 +283,7 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     if repl.to_str(vm).is_err() && repl.is_callable(vm) {
         let Some(count) = count else {
             let _ = subject_str(string, vm)?;
-            return Ok(string.clone_with_heap(vm.heap));
+            return Ok(CallResult::Value(string.clone_with_heap(vm.heap)));
         };
         let text = subject_str(string, vm)?.to_owned();
         let all_ascii = text.is_ascii();
@@ -316,12 +316,13 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         // re-allocate (the guard drops the extraction's reference, the
         // clone is the caller's).
         let _ = subject_str(string, vm)?;
-        return Ok(string.clone_with_heap(vm.heap));
+        return Ok(CallResult::Value(string.clone_with_heap(vm.heap)));
     };
 
     resolved
         .get(vm.heap)
         .sub(repl, subject_str(string, vm)?, count, vm.heap)
+        .map(CallResult::Value)
 }
 
 /// `re.split(pattern, string, maxsplit=0, flags=0)` — split on pattern occurrences.

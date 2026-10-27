@@ -15,12 +15,12 @@ use crate::{
     bytecode::FrameExit,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
-    frozen::FrozenFunction,
+    frozen::{FrozenFunction, FrozenFunctions},
     function::{ExactPositionalCall, Function},
     heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapReadOutput},
     heap_data::CellValue,
     intern::{FunctionId, StaticStrings, StringId},
-    modules::dataclasses,
+    modules::{ModuleFunctions, dataclasses},
     os_dispatch::{PendingEffect, release_pending_effect},
     resource_checks::check_estimated_size,
     types::{
@@ -1000,7 +1000,8 @@ impl<'h> VM<'h> {
     }
 
     /// Calls an internal function, compiling it on first use.
-    /// Arguments transfer into ordinary frame locals; implementation frames do not charge recursion depth.
+    /// Arguments transfer into ordinary frame locals; an implementation frame charges recursion depth only when
+    /// [`FrozenFunction::charges_recursion`] says so.
     pub(crate) fn call_frozen_exact<const N: usize>(
         &mut self,
         function: FrozenFunction,
@@ -1039,7 +1040,11 @@ impl<'h> VM<'h> {
             vm.current_offset(),
             None,
         );
-        vm.push_admitted_frame(frame);
+        if function.charges_recursion() {
+            vm.push_frame(frame)?;
+        } else {
+            vm.push_admitted_frame(frame);
+        }
 
         Ok(CallResult::FramePushed)
     }
@@ -1254,12 +1259,12 @@ impl<'h> VM<'h> {
     ///   `None` return and leaves the already-pushed instance as the result — so
     ///   `Foo(a)` evaluates to the new instance, not `__init__`'s return.
     /// - **Any other `__init__`** (builtin, class, `async def`, non-callable, ...):
-    ///   runs it to completion synchronously via
-    ///   [`evaluate_function`](Self::evaluate_function) and enforces CPython's
-    ///   contract that it returns `None`. This path cannot suspend, and must NOT
-    ///   go through the frame-marking path: a class-valued `__init__` recurses
-    ///   into `instantiate_class`, which pushes its own pending instance —
-    ///   blindly marking the resulting frame would corrupt the operand stack.
+    ///   calls it in a frame of [`INIT_SOURCE`](crate::types::instance::INIT_SOURCE) on the VM's own loop, which
+    ///   enforces CPython's contract that it returns `None` and answers the
+    ///   instance. It must NOT go through the frame-marking path: a class-valued
+    ///   `__init__` recurses into `instantiate_class`, which pushes its own
+    ///   pending instance — blindly marking the resulting frame would corrupt
+    ///   the operand stack.
     ///
     /// Because a plain-function `__init__` runs as a normal frame, it may suspend
     /// on external/OS calls; the `is_initializer` flag is threaded through frame
@@ -1336,21 +1341,26 @@ impl<'h> VM<'h> {
                     }
                 } else {
                     // Exotic `__init__` (builtin, class, `async def`, non-callable,
-                    // ...): run to completion synchronously — no pending instance is
-                    // pushed — and enforce CPython's `None`-return contract.
-                    match this.evaluate_function(init_func, init_args) {
-                        Ok(Value::None) => Ok(CallResult::Value(Value::Ref(instance_id))),
-                        Ok(result) => {
-                            let type_name = result.py_type_name(this);
-                            result.drop_with(this);
-                            Value::Ref(instance_id).drop_with(this);
-                            Err(ExcType::type_error_init_return(type_name))
-                        }
+                    // ...): called in a frame of `INIT_SOURCE` on the VM's own loop —
+                    // no pending instance is pushed — which enforces CPython's
+                    // `None`-return contract.
+                    let (args, kwargs) = match init_args.into_tuple_and_dict(this) {
+                        Ok(parts) => parts,
                         Err(e) => {
                             Value::Ref(instance_id).drop_with(this);
-                            Err(e)
+                            return Err(e);
                         }
-                    }
+                    };
+                    this.call_frozen_exact(
+                        FrozenFunction::Init,
+                        [
+                            Value::Ref(instance_id),
+                            init_func.clone_with_heap(this.heap),
+                            args,
+                            kwargs,
+                            Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::InitReturned)),
+                        ],
+                    )
                 }
             }
         }

@@ -3,7 +3,7 @@
 //! Formatting is a port of CPython's `join_append_data`, so quoting and escaping decisions
 //! match. A file target yields the host write (one `OsCall` per `writerow`, and one combined
 //! write per `writerows`); any other target's `write`, bound at construction, runs as a
-//! Python call.
+//! Python call on the VM's own loop.
 
 use std::{fmt::Write, mem, sync::Arc};
 
@@ -15,6 +15,7 @@ use crate::{
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
+    frozen::FrozenFunction,
     fstring::FormatFloat,
     heap::{ContainsHeap, DropWithContext, HeapData, HeapId, HeapRead},
     intern::StaticStrings,
@@ -123,8 +124,14 @@ pub(super) fn write_fields<'h>(
 /// `writer.writerows(rows)`: writes every row and returns `None`.
 ///
 /// A file target receives all the lines in one host write, since a Rust loop cannot suspend
-/// once per row; any other target's `write()` is called synchronously as each row arrives.
-pub(super) fn writerows<'h>(obj: &HeapRead<'h, CsvObject>, args: ArgValues, vm: &mut VM<'h>) -> RunResult<CallResult> {
+/// once per row; any other target's `write()` is called as each row arrives, in a frame of
+/// [`WRITEROWS_SOURCE`] for the writer `id`.
+pub(super) fn writerows<'h>(
+    obj: &HeapRead<'h, CsvObject>,
+    id: HeapId,
+    args: ArgValues,
+    vm: &mut VM<'h>,
+) -> RunResult<CallResult> {
     let rows = args.get_one_arg("writer.writerows", vm.heap)?;
     defer_drop!(rows, vm);
     let (target, write, dialect) = parts(obj, vm);
@@ -147,36 +154,22 @@ pub(super) fn writerows<'h>(obj: &HeapRead<'h, CsvObject>, args: ArgValues, vm: 
             write_line(target, write, lines, vm).map(discard_write_result)
         }
     } else {
-        let iterator = rows.py_iter(vm)?.require_synchronous(vm)?;
-        defer_drop!(iterator, vm);
-        // One line buffer serves every row, so each costs a single exact-size allocation.
-        let mut line = String::new();
-        // One view across the loop: its step count is what polls the time limit.
-        let mut rows = iterator.read(vm);
-        while let Some(row) = rows.py_next(vm)? {
-            defer_drop!(row, vm);
-            let items = row_items(row, vm)?;
-            defer_drop!(items, vm);
-            writerow_now(write, &dialect, &terminator_chars, items, &mut line, vm)?;
-        }
-        Ok(CallResult::Value(Value::None))
+        vm.heap.inc_ref(id);
+        vm.call_frozen_exact(
+            FrozenFunction::CsvWriterows,
+            [Value::Ref(id), rows.clone_with_heap(vm.heap)],
+        )
     }
 }
 
-/// Formats `items` through `line` and runs the bound `write` to completion; the per-row step
-/// of `writerows` and `DictWriter.writerows` on a target that is not a file.
-pub(super) fn writerow_now(
-    write: &Value,
-    dialect: &Dialect,
-    terminator_chars: &[char],
-    items: &[Value],
-    line: &mut String,
-    vm: &mut VM<'_>,
-) -> RunResult<()> {
-    let line = format_items(dialect, terminator_chars, items, line, vm)?;
-    vm.evaluate_function(write, ArgValues::One(line))?.drop_with(vm);
-    Ok(())
-}
+/// `writerows(rows)` of a writer or a `DictWriter` whose target is not a file, which
+/// runs on the VM's own loop as a frame of its own: each row is read and written in
+/// turn through `writerow`, so a `write()` that calls the host suspends the run.
+pub(crate) const WRITEROWS_SOURCE: &str = r"
+def __monty_csv_writerows(writer, rows):
+    for row in rows:
+        writer.writerow(row)
+";
 
 /// The distinct characters of a line terminator, sorted for `binary_search`: membership
 /// per field character must not scan the terminator itself, which can be any length.
