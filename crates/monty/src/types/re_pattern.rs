@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use crate::{
     args::{ArgValues, FromArgs},
     bytecode::{CallResult, VM},
-    defer_drop,
+    defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput},
     intern::StaticStrings,
@@ -64,6 +64,9 @@ pub(crate) struct RePattern {
     /// alternations — e.g. `fullmatch('a|ab', 'ab')` must match `ab`, not fail
     /// because the engine found `a` first.
     compiled_fullmatch: OnceCell<Regex>,
+    /// The regex anchored with `(?:...)\z` alone for `fullmatch()` from a `pos` past 0, where `\A`
+    /// cannot match, compiled lazily on first use (see `compiled_match`).
+    compiled_tail: OnceCell<Regex>,
     /// The `delegate_size_limit` the plain regex was compiled with, forwarded to
     /// the anchored variants above so a *cached* entry's total retained compiled
     /// size stays bounded (the anchors add only O(1) bytes, so a pattern that fit
@@ -139,6 +142,7 @@ impl RePattern {
             compiled,
             compiled_match: OnceCell::new(),
             compiled_fullmatch: OnceCell::new(),
+            compiled_tail: OnceCell::new(),
             delegate_size_limit,
         })
     }
@@ -177,6 +181,17 @@ impl RePattern {
         Ok(self.compiled_fullmatch.get().expect("cell was just initialised"))
     }
 
+    /// The `(?:pattern)\z` regex of `fullmatch()` from a `pos` past 0, where `\A` cannot match.
+    fn tail_regex(&self) -> RunResult<&Regex> {
+        if let Some(regex) = self.compiled_tail.get() {
+            return Ok(regex);
+        }
+        let compiled = compile_regex_limited(&tail_source(&self.pattern), self.flags, self.delegate_size_limit)
+            .map_err(ExcType::re_pattern_error)?;
+        let _ = self.compiled_tail.set(compiled);
+        Ok(self.compiled_tail.get().expect("cell was just initialised"))
+    }
+
     /// Builds a single `ReMatch` heap value from a capture result, keeping the
     /// subject alive by refcount (`subject.clone_with_heap`) rather than copying
     /// its text. `all_ascii` is precomputed by the caller (once per `finditer`).
@@ -190,11 +205,26 @@ impl RePattern {
     /// `subject` is the subject `Value` (stored by the match); `text` is its
     /// borrowed contents. Returns a `ReMatch` heap object, or `Value::None`.
     pub fn search(&self, subject: &Value, text: &str, heap: &Heap) -> RunResult<Value> {
-        match self.compiled.captures(text) {
-            Ok(Some(caps)) => Ok(self.build_match(&caps, subject, text.is_ascii(), heap)),
-            Ok(None) => Ok(Value::None),
-            Err(err) => Err(ExcType::re_pattern_error(err)),
-        }
+        self.search_within(subject, text, 0, text.is_ascii(), heap)
+    }
+
+    /// [`RePattern::search`] from the byte `pos` of `text`, which the caller cut at `endpos`.
+    ///
+    /// A lookbehind and `^` still see the text before `pos`, as in CPython. `all_ascii` is that
+    /// of the whole subject, from which the match counts its offsets.
+    pub fn search_within(
+        &self,
+        subject: &Value,
+        text: &str,
+        pos: usize,
+        all_ascii: bool,
+        heap: &Heap,
+    ) -> RunResult<Value> {
+        let found = self
+            .compiled
+            .captures_from_pos(text, pos)
+            .map_err(ExcType::re_pattern_error)?;
+        Ok(found.map_or(Value::None, |caps| self.build_match(&caps, subject, all_ascii, heap)))
     }
 
     /// `pattern.match(string)` — match anchored at the start of the string.
@@ -205,11 +235,34 @@ impl RePattern {
     ///
     /// Returns a `ReMatch` heap object on success, or `Value::None` if no match.
     pub fn match_start(&self, subject: &Value, text: &str, heap: &Heap) -> RunResult<Value> {
-        match self.match_regex()?.captures(text) {
-            Ok(Some(caps)) => Ok(self.build_match(&caps, subject, text.is_ascii(), heap)),
-            Ok(None) => Ok(Value::None),
-            Err(err) => Err(ExcType::re_pattern_error(err)),
+        self.match_within(subject, text, 0, text.is_ascii(), heap)
+    }
+
+    /// [`RePattern::match_start`] at the byte `pos` of `text`, which the caller cut at `endpos`.
+    ///
+    /// Past 0, `\A` cannot match at `pos`, so the search runs unanchored from `pos` and keeps only
+    /// a match that starts there: the leftmost match is the one at `pos` when there is one. A
+    /// failed match then reads the rest of the text.
+    pub fn match_within(
+        &self,
+        subject: &Value,
+        text: &str,
+        pos: usize,
+        all_ascii: bool,
+        heap: &Heap,
+    ) -> RunResult<Value> {
+        let found = if pos == 0 {
+            self.match_regex()?.captures(text)
+        } else {
+            self.compiled.captures_from_pos(text, pos)
         }
+        .map_err(ExcType::re_pattern_error)?;
+        Ok(match found {
+            Some(caps) if caps.get(0).is_some_and(|m| m.start() == pos) => {
+                self.build_match(&caps, subject, all_ascii, heap)
+            }
+            _ => Value::None,
+        })
     }
 
     /// `pattern.fullmatch(string)` — match the entire string.
@@ -220,11 +273,32 @@ impl RePattern {
     ///
     /// Returns a `ReMatch` heap object on success, or `Value::None` if no match.
     pub fn fullmatch(&self, subject: &Value, text: &str, heap: &Heap) -> RunResult<Value> {
-        match self.fullmatch_regex()?.captures(text) {
-            Ok(Some(caps)) => Ok(self.build_match(&caps, subject, text.is_ascii(), heap)),
-            Ok(None) => Ok(Value::None),
-            Err(err) => Err(ExcType::re_pattern_error(err)),
+        self.fullmatch_within(subject, text, 0, text.is_ascii(), heap)
+    }
+
+    /// [`RePattern::fullmatch`] from the byte `pos` of `text` to its end, which the caller cut at `endpos`.
+    ///
+    /// Past 0, it reads as [`RePattern::match_within`] does, with a regex that is anchored at the end alone.
+    pub fn fullmatch_within(
+        &self,
+        subject: &Value,
+        text: &str,
+        pos: usize,
+        all_ascii: bool,
+        heap: &Heap,
+    ) -> RunResult<Value> {
+        let found = if pos == 0 {
+            self.fullmatch_regex()?.captures(text)
+        } else {
+            self.tail_regex()?.captures_from_pos(text, pos)
         }
+        .map_err(ExcType::re_pattern_error)?;
+        Ok(match found {
+            Some(caps) if caps.get(0).is_some_and(|m| m.start() == pos) => {
+                self.build_match(&caps, subject, all_ascii, heap)
+            }
+            _ => Value::None,
+        })
     }
 
     /// `pattern.findall(string)` — return all non-overlapping matches.
@@ -276,6 +350,56 @@ impl RePattern {
                 allocate_tuple_list(&flat, groups, heap)
             }
         }
+    }
+
+    /// [`RePattern::findall`] from the byte `pos` of `text`, which the caller cut at `endpos`.
+    pub fn findall_within(&self, text: &str, pos: usize, heap: &Heap) -> RunResult<Value> {
+        if pos == 0 {
+            return self.findall(text, heap);
+        }
+        let groups = self.compiled.captures_len() - 1;
+        let mut scan = Scan::from(pos);
+        let mut flat = Vec::new();
+        while let Some(caps) = scan.step(&self.compiled, text) {
+            let caps = caps.map_err(ExcType::re_pattern_error)?;
+            if groups == 0 {
+                check_slice_growth(&flat, heap)?;
+                flat.push(caps.get(0).map_or("", |m| m.as_str()));
+            }
+            for cap in caps.iter().skip(1) {
+                check_slice_growth(&flat, heap)?;
+                flat.push(cap.map_or("", |m| m.as_str()));
+            }
+        }
+        if groups <= 1 {
+            allocate_str_list(&flat, heap)
+        } else {
+            allocate_tuple_list(&flat, groups, heap)
+        }
+    }
+
+    /// The next match of `scan` in `text`, as its span in bytes and its `re.Match`.
+    ///
+    /// It holds no borrow of the heap between two matches, so `re.sub` can call a function of
+    /// the VM with each match.
+    pub(crate) fn next_match(
+        &self,
+        scan: &mut Scan,
+        subject: &Value,
+        text: &str,
+        all_ascii: bool,
+        heap: &Heap,
+    ) -> RunResult<Option<(usize, usize, Value)>> {
+        let Some(caps) = scan.step(&self.compiled, text) else {
+            return Ok(None);
+        };
+        let caps = caps.map_err(ExcType::re_pattern_error)?;
+        let m = caps.get(0).expect("capture group 0 always exists");
+        Ok(Some((
+            m.start(),
+            m.end(),
+            self.build_match(&caps, subject, all_ascii, heap),
+        )))
     }
 
     /// `pattern.sub(repl, string, count=0)` — substitute matches with a replacement.
@@ -368,11 +492,22 @@ impl RePattern {
     /// lazy iterator but produces the same results when iterated. The VM's `GetIter`
     /// opcode handles iteration over the returned list.
     pub fn finditer(&self, subject: &Value, text: &str, heap: &Heap) -> RunResult<Value> {
-        // Every match shares one refcounted subject reference, not a copy each.
-        let all_ascii = text.is_ascii();
+        self.finditer_within(subject, text, 0, text.is_ascii(), heap)
+    }
 
+    /// [`RePattern::finditer`] from the byte `pos` of `text`, which the caller cut at `endpos`.
+    pub fn finditer_within(
+        &self,
+        subject: &Value,
+        text: &str,
+        pos: usize,
+        all_ascii: bool,
+        heap: &Heap,
+    ) -> RunResult<Value> {
+        // Every match shares one refcounted subject reference, not a copy each.
         let mut results = Vec::new();
-        for caps in self.compiled.captures_iter(text) {
+        let mut scan = Scan::from(pos);
+        while let Some(caps) = scan.step(&self.compiled, text) {
             check_results_growth(&results, heap)?;
             let caps = caps.map_err(ExcType::re_pattern_error)?;
             results.push(self.build_match(&caps, subject, all_ascii, heap));
@@ -380,6 +515,216 @@ impl RePattern {
 
         let list = List::new(results);
         Ok(Value::Ref(heap.allocate(HeapData::List(list))))
+    }
+}
+
+/// The state of a scan for each match of a regex from a byte offset, which
+/// `Regex::captures_iter` gives only from 0.
+///
+/// It takes the steps of that iterator: an empty match starts the next search one
+/// character on, and an empty match just after a match does not count. It holds
+/// no borrow, so a caller can release the heap between two steps.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Scan {
+    next: usize,
+    last: Option<usize>,
+}
+
+impl Scan {
+    fn from(pos: usize) -> Self {
+        Self { next: pos, last: None }
+    }
+
+    fn step<'t>(&mut self, regex: &Regex, text: &'t str) -> Option<Result<fancy_regex::Captures<'t>, RegexError>> {
+        loop {
+            if self.next > text.len() {
+                return None;
+            }
+            let caps = match regex.captures_from_pos(text, self.next) {
+                Err(err) => {
+                    self.next = text.len() + 1;
+                    return Some(Err(err));
+                }
+                Ok(None) => return None,
+                Ok(Some(caps)) => caps,
+            };
+            let (start, end) = caps.get(0).map_or((0, 0), |m| (m.start(), m.end()));
+            if start == end {
+                self.next = text[end..].chars().next().map_or(end + 1, |c| end + c.len_utf8());
+                if self.last == Some(end) {
+                    continue;
+                }
+            } else {
+                self.next = end;
+            }
+            self.last = Some(end);
+            return Some(Ok(caps));
+        }
+    }
+}
+
+/// `sub` with a callable `repl`: CPython calls it with the `re.Match` of each match, in order,
+/// and puts in the `str` that it gives, or nothing for `None`.
+///
+/// `next` gives each match, at most `count` of them when `count` is not 0. As in CPython, a
+/// value that is neither a `str` nor `None` raises only once each call ran, with the index
+/// that `str.join` gives it in the list of the pieces.
+pub(crate) fn sub_callable<'h>(
+    repl: &Value,
+    text: &str,
+    count: usize,
+    mut next: impl FnMut(&mut VM<'h>) -> RunResult<Option<(usize, usize, Value)>>,
+    vm: &mut VM<'h>,
+) -> RunResult<Value> {
+    let limit = if count == 0 { usize::MAX } else { count };
+    let mut result = String::new();
+    let mut last_end = 0;
+    let mut pieces = 0usize;
+    let mut wrong: Option<(usize, String)> = None;
+    let mut done = 0;
+    while done < limit {
+        let Some((start, end, found)) = next(vm)? else {
+            break;
+        };
+        done += 1;
+        if last_end < start {
+            result.push_str(&text[last_end..start]);
+            pieces += 1;
+        }
+        let got = vm.evaluate_function(repl, ArgValues::One(found))?;
+        defer_drop!(got, vm);
+        if !matches!(got, Value::None) {
+            match got.to_str(vm) {
+                Ok(piece) => result.push_str(piece),
+                Err(_) => {
+                    if wrong.is_none() {
+                        wrong = Some((pieces, got.py_type_name(vm).into_owned()));
+                    }
+                }
+            }
+            pieces += 1;
+        }
+        last_end = end;
+        check_estimated_size(result.len() + (text.len() - last_end), &vm.heap.tracker)?;
+    }
+    if let Some((index, name)) = wrong {
+        return Err(ExcType::type_error(format!(
+            "sequence item {index}: expected str instance, {name} found"
+        )));
+    }
+    result.push_str(&text[last_end..]);
+    Ok(allocate_string(result, vm.heap))
+}
+
+/// Which method of `re.Pattern` reads `string, pos=0, endpos=sys.maxsize`.
+#[derive(Debug, Clone, Copy)]
+enum Within {
+    Search,
+    Match,
+    Fullmatch,
+    Findall,
+    Finditer,
+}
+
+macro_rules! within_args {
+    ($shape:ident, $name:tt) => {
+        /// Argument shape for a method of `re.Pattern` that reads `string, pos=0, endpos=sys.maxsize`.
+        ///
+        /// See `PatternSubArgs` for why `string` uses `static_string`.
+        #[derive(FromArgs)]
+        #[from_args(name = $name, style = c_named, at_most_total)]
+        struct $shape {
+            #[from_args(static_string = "StringAttr")]
+            string: Value,
+            #[from_args(default)]
+            pos: Option<Value>,
+            #[from_args(default)]
+            endpos: Option<Value>,
+        }
+    };
+}
+
+within_args!(PatternSearchArgs, "search");
+within_args!(PatternMatchArgs, "match");
+within_args!(PatternFullmatchArgs, "fullmatch");
+within_args!(PatternFindallArgs, "findall");
+within_args!(PatternFinditerArgs, "finditer");
+
+/// Handles a method of `re.Pattern` that reads `string, pos=0, endpos=sys.maxsize`.
+fn call_pattern_within<'h>(
+    pattern: &HeapRead<'h, RePattern>,
+    method: Within,
+    args: ArgValues,
+    vm: &mut VM<'h>,
+) -> RunResult<Value> {
+    let (string, pos, endpos) = match method {
+        Within::Search => {
+            let got = PatternSearchArgs::from_args(args, vm)?;
+            (got.string, got.pos, got.endpos)
+        }
+        Within::Match => {
+            let got = PatternMatchArgs::from_args(args, vm)?;
+            (got.string, got.pos, got.endpos)
+        }
+        Within::Fullmatch => {
+            let got = PatternFullmatchArgs::from_args(args, vm)?;
+            (got.string, got.pos, got.endpos)
+        }
+        Within::Findall => {
+            let got = PatternFindallArgs::from_args(args, vm)?;
+            (got.string, got.pos, got.endpos)
+        }
+        Within::Finditer => {
+            let got = PatternFinditerArgs::from_args(args, vm)?;
+            (got.string, got.pos, got.endpos)
+        }
+    };
+    defer_drop!(string, vm);
+    defer_drop_mut!(pos, vm);
+    defer_drop_mut!(endpos, vm);
+    let pos = bound_arg(pos.take(), vm)?;
+    let endpos = bound_arg(endpos.take(), vm)?;
+    let whole = string.to_str(vm)?;
+    let all_ascii = whole.is_ascii();
+    let start = byte_at(whole, pos.unwrap_or(0), all_ascii);
+    let end = endpos.map_or(whole.len(), |n| byte_at(whole, n, all_ascii));
+    // CPython's search finds nothing when `endpos` stands before `pos`, and its match reads
+    // the text as cut at `pos`.
+    if end < start && matches!(method, Within::Search | Within::Findall | Within::Finditer) {
+        return match method {
+            Within::Search => Ok(Value::None),
+            _ => Ok(Value::Ref(vm.heap.allocate(HeapData::List(List::new(Vec::new()))))),
+        };
+    }
+    let text = &whole[..end.max(start)];
+    let compiled = pattern.get(vm.heap);
+    match method {
+        Within::Search => compiled.search_within(string, text, start, all_ascii, vm.heap),
+        Within::Match => compiled.match_within(string, text, start, all_ascii, vm.heap),
+        Within::Fullmatch => compiled.fullmatch_within(string, text, start, all_ascii, vm.heap),
+        Within::Findall => compiled.findall_within(text, start, vm.heap),
+        Within::Finditer => compiled.finditer_within(string, text, start, all_ascii, vm.heap),
+    }
+}
+
+/// Reads `pos` or `endpos` as CPython's argument clinic reads a `Py_ssize_t`.
+fn bound_arg(value: Option<Value>, vm: &mut VM<'_>) -> RunResult<Option<i64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    defer_drop!(value, vm);
+    value.as_int(vm).map(Some)
+}
+
+/// The byte offset of the character `index` of `text`, which CPython clamps into the text.
+fn byte_at(text: &str, index: i64, all_ascii: bool) -> usize {
+    let Ok(index) = usize::try_from(index) else {
+        return 0;
+    };
+    if all_ascii {
+        index.min(text.len())
+    } else {
+        text.char_indices().nth(index).map_or(text.len(), |(at, _)| at)
     }
 }
 
@@ -513,38 +858,13 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, RePattern> {
 
     fn py_call_attr(&mut self, vm: &mut VM<'h>, attr: &EitherStr, args: ArgValues) -> RunResult<CallResult> {
         let result = match attr.static_string(vm.interns) {
-            Some(StaticStrings::Search) => {
-                let arg = args.get_one_arg("Pattern.search", vm.heap)?;
-                defer_drop!(arg, vm);
-                let text = arg.to_str(vm)?;
-                self.get(vm.heap).search(arg, text, vm.heap)
-            }
-            Some(StaticStrings::Match) => {
-                let arg = args.get_one_arg("Pattern.match", vm.heap)?;
-                defer_drop!(arg, vm);
-                let text = arg.to_str(vm)?;
-                self.get(vm.heap).match_start(arg, text, vm.heap)
-            }
-            Some(StaticStrings::Fullmatch) => {
-                let arg = args.get_one_arg("Pattern.fullmatch", vm.heap)?;
-                defer_drop!(arg, vm);
-                let text = arg.to_str(vm)?;
-                self.get(vm.heap).fullmatch(arg, text, vm.heap)
-            }
-            Some(StaticStrings::Findall) => {
-                let arg = args.get_one_arg("Pattern.findall", vm.heap)?;
-                defer_drop!(arg, vm);
-                let text = arg.to_str(vm)?;
-                self.get(vm.heap).findall(text, vm.heap)
-            }
+            Some(StaticStrings::Search) => call_pattern_within(self, Within::Search, args, vm),
+            Some(StaticStrings::Match) => call_pattern_within(self, Within::Match, args, vm),
+            Some(StaticStrings::Fullmatch) => call_pattern_within(self, Within::Fullmatch, args, vm),
+            Some(StaticStrings::Findall) => call_pattern_within(self, Within::Findall, args, vm),
             Some(StaticStrings::Sub) => call_pattern_sub(self, args, vm),
             Some(StaticStrings::Split) => call_pattern_split(self, args, vm),
-            Some(StaticStrings::Finditer) => {
-                let arg = args.get_one_arg("Pattern.finditer", vm.heap)?;
-                defer_drop!(arg, vm);
-                let text = arg.to_str(vm)?;
-                self.get(vm.heap).finditer(arg, text, vm.heap)
-            }
+            Some(StaticStrings::Finditer) => call_pattern_within(self, Within::Finditer, args, vm),
             _ => return Err(ExcType::attribute_error_method(Type::RePattern, attr, args, vm)),
         }?;
         Ok(CallResult::Value(result))
@@ -573,14 +893,32 @@ fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: 
 
     let count = extract_count(count_val, vm)?;
 
-    // Check that repl is a string — callable replacement is not supported.
+    if repl_val.to_str(vm).is_err() && repl_val.is_callable(vm) {
+        let Some(count) = count else {
+            let _ = string_val.to_str(vm)?;
+            return Ok(string_val.clone_with_heap(vm.heap));
+        };
+        let text = string_val.to_str(vm)?.to_owned();
+        let all_ascii = text.is_ascii();
+        let mut scan = Scan::default();
+        return sub_callable(
+            repl_val,
+            &text,
+            count,
+            |vm| {
+                pattern
+                    .get(vm.heap)
+                    .next_match(&mut scan, string_val, &text, all_ascii, vm.heap)
+            },
+            vm,
+        );
+    }
+
     // CPython processes the replacement template *before* its match loop, so
     // this check must precede the negative-count early return below: a bad
     // repl raises even when zero substitutions will run.
     let Ok(repl) = repl_val.to_str(vm) else {
-        return Err(ExcType::type_error(
-            "callable replacement is not yet supported in re.sub()",
-        ));
+        return Err(ExcType::type_error_decoding_need_bytes(repl_val.py_type_name(vm)));
     };
     let Some(count) = count else {
         // Validate octal escapes even when the negative count skips matching.
@@ -696,6 +1034,11 @@ pub(crate) fn extract_count(val: Option<Value>, vm: &mut VM<'_>) -> RunResult<Op
 /// The group's `)` ends that flag, so it does not apply to `suffix`.
 fn anchored_source(pattern: &str, suffix: &str) -> String {
     format!("\\A(?:{pattern}(?x)\n){suffix}")
+}
+
+/// Returns `(?:pattern)\z`, which [`anchored_source`] closes as it does: the regex of `fullmatch()` from a `pos`.
+fn tail_source(pattern: &str) -> String {
+    format!("(?:{pattern}(?x)\n)\\z")
 }
 
 /// Compiles a Python regex pattern string with flags into a Rust `Regex`.

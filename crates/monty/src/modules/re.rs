@@ -45,7 +45,7 @@ use crate::{
     modules::ModuleFunctions,
     types::{
         BoundedCompileError, Module, RePattern, Type,
-        re_pattern::{extract_count, extract_maxsplit, translate_replacement},
+        re_pattern::{Scan, extract_count, extract_maxsplit, sub_callable, translate_replacement},
         str::allocate_string,
     },
     value::Value,
@@ -280,12 +280,31 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 
     let count = extract_count(count.take(), vm)?;
 
+    if repl.to_str(vm).is_err() && repl.is_callable(vm) {
+        let Some(count) = count else {
+            let _ = subject_str(string, vm)?;
+            return Ok(string.clone_with_heap(vm.heap));
+        };
+        let text = subject_str(string, vm)?.to_owned();
+        let all_ascii = text.is_ascii();
+        let mut scan = Scan::default();
+        return sub_callable(
+            repl,
+            &text,
+            count,
+            |vm| {
+                resolved
+                    .get(vm.heap)
+                    .next_match(&mut scan, string, &text, all_ascii, vm.heap)
+            },
+            vm,
+        );
+    }
+
     // CPython parses the replacement template before its match loop, so a bad
     // replacement raises even when a negative count skips matching.
     let Ok(repl) = repl.to_str(vm) else {
-        return Err(ExcType::type_error(
-            "callable replacement is not yet supported in re.sub()",
-        ));
+        return Err(ExcType::type_error_decoding_need_bytes(repl.py_type_name(vm)));
     };
 
     let Some(count) = count else {

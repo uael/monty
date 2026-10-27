@@ -14,17 +14,17 @@ use crate::{
     bytecode::{CallResult, VM},
     codecs::Codec,
     defer_drop,
-    exception_private::{ExcType, ExcTypeExt, RunResult},
+    exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     hash::{HashValue, hash_python_str},
     heap::{DropWithContext, Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapView, heap_read_ref_as_field},
     identity::Identity,
     intern::{Interns, StaticStrings, StringId},
     percent_format::percent_format,
-    resource_checks::{check_repeat_size, check_replace_size},
+    resource_checks::{check_estimated_size, check_repeat_size, check_replace_size},
     str_format::str_format,
     string_builder::StringBuilder,
     types::{
-        LazyHeapSet, Type,
+        Dict, LazyHeapSet, Type,
         instance::{call_member_bound, class_attr, class_member, class_name},
         long_int::repeat_count,
         py_trait::PyObjectIdentity,
@@ -707,6 +707,9 @@ fn call_str_method_impl<'h>(
             args.check_zero_args("str.isprintable", vm.heap)?;
             Ok(Value::Bool(str_isprintable(s.get(vm.heap))))
         }
+        StaticStrings::Translate => str_translate(s, args, vm),
+        // `''.maketrans(...)` reads the class method from an instance, as in CPython.
+        StaticStrings::Maketrans => str_maketrans(args, vm),
         // Existing method
         StaticStrings::Join => {
             let iterable = args.get_one_arg("str.join", vm.heap)?;
@@ -717,6 +720,152 @@ fn call_str_method_impl<'h>(
             Err(ExcType::attribute_error(Type::Str, method.into()))
         }
     }
+}
+
+/// Implements Python's `str.translate(table)` method.
+///
+/// Each character goes through `table[ord(c)]`, which any object with `__getitem__` serves, as in CPython: a
+/// `LookupError` keeps the character, `None` deletes it, an `int` is the code point of its replacement, and a `str`
+/// replaces it.
+fn str_translate<'h>(s: &impl HeapView<'h, str>, args: ArgValues, vm: &mut VM<'h>) -> RunResult<Value> {
+    let table = args.get_one_arg("str.translate", vm.heap)?;
+    defer_drop!(table, vm);
+    let text = s.get(vm.heap).to_owned();
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let got = match table.py_getitem(&Value::Int(i64::from(u32::from(c))), vm) {
+            Ok(got) => got,
+            Err(RunError::Exc(raised)) if raised.exc.exc_type().is_subclass_of(ExcType::LookupError) => {
+                out.push(c);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        defer_drop!(got, vm);
+        let code = match got {
+            Value::None => None,
+            Value::Bool(b) => Some(i64::from(*b)),
+            Value::Int(n) => Some(*n),
+            Value::Ref(id) if matches!(vm.heap.get(*id), HeapData::LongInt(_)) => Some(-1),
+            _ => {
+                let Ok(piece) = got.to_str(vm) else {
+                    return Err(ExcType::type_error(
+                        "character mapping must return integer, None or str",
+                    ));
+                };
+                out.push_str(piece);
+                None
+            }
+        };
+        if let Some(code) = code {
+            let Some(mapped) = u32::try_from(code)
+                .ok()
+                .filter(|n| *n < 0x11_0000)
+                .and_then(char::from_u32)
+            else {
+                return Err(ExcType::value_error("character mapping must be in range(0x110000)"));
+            };
+            out.push(mapped);
+        }
+        check_estimated_size(out.len(), &vm.heap.tracker)?;
+    }
+    Ok(allocate_string(out, vm.heap))
+}
+
+/// Implements Python's `str.maketrans(x, y=None, z=None)`: the table that `str.translate` reads.
+///
+/// One argument is a dict, whose keys of one character become their code points. Two or three are strings: each
+/// character of `x` maps to the character of `y` at its index, and each character of `z` maps to `None`.
+pub(crate) fn str_maketrans(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let given: Vec<Value> = args.into_pos_only("maketrans", vm.heap)?.collect();
+    defer_drop!(given, vm);
+    if given.is_empty() {
+        return Err(ExcType::type_error_at_least("maketrans", 1, 0));
+    }
+    if given.len() > 3 {
+        return Err(ExcType::type_error_at_most("maketrans", 3, given.len()));
+    }
+    for (at, arg) in given.iter().enumerate().skip(1) {
+        if arg.to_str(vm).is_err() {
+            let name = arg.py_type_name(vm);
+            return Err(ExcType::type_error(format!(
+                "maketrans() argument {} must be str, not {name}",
+                at + 1
+            )));
+        }
+    }
+    let mut entries: Vec<(Value, Value)> = Vec::new();
+    if given.len() == 1 {
+        let Value::Ref(id) = &given[0] else {
+            return Err(ExcType::type_error(
+                "if you give only one argument to maketrans it must be a dict",
+            ));
+        };
+        let HeapData::Dict(dict) = vm.heap.get(*id) else {
+            return Err(ExcType::type_error(
+                "if you give only one argument to maketrans it must be a dict",
+            ));
+        };
+        let pairs: Vec<(Value, Value)> = dict
+            .iter()
+            .map(|(key, value)| (key.clone_with_heap(vm.heap), value.clone_with_heap(vm.heap)))
+            .collect();
+        let mut pending = pairs.into_iter();
+        while let Some((key, value)) = pending.next() {
+            let code = match &key {
+                Value::Int(n) => Ok(Value::Int(*n)),
+                Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
+                _ => match key.to_str(vm) {
+                    Ok(one) => {
+                        let mut chars = one.chars();
+                        if let (Some(c), None) = (chars.next(), chars.next()) {
+                            Ok(Value::Int(i64::from(u32::from(c))))
+                        } else {
+                            Err(ExcType::value_error(
+                                "string keys in translatetable must be of length 1",
+                            ))
+                        }
+                    }
+                    Err(_) => Err(ExcType::type_error(
+                        "keys in translate table mustbe strings or integers",
+                    )),
+                },
+            };
+            key.drop_with(vm);
+            match code {
+                Ok(code) => entries.push((code, value)),
+                Err(error) => {
+                    value.drop_with(vm);
+                    pending.collect::<Vec<_>>().drop_with(vm);
+                    entries.drop_with(vm);
+                    return Err(error);
+                }
+            }
+        }
+    } else {
+        let Ok(from) = given[0].to_str(vm) else {
+            return Err(ExcType::type_error(
+                "first maketrans argument must be a string if there is a second argument",
+            ));
+        };
+        let to = given[1].to_str(vm)?;
+        if from.chars().count() != to.chars().count() {
+            return Err(ExcType::value_error(
+                "the first two maketrans arguments must have equal length",
+            ));
+        }
+        let code = |c: char| Value::Int(i64::from(u32::from(c)));
+        entries.extend(from.chars().zip(to.chars()).map(|(a, b)| (code(a), code(b))));
+        if let Some(gone) = given.get(2) {
+            entries.extend(gone.to_str(vm)?.chars().map(|c| (code(c), Value::None)));
+        }
+    }
+    let mut dict = Dict::new();
+    for (key, value) in entries {
+        let old = dict.set(key, value, vm)?;
+        old.drop_with(vm);
+    }
+    Ok(Value::Ref(vm.heap.allocate(HeapData::Dict(dict))))
 }
 
 /// Implements Python's `str.join(iterable)` method.

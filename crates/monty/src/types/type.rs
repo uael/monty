@@ -26,7 +26,7 @@ use crate::{
         instance::class_name,
         long_int::INT_MAX_STR_DIGITS,
         path, property,
-        str::{StringRepr, allocate_string},
+        str::{StringRepr, allocate_string, str_maketrans},
         template, time,
         timedelta::{self, DAY_MICROSECONDS, MAX_TIMEDELTA_DAYS, MIN_TIMEDELTA_DAYS},
         timezone::{self, MAX_TIMEZONE_CONSTANT_SECONDS},
@@ -704,6 +704,7 @@ impl Type {
                 Err(ExcType::not_implemented("Counter.fromkeys() is undefined.  Use Counter(iterable) instead.").into())
             }
             (Self::Bytes, Some(StaticStrings::Fromhex)) => bytes_fromhex(args, vm).map(CallResult::Value),
+            (Self::Str, Some(StaticStrings::Maketrans)) => str_maketrans(args, vm).map(CallResult::Value),
             (Self::Complex, Some(StaticStrings::FromNumber)) => {
                 complex::class_from_number(vm, args).map(CallResult::Value)
             }

@@ -1014,6 +1014,8 @@ pub enum StaticStrings {
     Encoding,
     /// `match.end()` method
     End,
+    /// Kwarg name `endpos` of the methods of `re.Pattern`.
+    Endpos,
     /// `endswith()` method, shared by `str` and `bytes`.
     Endswith,
     /// `json.dumps(ensure_ascii=...)` keyword.
@@ -1570,6 +1572,8 @@ pub enum StaticStrings {
     MaxDigestSize,
     /// `sys.float_info.max_exp` field.
     MaxExp,
+    /// `str.maketrans()` static method.
+    Maketrans,
     /// `blake2b.MAX_KEY_SIZE` class constant.
     #[strum(serialize = "MAX_KEY_SIZE")]
     MaxKeySize,
@@ -1819,6 +1823,8 @@ pub enum StaticStrings {
     Popleft,
     /// `population` parameter of `random.choices()` and `random.sample()`.
     Population,
+    /// Kwarg name `pos` of the methods of `re.Pattern`.
+    Pos,
     /// Value of `os.name`.
     Posix,
     /// Module name for `import posixpath`, and the name `os.path` reports.
@@ -2302,6 +2308,8 @@ pub enum StaticStrings {
     Total,
     /// `timedelta.total_seconds()` method.
     TotalSeconds,
+    /// `str.translate()` method.
+    Translate,
     /// `random.triangular()` function.
     Triangular,
     /// `repr()`/`str()` text of `True`, interned so rendering allocates nothing.
