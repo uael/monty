@@ -142,8 +142,7 @@ suite: `scripts/run_traceback.py` strips the suggestions from CPython's output
 before comparison, so traceback tests cannot catch it.
 
 An exception raised inside a Python callable that native code invokes
-*synchronously* — the `key=`/predicate/function argument of `map`, `filter`,
-`sorted`/`min`/`max`, a user-defined
+*synchronously* — a user-defined
 `__iter__`/`__next__`/`__contains__`/`__repr__`/`__str__`, and the body of a
 generator that something walks for you (`for`, `next()`, `list()`, a
 comprehension; see [generators.md](generators.md)) — omits the **calling**

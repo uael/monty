@@ -8,7 +8,7 @@ use super::{
     iter::{collect_owned_iterable, collect_python_iterator},
 };
 use crate::{
-    args::ArgValues,
+    args::{ArgValues, FromArgs},
     bytecode::{CallResult, ContainsVM, RecursionToken, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
@@ -20,7 +20,7 @@ use crate::{
     modules::copy::{Memo, PyDeepCopy, deep_copy},
     py_value::PyValue,
     resource_checks::{check_repeat_size, check_value_buffer_growth},
-    sorting::parse_and_sort,
+    sorting::{parse_sort_args, put_list_items, sort_by_key, sort_values, take_list_items},
     types::{
         LazyHeapSet, Type,
         long_int::repeat_count,
@@ -758,8 +758,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, List> {
     /// Delegates methods to `call_list_method`.
     fn py_call_attr(&mut self, vm: &mut VM<'h>, attr: &EitherStr, args: ArgValues) -> RunResult<CallResult> {
         if attr.static_string(vm.interns) == Some(StaticStrings::Sort) {
-            do_list_sort(self, args, vm)?;
-            return Ok(CallResult::Value(Value::None));
+            return do_list_sort(self, self.id(), args, vm);
         }
 
         let Some(method) = attr.static_string(vm.interns) else {
@@ -1051,16 +1050,35 @@ fn list_count<'h>(list: &HeapRead<'h, List>, args: ArgValues, vm: &mut VM<'h>) -
 /// list afterwards. If the user mutated the live (empty) list during the
 /// sort, we additionally raise `ValueError: list modified during sort`,
 /// matching CPython exactly.
-fn do_list_sort<'h>(list: &HeapReadMut<'h, List>, args: ArgValues, vm: &mut VM<'h>) -> Result<(), RunError> {
+///
+/// With a key, the detached buffer becomes a private list that a frame on the
+/// VM's own loop sorts, so the key may call the host; that frame gives the
+/// items back through [`call_restore_sorted`].
+fn do_list_sort<'h>(
+    list: &HeapReadMut<'h, List>,
+    list_id: HeapId,
+    args: ArgValues,
+    vm: &mut VM<'h>,
+) -> RunResult<CallResult> {
     // Detach the list's items so reentrant access via the list's heap id sees
     // an empty list. The detached buffer is always swapped back into the list
     // when we're done. Done *before* parsing args so the reentrancy guard is
     // in place if parsing somehow allocates or drops user values that run
     // arbitrary code.
     let items = mem::take(&mut list.get_mut(vm.heap).items);
-    defer_drop_mut!(items, vm);
+    let mut items_guard = DropGuard::new(items, vm);
+    let (items, vm) = items_guard.as_parts_mut();
 
-    let sort_result = parse_and_sort(items, args, vm);
+    let sort_result = match parse_sort_args(args, vm) {
+        Ok((Some(key), reverse)) => {
+            let (items, vm) = items_guard.into_parts();
+            let detached = Value::Ref(vm.heap.allocate(HeapData::List(List::new(items))));
+            vm.heap.inc_ref(list_id);
+            return sort_by_key(detached, key, reverse, Value::Ref(list_id), vm);
+        }
+        Ok((None, reverse)) => sort_values(items, reverse, vm),
+        Err(err) => Err(err),
+    };
 
     // Swap our (sorted) buffer back into the list. Whatever the user placed
     // on the live empty list during the sort ends up in `items`; if
@@ -1072,10 +1090,48 @@ fn do_list_sort<'h>(list: &HeapReadMut<'h, List>, args: ArgValues, vm: &mut VM<'
     // Surface any sort error first; otherwise the modification error (if any).
     sort_result?;
     if items.is_empty() {
-        Ok(())
+        Ok(CallResult::Value(Value::None))
     } else {
-        Err(SimpleException::new_msg(ExcType::ValueError, "list modified during sort").into())
+        Err(list_modified_during_sort())
     }
+}
+
+/// Arguments of the private helper that gives the items of a sort back.
+#[derive(FromArgs)]
+#[from_args(name = "restore_sorted")]
+struct RestoreSortedArgs {
+    #[from_args(pos_only)]
+    original: Value,
+    #[from_args(pos_only)]
+    items: Value,
+    #[from_args(pos_only)]
+    check: Value,
+}
+
+/// Gives the items of the private list `items` back to the list `original`
+/// that `list.sort()` detached them from, for the sort with a key.
+///
+/// What Python code put on `original` during the sort is dropped. With
+/// `check`, that is `ValueError: list modified during sort`; without it, the
+/// sort raised, and its error stands alone, as in CPython.
+pub(crate) fn call_restore_sorted(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let RestoreSortedArgs { original, items, check } = RestoreSortedArgs::from_args(args, vm)?;
+    defer_drop!(original, vm);
+    defer_drop!(items, vm);
+    let sorted = take_list_items(items, vm);
+    let added = put_list_items(original, sorted, vm);
+    let modified = !added.is_empty();
+    added.drop_with(vm);
+    if modified && matches!(check, Value::Bool(true)) {
+        Err(list_modified_during_sort())
+    } else {
+        Ok(Value::None)
+    }
+}
+
+/// `ValueError: list modified during sort`, as CPython raises it.
+fn list_modified_during_sort() -> RunError {
+    SimpleException::new_msg(ExcType::ValueError, "list modified during sort").into()
 }
 
 /// Writes a formatted sequence of values to a formatter.

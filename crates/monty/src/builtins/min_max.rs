@@ -4,13 +4,43 @@ use std::{cmp::Ordering, mem};
 
 use crate::{
     args::{ArgValues, FromArgs},
-    bytecode::VM,
+    builtins::Builtins,
+    bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
-    heap::DropGuard,
-    types::{CmpOrder, PyTrait},
+    frozen::{FrozenFunction, FrozenFunctions},
+    heap::{DropGuard, DropWithContext},
+    modules::ModuleFunctions,
+    types::{CmpOrder, PyTrait, allocate_tuple, tuple::TupleVec},
     value::Value,
 };
+
+/// The loop of `min()` and `max()` with a key, which runs on the VM's own loop
+/// as a frame of its own.
+///
+/// So the key and the read of the items step there, and a call to the host in
+/// either suspends the run. `items` is the one iterable, or a tuple of the
+/// positional arguments, which is never empty.
+pub(crate) const MIN_MAX_KEY_SOURCE: &str = r"
+def __monty_min_max_key(items, key, default, has_default, is_min, wins, value_error):
+    first = True
+    best = None
+    best_key = None
+    for item in items:
+        item_key = key(item)
+        if first:
+            first = False
+            best = item
+            best_key = item_key
+        elif wins(best_key, item_key, is_min):
+            best = item
+            best_key = item_key
+    if not first:
+        return best
+    if has_default:
+        return default
+    raise value_error(('min' if is_min else 'max') + '() iterable argument is empty')
+";
 
 /// Implementation of the min() builtin function.
 ///
@@ -18,7 +48,7 @@ use crate::{
 /// Supports two forms:
 /// - `min(iterable)` - returns smallest item from iterable
 /// - `min(arg1, arg2, ...)` - returns smallest of the arguments
-pub fn builtin_min(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_min(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let MinArgs { args, key, default } = MinArgs::from_args(args, vm)?;
     run_min_max(vm, args, key, default, true)
 }
@@ -29,7 +59,7 @@ pub fn builtin_min(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// Supports two forms:
 /// - `max(iterable)` - returns largest item from iterable
 /// - `max(arg1, arg2, ...)` - returns largest of the arguments
-pub fn builtin_max(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+pub fn builtin_max(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let MaxArgs { args, key, default } = MaxArgs::from_args(args, vm)?;
     run_min_max(vm, args, key, default, false)
 }
@@ -37,36 +67,83 @@ pub fn builtin_max(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// Shared implementation for min() and max() after argument extraction.
 ///
 /// When `is_min` is true, returns the minimum; otherwise returns the maximum.
+/// A key runs in [`MIN_MAX_KEY_SOURCE`], a frame on the VM's own loop, so it
+/// may call the host.
 fn run_min_max(
     vm: &mut VM<'_>,
-    args: Vec<Value>,
+    mut args: Vec<Value>,
     key: Value,
     default: Option<Value>,
     is_min: bool,
-) -> RunResult<Value> {
+) -> RunResult<CallResult> {
     let func_name = if is_min { "min" } else { "max" };
 
-    // Normalise `key=None` to "no key function" so the comparison path can
-    // skip the call entirely.
-    let key_fn = match key {
-        Value::None => {
-            key.drop_with(vm);
-            None
-        }
-        _ => Some(key),
-    };
-    defer_drop!(key_fn, vm);
-
-    defer_drop_mut!(default, vm);
-    defer_drop_mut!(args, vm);
-
     if args.is_empty() {
+        ((args, key), default).drop_with(vm);
         return Err(SimpleException::new_msg(
             ExcType::TypeError,
             format!("{func_name} expected at least 1 argument, got 0"),
         )
         .into());
     }
+    if args.len() > 1 && default.is_some() {
+        ((args, key), default).drop_with(vm);
+        return Err(default_with_multiple_args(func_name));
+    }
+    if !matches!(key, Value::None) {
+        let items = if args.len() == 1 {
+            args.pop().expect("checked one argument")
+        } else {
+            allocate_tuple(TupleVec::from_vec(args), vm.heap)
+        };
+        let has_default = default.is_some();
+        return vm.call_frozen_exact(
+            FrozenFunction::MinMaxKey,
+            [
+                items,
+                key,
+                default.unwrap_or(Value::None),
+                Value::Bool(has_default),
+                Value::Bool(is_min),
+                Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::KeyWins)),
+                Value::Builtin(Builtins::ExcType(ExcType::ValueError)),
+            ],
+        );
+    }
+    min_max_by_value(vm, args, default, is_min).map(CallResult::Value)
+}
+
+/// Arguments of the private helper that compares two keys of `min()` or `max()`.
+#[derive(FromArgs)]
+#[from_args(name = "key_wins")]
+struct KeyWinsArgs {
+    #[from_args(pos_only)]
+    best: Value,
+    #[from_args(pos_only)]
+    candidate: Value,
+    #[from_args(pos_only)]
+    is_min: Value,
+}
+
+/// Whether `candidate` wins over `best` as a key of `min()` or `max()`, for
+/// [`MIN_MAX_KEY_SOURCE`]; see [`candidate_wins`].
+pub(crate) fn call_key_wins(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let KeyWinsArgs {
+        best,
+        candidate,
+        is_min,
+    } = KeyWinsArgs::from_args(args, vm)?;
+    defer_drop!(best, vm);
+    defer_drop!(candidate, vm);
+    let is_min = matches!(is_min, Value::Bool(true));
+    candidate_wins(best, candidate, is_min, vm).map(Value::Bool)
+}
+
+/// `min()` and `max()` with no key: the items compare as they are.
+fn min_max_by_value(vm: &mut VM<'_>, args: Vec<Value>, default: Option<Value>, is_min: bool) -> RunResult<Value> {
+    let func_name = if is_min { "min" } else { "max" };
+    defer_drop_mut!(default, vm);
+    defer_drop_mut!(args, vm);
 
     let first_arg = args.remove(0);
 
@@ -87,80 +164,32 @@ fn run_min_max(
             .into());
         };
 
-        if let Some(key_fn) = key_fn {
-            let mut result_guard = DropGuard::new(result, vm);
-            {
-                let (result, vm) = result_guard.as_parts_mut();
-                let result_key = evaluate_key(result.clone_with_heap(vm), key_fn, vm)?;
-                defer_drop_mut!(result_key, vm);
+        let mut result_guard = DropGuard::new(result, vm);
+        let (result, vm) = result_guard.as_parts_mut();
 
-                while let Some(item) = iter.py_next(vm)? {
-                    defer_drop_mut!(item, vm);
-                    let item_key = evaluate_key(item.clone_with_heap(vm), key_fn, vm)?;
-                    defer_drop_mut!(item_key, vm);
+        while let Some(item) = iter.py_next(vm)? {
+            defer_drop_mut!(item, vm);
 
-                    if candidate_wins(result_key, item_key, is_min, vm)? {
-                        mem::swap(result, item);
-                        mem::swap(result_key, item_key);
-                    }
-                }
+            if candidate_wins(result, item, is_min, vm)? {
+                mem::swap(result, item);
             }
-            Ok(result_guard.into_inner())
-        } else {
-            let mut result_guard = DropGuard::new(result, vm);
-            let (result, vm) = result_guard.as_parts_mut();
-
-            while let Some(item) = iter.py_next(vm)? {
-                defer_drop_mut!(item, vm);
-
-                if candidate_wins(result, item, is_min, vm)? {
-                    mem::swap(result, item);
-                }
-            }
-
-            Ok(result_guard.into_inner())
         }
+
+        Ok(result_guard.into_inner())
     } else {
         // Multiple arguments: compare them directly
-        if default.is_some() {
-            first_arg.drop_with(vm);
-            // The deferred drops release `default` and remaining arguments.
-            return Err(default_with_multiple_args(func_name));
+        let mut result_guard = DropGuard::new(first_arg, vm);
+        let (result, vm) = result_guard.as_parts_mut();
+
+        for item in args.drain(..) {
+            defer_drop_mut!(item, vm);
+
+            if candidate_wins(result, item, is_min, vm)? {
+                mem::swap(result, item);
+            }
         }
 
-        if let Some(key_fn) = key_fn {
-            let mut result_guard = DropGuard::new(first_arg, vm);
-            {
-                let (result, vm) = result_guard.as_parts_mut();
-                let result_key = evaluate_key(result.clone_with_heap(vm), key_fn, vm)?;
-                defer_drop_mut!(result_key, vm);
-
-                for item in args.drain(..) {
-                    defer_drop_mut!(item, vm);
-                    let item_key = evaluate_key(item.clone_with_heap(vm), key_fn, vm)?;
-                    defer_drop_mut!(item_key, vm);
-
-                    if candidate_wins(result_key, item_key, is_min, vm)? {
-                        mem::swap(result, item);
-                        mem::swap(result_key, item_key);
-                    }
-                }
-            }
-            Ok(result_guard.into_inner())
-        } else {
-            let mut result_guard = DropGuard::new(first_arg, vm);
-            let (result, vm) = result_guard.as_parts_mut();
-
-            for item in args.drain(..) {
-                defer_drop_mut!(item, vm);
-
-                if candidate_wins(result, item, is_min, vm)? {
-                    mem::swap(result, item);
-                }
-            }
-
-            Ok(result_guard.into_inner())
-        }
+        Ok(result_guard.into_inner())
     }
 }
 
@@ -195,15 +224,6 @@ struct MaxArgs {
     key: Value,
     #[from_args(default)]
     default: Option<Value>,
-}
-
-/// Calls the user-provided key function for a single candidate value.
-///
-/// The caller passes an owned clone of the candidate so this helper can forward it
-/// into the function call without changing ownership of the original item being
-/// tracked as the eventual min/max result.
-fn evaluate_key(item: Value, key_fn: &Value, vm: &mut VM<'_>) -> RunResult<Value> {
-    vm.evaluate_function(key_fn, ArgValues::One(item))
 }
 
 /// Returns whether `candidate` should replace `current` as the best value seen so far.

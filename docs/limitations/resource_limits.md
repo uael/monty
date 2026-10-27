@@ -162,8 +162,7 @@ indistinguishable from a stack overflow.
     as one frame, so `await`-chains do not amplify depth.
 - Callbacks evaluated synchronously by the interpreter itself re-enter on the
     native Rust call stack rather than the heap-allocated frame stack used by
-    ordinary function calls. This includes `map()`, `filter()`,
-    `sorted()`/`list.sort(key=...)`, `min()`/`max(key=...)`, recursive
+    ordinary function calls. This includes recursive
     `__repr__`/`__str__`, non-plain-function `__init__` values that recurse
     during construction, and calling a `functools.partial`. Native re-entry is
     capped independently at a lower fixed depth than the 1000-frame Python

@@ -1038,11 +1038,6 @@ impl Value {
         <Self as PyTrait<'_>>::py_iter(self, vm)
     }
 
-    /// Advances this value synchronously for native iterator consumers.
-    pub(crate) fn py_next(&mut self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        <Self as PyTrait<'_>>::py_next(self, vm)
-    }
-
     /// Converts an owned value into its Python iterator and releases the original reference.
     ///
     /// This is the ownership-preserving entry point for Rust consumers of the

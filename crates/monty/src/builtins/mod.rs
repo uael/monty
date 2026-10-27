@@ -12,7 +12,7 @@ mod chr;
 mod divmod;
 mod enumerate;
 mod eval_exec;
-mod filter;
+pub(crate) mod filter;
 mod format;
 mod getattr;
 mod globals;
@@ -25,8 +25,8 @@ mod issubclass;
 pub(crate) mod iter;
 mod len;
 mod locals;
-mod map;
-mod min_max; // min and max share implementation
+pub(crate) mod map;
+pub(crate) mod min_max; // min and max share implementation
 pub(crate) use min_max::candidate_wins;
 pub(crate) mod next;
 pub(crate) mod object_setattr;
@@ -43,7 +43,7 @@ mod sorted;
 mod sum;
 mod type_;
 mod vars;
-mod zip;
+pub(crate) mod zip;
 
 use std::{fmt, fmt::Write, str::FromStr};
 
@@ -104,7 +104,9 @@ impl Builtins {
     /// instead; see [`Reader`](crate::types::generator::Reader).
     pub(crate) fn reads_whole(self, pos_count: usize) -> bool {
         match self {
-            Self::Function(BuiltinsFunctions::Sum | BuiltinsFunctions::Sorted) => pos_count > 0,
+            Self::Function(BuiltinsFunctions::Sum | BuiltinsFunctions::Sorted | BuiltinsFunctions::Enumerate) => {
+                pos_count > 0
+            }
             Self::Function(BuiltinsFunctions::Min | BuiltinsFunctions::Max) => pos_count == 1,
             Self::Type(Type::List | Type::Tuple | Type::Set | Type::FrozenSet | Type::Dict) => pos_count > 0,
             _ => false,
@@ -167,7 +169,8 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Chr => chr::builtin_chr(vm, args),
             Self::Divmod => divmod::builtin_divmod(vm, args),
             Self::Enumerate => enumerate::builtin_enumerate(vm, args),
-            Self::Filter => filter::builtin_filter(vm, args),
+            // `filter()`, `map()`, `min()`, `max()`, `sorted()` and `zip()` call back on the VM's own loop.
+            Self::Filter => return filter::builtin_filter(vm, args),
             Self::Format => format::builtin_format(vm, args),
             // `getattr()` / `hasattr()` may suspend a lazy host attribute lookup.
             Self::Getattr => return getattr::builtin_getattr(vm, args),
@@ -181,9 +184,9 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Issubclass => issubclass::builtin_issubclass(vm, args),
             Self::Compile => eval_exec::builtin_compile(vm, args),
             Self::Len => len::builtin_len(vm, args),
-            Self::Map => map::builtin_map(vm, args),
-            Self::Max => min_max::builtin_max(vm, args),
-            Self::Min => min_max::builtin_min(vm, args),
+            Self::Map => return map::builtin_map(vm, args),
+            Self::Max => return min_max::builtin_max(vm, args),
+            Self::Min => return min_max::builtin_min(vm, args),
             // `next()` on an unread file yields the read that loads it.
             Self::Next => return next::builtin_next(vm, args),
             Self::Oct => oct::builtin_oct(vm, args),
@@ -197,10 +200,10 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Round => round::builtin_round(vm, args),
             Self::Setattr => setattr::builtin_setattr(vm, args),
             Self::ObjectSetattr => object_setattr::builtin_object_setattr(vm, args),
-            Self::Sorted => sorted::builtin_sorted(vm, args),
+            Self::Sorted => return sorted::builtin_sorted(vm, args),
             Self::Sum => sum::builtin_sum(vm, args),
             Self::Type => type_::builtin_type(vm, args),
-            Self::Zip => zip::builtin_zip(vm, args),
+            Self::Zip => return zip::builtin_zip(vm, args),
             // `eval()` / `exec()` push the compiled snippet's frame.
             Self::Eval => return eval_exec::builtin_eval(vm, args),
             Self::Exec => return eval_exec::builtin_exec(vm, args),

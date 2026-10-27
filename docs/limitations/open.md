@@ -144,9 +144,8 @@ Everything else raises `AttributeError`, including: `truncate()`,
 - Reading a closed file always raises `ValueError: I/O operation on closed file.`,
     CPython's text-mode wording; CPython's binary files say `read of closed file`.
 - File I/O is rejected inside callbacks the interpreter evaluates in a
-    synchronous context that cannot suspend to the host — the `key` of
-    `sorted()`/`list.sort()`/`min()`/`max()`, `map()`/`filter()` functions,
-    `iter(callable, sentinel)`, `defaultdict`'s `default_factory`, and dunder
+    synchronous context that cannot suspend to the host — `iter(callable, sentinel)`,
+    `defaultdict`'s `default_factory`, and dunder
     methods that cannot suspend (see [classes.md](classes.md)).
     The first read that needs the host raises
     `NotImplementedError: OS function 'Path.read_text' cannot suspend in this synchronous context` where CPython

@@ -1201,15 +1201,20 @@ fn os_open_fds_are_closed_in_the_sandbox() {
 
 #[test]
 fn os_listdir_rejected_in_sync_context_leaves_no_stale_effect() {
-    // Regression: `map()` evaluates its function in a synchronous context
-    // that cannot suspend, so the listdir OsCall is rejected and dropped
-    // undispatched. The `ListdirNames` effect must travel with the dropped
-    // call — if it leaked onto the VM, the next OS call's result (getenv
-    // here) would be mangled by the name reduction.
+    // Regression: a `__hash__` that a dict calls runs in a synchronous
+    // context that cannot suspend, so the listdir OsCall is rejected and
+    // dropped undispatched. The `ListdirNames` effect must travel with the
+    // dropped call — if it leaked onto the VM, the next OS call's result
+    // (getenv here) would be mangled by the name reduction.
     let code = r"
 import os
+
+class Key:
+    def __hash__(self):
+        return os.listdir('/mnt')
+
 try:
-    list(map(os.listdir, ['/mnt']))
+    {Key(): 1}
 except NotImplementedError:
     pass
 os.getenv('PROBE')
@@ -1248,16 +1253,22 @@ fn mock_file_handle(path: &str) -> MontyObject {
 
 #[test]
 fn buffered_read_rejected_in_sync_context_leaves_no_stale_effect() {
-    // Regression: a `sorted()` key runs in a synchronous context, so the
-    // buffered read's OsCall is rejected after the nested `run()` already
-    // returned `FrameExit::OsCall`. A `BufferStore` outliving that rejection
-    // diverts the *next* OS result into the abandoned file's buffer.
+    // Regression: a `__hash__` that a dict calls runs in a synchronous
+    // context, so the buffered read's OsCall is rejected after the nested
+    // `run()` already returned `FrameExit::OsCall`. A `BufferStore` outliving
+    // that rejection diverts the *next* OS result into the abandoned file's
+    // buffer.
     let code = r"
 from pathlib import Path
 
 f = open('/data/sample.txt')
+
+class Key:
+    def __hash__(self):
+        return f.read(5)
+
 try:
-    sorted([1], key=lambda x: f.read(5))
+    {Key(): 1}
 except NotImplementedError:
     pass
 Path('/data/config.json').read_text()
@@ -1278,8 +1289,13 @@ fn buffered_read_in_sync_context_reports_the_rejected_os_function() {
     // never reaches the host, so it names the OS call it would have made.
     let code = r"
 f = open('/data/sample.txt')
+
+class Key:
+    def __hash__(self):
+        return f.read(5)
+
 try:
-    sorted([1], key=lambda x: f.read(5))
+    {Key(): 1}
 except NotImplementedError as exc:
     msg = str(exc)
 msg
@@ -1299,8 +1315,13 @@ fn buffered_readlines_rejected_in_sync_context_does_not_retype_next_result() {
 from pathlib import Path
 
 f = open('/data/sample.txt')
+
+class Key:
+    def __hash__(self):
+        return f.readlines()
+
 try:
-    sorted([1], key=lambda x: f.readlines())
+    {Key(): 1}
 except NotImplementedError:
     pass
 type(Path('/data/config.json').read_text()).__name__
