@@ -2887,6 +2887,17 @@ impl Interns {
         self.frozen_functions.borrow().values().any(|&function| function == id)
     }
 
+    /// Whether a frame of this function charges the recursion budget: every
+    /// function of the user does, and an implementation only when it says so;
+    /// see [`FrozenFunction::charges_recursion`].
+    pub(crate) fn charges_recursion(&self, id: FunctionId) -> bool {
+        self.frozen_functions
+            .borrow()
+            .iter()
+            .find(|&(_, &function)| function == id)
+            .is_none_or(|(frozen, _)| frozen.charges_recursion())
+    }
+
     /// Finds canonical text already interned, excluding snippet filename IDs.
     pub fn get_string_id_by_name(&self, s: &str) -> Option<StringId> {
         get_string_id_by_name(&self.string_id_by_name.borrow(), &self.static_string_ids, s)

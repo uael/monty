@@ -863,6 +863,30 @@ pub(crate) fn exception_args(self_id: HeapId, vm: &mut VM<'_>) -> Vec<Value> {
     }
 }
 
+/// The call of an `__init__` that is no plain function (a builtin, a class, an
+/// `async def`, a bound method, ...), which runs on the VM's own loop as a frame
+/// of its own, so an `__init__` that reaches the host suspends the run.
+///
+/// `returned` enforces CPython's contract that `__init__` returns `None`, and
+/// the call answers the instance.
+pub(crate) const INIT_SOURCE: &str = r"
+def __monty_init(instance, init, args, kwargs, returned):
+    returned(init(*args, **kwargs))
+    return instance
+";
+
+/// Raises CPython's `TypeError` when an `__init__` returned anything but
+/// `None`, for [`INIT_SOURCE`].
+pub(crate) fn call_init_returned(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let result = args.get_one_arg("returned", vm.heap)?;
+    defer_drop!(result, vm);
+    if matches!(result, Value::None) {
+        Ok(Value::None)
+    } else {
+        Err(ExcType::type_error_init_return(result.py_type_name(vm)))
+    }
+}
+
 /// Calls a user-defined string dunder (`__repr__`/`__str__`) on the instance and
 /// validates that it returned a `str`.
 ///

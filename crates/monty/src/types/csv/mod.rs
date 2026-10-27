@@ -236,9 +236,9 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, CsvObject> {
     fn py_call_attr(&mut self, vm: &mut VM<'h>, attr: &EitherStr, args: ArgValues) -> RunResult<CallResult> {
         match (self.get(vm.heap).kind(), attr.static_string(vm.interns)) {
             (Kind::Writer, Some(StaticStrings::Writerow)) => writer::writerow(self, args, vm),
-            (Kind::Writer, Some(StaticStrings::Writerows)) => writer::writerows(self, args, vm),
+            (Kind::Writer, Some(StaticStrings::Writerows)) => writer::writerows(self, self.id(), args, vm),
             (Kind::DictWriter, Some(StaticStrings::Writerow)) => dict::writer_writerow(self, args, vm),
-            (Kind::DictWriter, Some(StaticStrings::Writerows)) => dict::writer_writerows(self, args, vm),
+            (Kind::DictWriter, Some(StaticStrings::Writerows)) => dict::writer_writerows(self, self.id(), args, vm),
             (Kind::DictWriter, Some(StaticStrings::Writeheader)) => dict::writer_writeheader(self, args, vm),
             _ => {
                 let type_name = self.py_type_name(vm);

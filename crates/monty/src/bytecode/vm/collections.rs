@@ -1,11 +1,12 @@
 //! Collection building and unpacking helpers for the VM.
 
-use super::VM;
+use super::{CallResult, VM};
 use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{DropGuard, DropWithContext, Heap, HeapData, HeapReadOutput},
     intern::StringId,
+    modules::collections::defaultdict::defaultdict_missing_on_loop,
     types::{
         Dict, List, PyTrait, Set, Slice, allocate_tuple, collect_iterable, collect_iterable_bounded,
         instance::instance_defines_iter, slice::value_to_option_i64,
@@ -14,6 +15,36 @@ use crate::{
 };
 
 impl VM<'_> {
+    /// Reads `obj[index]` for the subscript opcode.
+    ///
+    /// A key that a `defaultdict` misses calls its factory in a frame on the
+    /// VM's own loop, so a factory that calls the host suspends the run; see
+    /// [`defaultdict_missing_on_loop`].
+    pub(super) fn subscript(&mut self, obj: Value, index: Value) -> RunResult<CallResult> {
+        let this = self;
+        defer_drop!(obj, this);
+        let read = obj.read_heap(this);
+        if let Some(HeapReadOutput::Dict(dict)) = read
+            && dict.get(this.heap).is_defaultdict()
+        {
+            let found = dict.dict_get(&index, this);
+            match found {
+                Ok(Some(value)) => {
+                    index.drop_with(this);
+                    Ok(CallResult::Value(value))
+                }
+                Ok(None) => defaultdict_missing_on_loop(&dict, index, this),
+                Err(err) => {
+                    index.drop_with(this);
+                    Err(err)
+                }
+            }
+        } else {
+            defer_drop!(index, this);
+            obj.py_getitem(index, this).map(CallResult::Value)
+        }
+    }
+
     /// Builds a list from the top n stack values.
     pub(super) fn build_list(&mut self, count: usize) {
         let items = self.pop_n(count);

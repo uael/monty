@@ -10,19 +10,13 @@ use crate::{
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
+    frozen::FrozenFunction,
     heap::{
         ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapObjectRead, HeapRead, HeapReadMut,
         HeapReadOutput,
     },
     string_builder::StringBuilder,
-    types::{
-        CsvObject, Dict, List, PyTrait, Set,
-        csv::{
-            Dialect,
-            writer::{terminator_chars, writerow_now},
-        },
-        iter::collect_iterable,
-    },
+    types::{CsvObject, Dict, List, PyTrait, Set, csv::Dialect, iter::collect_iterable},
     value::{VALUE_SIZE, Value},
 };
 
@@ -316,6 +310,7 @@ pub(super) fn writer_writeheader<'h>(
 /// any other target is written synchronously as each dict arrives.
 pub(super) fn writer_writerows<'h>(
     obj: &HeapRead<'h, CsvObject>,
+    id: HeapId,
     args: ArgValues,
     vm: &mut VM<'h>,
 ) -> RunResult<CallResult> {
@@ -323,7 +318,7 @@ pub(super) fn writer_writerows<'h>(
     defer_drop!(rowdicts, vm);
     let writer = dict_writer_part(obj, vm, |writer| writer.writer.clone_with_heap(vm.heap));
     defer_drop!(writer, vm);
-    let Some((targets_file, write, dialect)) = writer_parts(writer, vm) else {
+    let Some((targets_file, write, _)) = writer_parts(writer, vm) else {
         return Err(RunError::internal("DictWriter: writer is not a _csv.writer"));
     };
     defer_drop!(write, vm);
@@ -342,24 +337,21 @@ pub(super) fn writer_writerows<'h>(
         let (lists, vm) = lists_guard.into_parts();
         let rows = Value::Ref(vm.heap.allocate(HeapData::List(List::new(lists))));
         defer_drop!(rows, vm);
+        let Value::Ref(writer_id) = *writer else {
+            unreachable!("a DictWriter holds a _csv.writer")
+        };
         with_writer(writer, vm, |writer_obj, vm| {
             let rows = rows.clone_with_heap(vm.heap);
-            super::writer::writerows(writer_obj, ArgValues::One(rows), vm)
+            super::writer::writerows(writer_obj, writer_id, ArgValues::One(rows), vm)
         })
     } else {
-        let iterator = rowdicts.py_iter(vm)?.require_synchronous(vm)?;
-        defer_drop!(iterator, vm);
-        let terminator_chars = terminator_chars(&dialect.lineterminator);
-        let mut line = String::new();
-        // One view across the loop: its step count is what polls the time limit.
-        let mut rows = iterator.read(vm);
-        while let Some(rowdict) = rows.py_next(vm)? {
-            defer_drop!(rowdict, vm);
-            let items = dict_to_list(obj, spec, rowdict, vm)?;
-            defer_drop!(items, vm);
-            writerow_now(write, &dialect, &terminator_chars, items, &mut line, vm)?;
-        }
-        Ok(CallResult::Value(Value::None))
+        // Each row goes through `writerow`, which flattens it and calls `write()` on the
+        // VM's own loop, as CPython's `writerows` maps `_dict_to_list` lazily.
+        vm.heap.inc_ref(id);
+        vm.call_frozen_exact(
+            FrozenFunction::CsvWriterows,
+            [Value::Ref(id), rowdicts.clone_with_heap(vm.heap)],
+        )
     }
 }
 

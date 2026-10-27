@@ -1704,13 +1704,7 @@ impl<'h> VM<'h> {
                 Opcode::BinarySubscr => {
                     let index = self.pop();
                     let obj = self.pop();
-                    let result = obj.py_getitem(&index, self);
-                    obj.drop_with(self);
-                    index.drop_with(self);
-                    match result {
-                        Ok(v) => self.push(v),
-                        Err(e) => catch!(self, e),
-                    }
+                    handle_call_result!(self, self.subscript(obj, index));
                 }
                 Opcode::StoreSubscr => {
                     // Stack order: value, obj, index (TOS)
@@ -2701,7 +2695,10 @@ impl<'h> VM<'h> {
     ///
     /// Returns `true` if this frame indicated evaluation should stop when popped.
     pub(super) fn pop_frame(&mut self) -> bool {
-        let is_frozen = self.current_frame_is_frozen();
+        let charged = self
+            .current_frame
+            .function_id
+            .is_none_or(|id| self.interns.charges_recursion(id));
         let caller = self.suspended_frames.pop().expect("cannot pop the root frame");
         let frame = mem::replace(&mut self.current_frame, caller);
         let should_return = frame.should_return;
@@ -2709,7 +2706,7 @@ impl<'h> VM<'h> {
         // Sync instruction_ip to the restored caller so exception table lookups
         // target the correct frame after returning from a nested run() call.
         self.instruction_ip = self.current_frame.ip;
-        if !self.current_frame.is_parked && !is_frozen {
+        if !self.current_frame.is_parked && charged {
             self.decr_recursion();
         }
         should_return

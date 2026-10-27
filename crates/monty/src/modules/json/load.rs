@@ -91,7 +91,7 @@ struct JsonLoadsArgs {
 /// An unread `open()` handle suspends for the host's full-file read with
 /// [`PostConversionEffect::JsonLoad`] armed, so the parse runs on resume; a
 /// loaded one parses the rest of its buffer at once. Any other object has
-/// its `read` attribute called synchronously.
+/// its `read` attribute called in a frame on the VM's own loop.
 pub(super) fn call_load(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let JsonLoadArgs { fp } = JsonLoadArgs::from_args(args, vm)?;
     defer_drop!(fp, vm);
@@ -105,11 +105,7 @@ pub(super) fn call_load(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResul
                 suspended => Ok(suspended),
             }
         }
-        FileTarget::Method(read) => {
-            defer_drop!(read, vm);
-            let text = vm.evaluate_function(read, ArgValues::Empty)?;
-            parse_owned(text, vm).map(CallResult::Value)
-        }
+        FileTarget::Method(read) => FileTarget::read_and_parse(read, vm),
     }
 }
 
@@ -117,6 +113,13 @@ pub(super) fn call_load(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResul
 /// as `fp.read()` would, then parses it.
 pub(crate) fn apply_json_load(file_id: HeapId, result: Value, vm: &mut VM<'_>) -> RunResult<Value> {
     let text = apply_buffer_store(file_id, result, vm)?;
+    parse_owned(text, vm)
+}
+
+/// Parses what `fp.read()` returned, for the frame that reads an object that
+/// is no `open()` handle.
+pub(crate) fn call_parse(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let text = args.get_one_arg("parse", vm.heap)?;
     parse_owned(text, vm)
 }
 

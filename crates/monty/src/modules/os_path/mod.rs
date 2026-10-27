@@ -22,10 +22,11 @@ use smallvec::smallvec;
 
 use crate::{
     args::{ArgValues, FromArgs, LaxBool},
-    builtins::{Builtins, BuiltinsFunctions, candidate_wins},
+    builtins::candidate_wins,
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
+    frozen::FrozenFunction,
     heap::{Heap, HeapData, HeapId},
     intern::{StaticStrings, StringId},
     modules::{
@@ -179,7 +180,7 @@ pub(super) fn call(vm: &mut VM<'_>, functions: OsPathFunctions, args: ArgValues)
         OsPathFunctions::Realpath => realpath(vm, args),
         OsPathFunctions::Relpath => relpath(vm, args).map(CallResult::Value),
         OsPathFunctions::Samefile => samefile(vm, args),
-        OsPathFunctions::Samestat => samestat(vm, args).map(CallResult::Value),
+        OsPathFunctions::Samestat => samestat(vm, args),
         OsPathFunctions::Split => split(vm, args).map(CallResult::Value),
         OsPathFunctions::Splitdrive => splitdrive(vm, args).map(CallResult::Value),
         OsPathFunctions::Splitext => splitext(vm, args).map(CallResult::Value),
@@ -598,33 +599,21 @@ struct SamestatArgs {
     s2: Value,
 }
 
+/// `os.path.samestat(s1, s2)` as CPython writes it, which runs on the VM's own
+/// loop as a frame of its own, so any stat-like object works and a lazy host
+/// attribute is fetched from the host.
+pub(crate) const SAMESTAT_SOURCE: &str = r"
+def __monty_samestat(s1, s2):
+    return s1.st_ino == s2.st_ino and s1.st_dev == s2.st_dev
+";
+
 /// Implementation of `os.path.samestat(s1, s2)`:
 /// `s1.st_ino == s2.st_ino and s1.st_dev == s2.st_dev`, evaluated in that
-/// order so a missing attribute is reported as CPython reports it.
-fn samestat(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+/// order so a missing attribute is reported as CPython reports it; see
+/// [`SAMESTAT_SOURCE`].
+fn samestat(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let SamestatArgs { s1, s2 } = SamestatArgs::from_args(args, vm)?;
-    defer_drop!(s1, vm);
-    defer_drop!(s2, vm);
-    let same =
-        attributes_equal(s1, s2, StaticStrings::StIno, vm)? && attributes_equal(s1, s2, StaticStrings::StDev, vm)?;
-    Ok(Value::Bool(same))
-}
-
-/// `a.attr == b.attr` for a plain data attribute.
-fn attributes_equal(a: &Value, b: &Value, attr: StaticStrings, vm: &mut VM<'_>) -> RunResult<bool> {
-    let x = data_attribute(a, attr, vm)?;
-    defer_drop!(x, vm);
-    let y = data_attribute(b, attr, vm)?;
-    defer_drop!(y, vm);
-    x.py_eq_operator(y, vm)
-}
-
-/// `getattr(value, attr)` through the synchronous call path, so any
-/// stat-like object works; a lazy host attribute reads as absent there.
-fn data_attribute(value: &Value, attr: StaticStrings, vm: &mut VM<'_>) -> RunResult<Value> {
-    let name = Value::InternString(vm.interns.intern_static(attr));
-    let getattr = Value::Builtin(Builtins::Function(BuiltinsFunctions::Getattr));
-    vm.evaluate_function(&getattr, ArgValues::Two(value.clone_with_heap(vm), name))
+    vm.call_frozen_exact(FrozenFunction::Samestat, [s1, s2])
 }
 
 // ============================================================================

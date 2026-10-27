@@ -1066,10 +1066,9 @@ s.splitlines()
     assert_timeout_in_builtin(code, "str.splitlines()");
 }
 
-/// A `default_factory` re-enters `run()` with a fresh dispatch countdown, so a
-/// construction whose factories are each shorter than the interval reaches no
-/// checkpoint of its own. The binder therefore polls the clock itself, like
-/// every other native loop that calls back into Python.
+/// The factories of a dataclass run in a frame on the VM's own loop, whose
+/// dispatch countdown polls the clock, so a construction of many short
+/// factories meets the time limit part of the way through.
 #[test]
 fn timeout_in_dataclass_default_factories() {
     const FIELDS: usize = 200;
@@ -1095,9 +1094,8 @@ fn timeout_in_dataclass_default_factories() {
         .feed_run("Many()", vec![], PrintWriter::collect_string(&mut printed))
         .expect_err("the factory loop must hit the time limit");
     assert_eq!(exc.exc_type(), ExcType::TimeoutError);
-    // The poll fires on the interval's last index, before the factory it guards,
-    // so anything near `FIELDS` means the loop never checked at all.
-    assert_eq!(printed.len(), ResourceTracker::LOOP_CHECK_INTERVAL - 1);
+    // Anything near `FIELDS` means the loop never checked at all.
+    assert!(printed.len() < FIELDS / 4, "{} factories ran", printed.len());
 }
 
 #[test]

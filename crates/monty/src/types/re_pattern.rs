@@ -19,10 +19,15 @@ use crate::{
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
-    heap::{Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput},
+    frozen::{FrozenFunction, FrozenFunctions},
+    heap::{DropGuard, Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput},
     intern::StaticStrings,
-    modules::re::{ASCII, DOTALL, IGNORECASE, MULTILINE},
+    modules::{
+        ModuleFunctions,
+        re::{ASCII, DOTALL, IGNORECASE, MULTILINE},
+    },
     resource_checks::check_estimated_size,
+    sorting::take_list_items,
     types::{
         LazyHeapSet, List, PyTrait, ReMatch, Type, allocate_tuple,
         str::{allocate_string, string_repr_fmt},
@@ -566,43 +571,120 @@ impl Scan {
 /// `sub` with a callable `repl`: CPython calls it with the `re.Match` of each match, in order,
 /// and puts in the `str` that it gives, or nothing for `None`.
 ///
-/// `next` gives each match, at most `count` of them when `count` is not 0. As in CPython, a
-/// value that is neither a `str` nor `None` raises only once each call ran, with the index
-/// that `str.join` gives it in the list of the pieces.
+/// `next` gives each match, at most `count` of them when `count` is not 0. The matches are all
+/// found first, since a call of `repl` cannot change what the pattern finds in `text`, then
+/// [`SUB_SOURCE`] calls `repl` on each in a frame on the VM's own loop, so a `repl` that calls
+/// the host suspends the run.
 pub(crate) fn sub_callable<'h>(
     repl: &Value,
     text: &str,
     count: usize,
     mut next: impl FnMut(&mut VM<'h>) -> RunResult<Option<(usize, usize, Value)>>,
     vm: &mut VM<'h>,
-) -> RunResult<Value> {
+) -> RunResult<CallResult> {
     let limit = if count == 0 { usize::MAX } else { count };
-    let mut result = String::new();
-    let mut last_end = 0;
-    let mut pieces = 0usize;
-    let mut wrong: Option<(usize, String)> = None;
-    let mut done = 0;
-    while done < limit {
-        let Some((start, end, found)) = next(vm)? else {
+    let found: (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
+    let mut found = DropGuard::new(found, vm);
+    let ((matches, spans), vm) = found.as_parts_mut();
+    while matches.len() < limit {
+        vm.heap.tracker.check_memory_time_every(matches.len())?;
+        let Some((start, end, one)) = next(vm)? else {
             break;
         };
-        done += 1;
+        matches.push(one);
+        let span: TupleVec = [start, end]
+            .into_iter()
+            .map(|at| Value::Int(i64::try_from(at).expect("a match lies within a str")))
+            .collect();
+        spans.push(allocate_tuple(span, vm.heap));
+    }
+    let ((matches, spans), vm) = found.into_parts();
+    let matches = Value::Ref(vm.heap.allocate(HeapData::List(List::new(matches))));
+    let spans = Value::Ref(vm.heap.allocate(HeapData::List(List::new(spans))));
+    let subject = allocate_string(text.to_owned(), vm.heap);
+    vm.call_frozen_exact(
+        FrozenFunction::ReSub,
+        [
+            repl.clone_with_heap(vm.heap),
+            subject,
+            spans,
+            matches,
+            Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::ReSubJoin)),
+        ],
+    )
+}
+
+/// The calls of a callable `repl` of `sub`, which run on the VM's own loop as a frame of
+/// their own; `join` then puts the pieces together.
+pub(crate) const SUB_SOURCE: &str = r"
+def __monty_re_sub(repl, text, spans, matches, join):
+    pieces = []
+    for found in matches:
+        pieces.append(repl(found))
+    return join(text, spans, pieces)
+";
+
+/// Arguments of the private helper that puts the result of `sub` together.
+#[derive(FromArgs)]
+#[from_args(name = "join")]
+struct SubJoinArgs {
+    #[from_args(pos_only)]
+    text: Value,
+    #[from_args(pos_only)]
+    spans: Value,
+    #[from_args(pos_only)]
+    pieces: Value,
+}
+
+/// Puts in each piece that a callable `repl` gave in place of its match, for [`SUB_SOURCE`].
+///
+/// As in CPython, a piece that is neither a `str` nor `None` raises only once each call ran,
+/// with the index that `str.join` gives it in the list of the pieces.
+pub(crate) fn call_sub_join(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let SubJoinArgs { text, spans, pieces } = SubJoinArgs::from_args(args, vm)?;
+    defer_drop!(text, vm);
+    defer_drop!(spans, vm);
+    defer_drop!(pieces, vm);
+    let text = text.to_str(vm)?.to_owned();
+    let bounds: Vec<(usize, usize)> = match spans.read_heap(vm) {
+        Some(HeapReadOutput::List(spans)) => spans
+            .get(vm.heap)
+            .as_slice()
+            .iter()
+            .map(|span| match span.read_heap(vm) {
+                Some(HeapReadOutput::Tuple(pair)) => match pair.get(vm.heap).as_slice() {
+                    [Value::Int(start), Value::Int(end)] => (
+                        usize::try_from(*start).expect("a span starts at 0 or later"),
+                        usize::try_from(*end).expect("a span ends at 0 or later"),
+                    ),
+                    _ => unreachable!("a span is two ints"),
+                },
+                _ => unreachable!("a span is a tuple"),
+            })
+            .collect(),
+        _ => unreachable!("a frozen sub passes a list of spans"),
+    };
+    let got = take_list_items(pieces, vm);
+    defer_drop!(got, vm);
+    let mut result = String::new();
+    let mut last_end = 0;
+    let mut index = 0usize;
+    let mut wrong: Option<(usize, String)> = None;
+    for ((start, end), piece) in bounds.into_iter().zip(got.iter()) {
         if last_end < start {
             result.push_str(&text[last_end..start]);
-            pieces += 1;
+            index += 1;
         }
-        let got = vm.evaluate_function(repl, ArgValues::One(found))?;
-        defer_drop!(got, vm);
-        if !matches!(got, Value::None) {
-            match got.to_str(vm) {
+        if !matches!(piece, Value::None) {
+            match piece.to_str(vm) {
                 Ok(piece) => result.push_str(piece),
                 Err(_) => {
                     if wrong.is_none() {
-                        wrong = Some((pieces, got.py_type_name(vm).into_owned()));
+                        wrong = Some((index, piece.py_type_name(vm).into_owned()));
                     }
                 }
             }
-            pieces += 1;
+            index += 1;
         }
         last_end = end;
         check_estimated_size(result.len() + (text.len() - last_end), &vm.heap.tracker)?;
@@ -862,7 +944,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, RePattern> {
             Some(StaticStrings::Match) => call_pattern_within(self, Within::Match, args, vm),
             Some(StaticStrings::Fullmatch) => call_pattern_within(self, Within::Fullmatch, args, vm),
             Some(StaticStrings::Findall) => call_pattern_within(self, Within::Findall, args, vm),
-            Some(StaticStrings::Sub) => call_pattern_sub(self, args, vm),
+            Some(StaticStrings::Sub) => return call_pattern_sub(self, args, vm),
             Some(StaticStrings::Split) => call_pattern_split(self, args, vm),
             Some(StaticStrings::Finditer) => call_pattern_within(self, Within::Finditer, args, vm),
             _ => return Err(ExcType::attribute_error_method(Type::RePattern, attr, args, vm)),
@@ -882,7 +964,7 @@ impl HeapItem for RePattern {
 /// Separated from the main `py_call_attr` match to keep the borrow checker happy —
 /// extracting multiple string arguments requires careful ordering of borrows.
 /// Supports `count` as either positional or keyword argument.
-fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: &mut VM<'h>) -> RunResult<Value> {
+fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: &mut VM<'h>) -> RunResult<CallResult> {
     let PatternSubArgs {
         repl: repl_val,
         string: string_val,
@@ -896,7 +978,7 @@ fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: 
     if repl_val.to_str(vm).is_err() && repl_val.is_callable(vm) {
         let Some(count) = count else {
             let _ = string_val.to_str(vm)?;
-            return Ok(string_val.clone_with_heap(vm.heap));
+            return Ok(CallResult::Value(string_val.clone_with_heap(vm.heap)));
         };
         let text = string_val.to_str(vm)?.to_owned();
         let all_ascii = text.is_ascii();
@@ -928,11 +1010,14 @@ fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: 
         // `expected string, not {t}` wording) before the refcount bump; no
         // need to re-allocate.
         let _ = string_val.to_str(vm)?;
-        return Ok(string_val.clone_with_heap(vm.heap));
+        return Ok(CallResult::Value(string_val.clone_with_heap(vm.heap)));
     };
 
     let text = string_val.to_str(vm)?;
-    pattern.get(vm.heap).sub(repl, text, count, vm.heap)
+    pattern
+        .get(vm.heap)
+        .sub(repl, text, count, vm.heap)
+        .map(CallResult::Value)
 }
 
 /// Handles `pattern.split(string, maxsplit=0)` argument extraction and dispatch.

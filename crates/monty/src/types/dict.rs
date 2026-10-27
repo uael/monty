@@ -26,7 +26,7 @@ use crate::{
                 CounterCmp, CounterOp, counter_binary_op, counter_compare, counter_elements, counter_inplace_op,
                 counter_most_common, counter_order, counter_total, counter_unary_op, counter_update_method,
             },
-            defaultdict::defaultdict_missing,
+            defaultdict::defaultdict_missing_on_loop,
         },
         copy::{Memo, PyDeepCopy, deep_copy, deep_copy_pair},
     },
@@ -1557,8 +1557,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Dict> {
             // `defaultdict.__missing__(key)` — plain dicts have no such method.
             StaticStrings::DunderMissing if self.get(vm.heap).is_defaultdict() => {
                 let key = args.get_one_arg("__missing__", vm.heap)?;
-                defer_drop!(key, vm);
-                defaultdict_missing(self, key, vm)
+                return defaultdict_missing_on_loop(self, key, vm);
             }
             _ => {
                 let type_name = self.py_type(vm).name(vm.heap, vm.interns);

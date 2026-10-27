@@ -3,18 +3,34 @@
 //! An `open()` handle is read and written through its own buffered-read and
 //! one-shot-write machinery, so `json.load` on an unread file suspends to the
 //! host exactly as `fp.read()` would. Any other object is used through its
-//! `read` / `write` attribute, called synchronously (see `limitations/json.md`).
+//! `read` / `write` attribute, called in a frame on the VM's own loop, so a
+//! method that calls the host suspends the run too.
 
 use crate::{
-    args::ArgValues,
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult, SimpleException},
+    frozen::{FrozenFunction, FrozenFunctions},
     heap::{ContainsHeap, DropWithContext, HeapId, HeapReadOutput},
     intern::StaticStrings,
+    modules::ModuleFunctions,
     types::str::allocate_string,
     value::{EitherStr, Value},
 };
+
+/// `fp.write(chunk)` of `json.dump()` for an object that is no `open()`
+/// handle, which runs on the VM's own loop as a frame of its own.
+pub(crate) const WRITE_SOURCE: &str = r"
+def __monty_json_write(write, chunk):
+    write(chunk)
+";
+
+/// `json.loads(fp.read())` of `json.load()` for an object that is no `open()`
+/// handle, which runs on the VM's own loop as a frame of its own.
+pub(crate) const READ_SOURCE: &str = r"
+def __monty_json_read(read, parse):
+    return parse(read())
+";
 
 /// Where `json.load` reads from or `json.dump` writes to.
 pub(super) enum FileTarget {
@@ -51,7 +67,8 @@ impl FileTarget {
     }
 
     /// `fp.write(text)` for `json.dump`: the host write for an `open()` handle
-    /// (answering `None`), or a synchronous call of the `write` method.
+    /// (answering `None`), or a call of the `write` method in a frame of
+    /// [`WRITE_SOURCE`].
     pub(super) fn write(self, text: String, vm: &mut VM<'_>) -> RunResult<CallResult> {
         match self {
             Self::OpenFile(file_id) => {
@@ -61,13 +78,17 @@ impl FileTarget {
                 file.write_text_discarding_count(vm, text)
             }
             Self::Method(write) => {
-                defer_drop!(write, vm);
                 let chunk = allocate_string(text, vm.heap);
-                let returned = vm.evaluate_function(write, ArgValues::One(chunk))?;
-                returned.drop_with(vm);
-                Ok(CallResult::Value(Value::None))
+                vm.call_frozen_exact(FrozenFunction::JsonWrite, [write, chunk])
             }
         }
+    }
+
+    /// `fp.read()` then the parse for `json.load`, for an object that is no
+    /// `open()` handle, in a frame of [`READ_SOURCE`].
+    pub(super) fn read_and_parse(read: Value, vm: &mut VM<'_>) -> RunResult<CallResult> {
+        let parse = Value::ModuleFunction(ModuleFunctions::Frozen(FrozenFunctions::JsonParse));
+        vm.call_frozen_exact(FrozenFunction::JsonRead, [read, parse])
     }
 
     /// `fp` as an `open()` handle, else its `method` attribute: CPython's
