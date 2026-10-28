@@ -2191,6 +2191,8 @@ pub enum StaticStrings {
     StructTime,
     /// `re.sub()` / `pattern.sub()` method
     Sub,
+    /// `re.subn()` / `pattern.subn()` method
+    Subn,
     /// `Counter.subtract()` method.
     Subtract,
     /// `Path.suffix` property.

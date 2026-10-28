@@ -11,6 +11,7 @@
 //! - `re.fullmatch(pattern, string, flags=0)` → `re.Match` or `None`
 //! - `re.findall(pattern, string, flags=0)` → `list`
 //! - `re.sub(pattern, repl, string, count=0, flags=0)` → `str`
+//! - `re.subn(pattern, repl, string, count=0, flags=0)` → `tuple[str, int]`
 //! - `re.split(pattern, string, maxsplit=0, flags=0)` → `list`
 //! - `re.finditer(pattern, string, flags=0)` → iterator of `re.Match`
 //! - `re.escape(pattern)` → `str`
@@ -45,7 +46,7 @@ use crate::{
     modules::ModuleFunctions,
     types::{
         BoundedCompileError, Module, RePattern, Type,
-        re_pattern::{Scan, extract_count, extract_maxsplit, sub_callable, translate_replacement},
+        re_pattern::{Scan, extract_count, extract_maxsplit, sub_callable, subbed, translate_replacement},
         str::allocate_string,
     },
     value::Value,
@@ -80,6 +81,8 @@ pub(crate) enum ReFunctions {
     Findall,
     /// `re.sub(pattern, repl, string, count=0, flags=0)` — substitute matches.
     Sub,
+    /// `re.subn(pattern, repl, string, count=0, flags=0)` — substitute matches and count them.
+    Subn,
     /// `re.split(pattern, string, maxsplit=0, flags=0)` — split string by pattern.
     Split,
     /// `re.finditer(pattern, string, flags=0)` — return iterator over all matches.
@@ -122,6 +125,11 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     module.set_attr(
         StaticStrings::Sub,
         Value::ModuleFunction(ModuleFunctions::Re(ReFunctions::Sub)),
+        vm,
+    );
+    module.set_attr(
+        StaticStrings::Subn,
+        Value::ModuleFunction(ModuleFunctions::Re(ReFunctions::Subn)),
         vm,
     );
     module.set_attr(
@@ -188,7 +196,8 @@ pub(super) fn call(vm: &mut VM<'_>, function: ReFunctions, args: ArgValues) -> R
         ReFunctions::Match => call_match(vm, args).map(CallResult::Value),
         ReFunctions::Fullmatch => call_fullmatch(vm, args).map(CallResult::Value),
         ReFunctions::Findall => call_findall(vm, args).map(CallResult::Value),
-        ReFunctions::Sub => call_sub(vm, args).map(CallResult::Value),
+        ReFunctions::Sub => call_sub(vm, args, false).map(CallResult::Value),
+        ReFunctions::Subn => call_sub(vm, args, true).map(CallResult::Value),
         ReFunctions::Split => call_split(vm, args).map(CallResult::Value),
         ReFunctions::Finditer => call_finditer(vm, args).map(CallResult::Value),
         ReFunctions::Escape => call_escape(vm, args).map(CallResult::Value),
@@ -262,14 +271,26 @@ fn call_findall(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// The pattern resolves *before* `count` is validated, so a bad pattern (or flags
 /// with a compiled pattern) wins over a bad count — as in CPython, where `_compile`
 /// runs before `Pattern.sub` parses its arguments.
-fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
-    let ReSubArgs {
-        pattern,
-        repl,
-        string,
-        count,
-        flags,
-    } = ReSubArgs::from_args(args, vm)?;
+fn call_sub(vm: &mut VM<'_>, args: ArgValues, counted: bool) -> RunResult<Value> {
+    let (pattern, repl, string, count, flags) = if counted {
+        let ReSubnArgs {
+            pattern,
+            repl,
+            string,
+            count,
+            flags,
+        } = ReSubnArgs::from_args(args, vm)?;
+        (pattern, repl, string, count, flags)
+    } else {
+        let ReSubArgs {
+            pattern,
+            repl,
+            string,
+            count,
+            flags,
+        } = ReSubArgs::from_args(args, vm)?;
+        (pattern, repl, string, count, flags)
+    };
     defer_drop!(string, vm);
     defer_drop!(repl, vm);
     // `count` must outlive `resolve_pattern`'s `?` (pattern errors win over a
@@ -283,7 +304,7 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     if repl.to_str(vm).is_err() && repl.is_callable(vm) {
         let Some(count) = count else {
             let _ = subject_str(string, vm)?;
-            return Ok(string.clone_with_heap(vm.heap));
+            return Ok(subbed((string.clone_with_heap(vm.heap), 0), counted, vm.heap));
         };
         let text = subject_str(string, vm)?.to_owned();
         let all_ascii = text.is_ascii();
@@ -298,7 +319,8 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
                     .next_match(&mut scan, string, &text, all_ascii, vm.heap)
             },
             vm,
-        );
+        )
+        .map(|result| subbed(result, counted, vm.heap));
     }
 
     // CPython parses the replacement template before its match loop, so a bad
@@ -316,12 +338,13 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         // re-allocate (the guard drops the extraction's reference, the
         // clone is the caller's).
         let _ = subject_str(string, vm)?;
-        return Ok(string.clone_with_heap(vm.heap));
+        return Ok(subbed((string.clone_with_heap(vm.heap), 0), counted, vm.heap));
     };
 
     resolved
         .get(vm.heap)
         .sub(repl, subject_str(string, vm)?, count, vm.heap)
+        .map(|result| subbed(result, counted, vm.heap))
 }
 
 /// `re.split(pattern, string, maxsplit=0, flags=0)` — split on pattern occurrences.
@@ -355,6 +378,21 @@ fn call_split(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 #[derive(FromArgs)]
 #[from_args(name = "sub", style = def)]
 struct ReSubArgs {
+    #[from_args(static_string = "PatternAttr")]
+    pattern: Value,
+    repl: Value,
+    #[from_args(static_string = "StringAttr")]
+    string: Value,
+    #[from_args(default)]
+    count: Option<Value>,
+    #[from_args(default = Value::Int(0))]
+    flags: Value,
+}
+
+/// Argument shape for `re.subn(pattern, repl, string, count=0, flags=0)` — see `ReSubArgs`.
+#[derive(FromArgs)]
+#[from_args(name = "subn", style = def)]
+struct ReSubnArgs {
     #[from_args(static_string = "PatternAttr")]
     pattern: Value,
     repl: Value,

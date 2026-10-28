@@ -413,26 +413,28 @@ impl RePattern {
     /// after each match, bailing out immediately if the budget is exceeded. This
     /// avoids both false rejections from conservative pre-estimates and untracked
     /// Rust heap allocations from delegating to `fancy_regex::replace_all()`.
-    pub fn sub(&self, repl: &str, text: &str, count: usize, heap: &Heap) -> RunResult<Value> {
+    pub fn sub(&self, repl: &str, text: &str, count: usize, heap: &Heap) -> RunResult<(Value, usize)> {
         // Translate Python-style backreferences (\1, \2) to regex crate style ($1, $2)
         let rust_repl = translate_replacement(repl)?;
         let effective_count = if count == 0 { usize::MAX } else { count };
 
         let mut result = String::new();
         let mut last_end = 0;
+        let mut done = 0;
 
         for caps in self.compiled.captures_iter(text).take(effective_count) {
             let caps = caps.map_err(ExcType::re_pattern_error)?;
             let m = caps.get(0).expect("capture group 0 always exists");
             result.push_str(&text[last_end..m.start()]);
             caps.expand(rust_repl.as_ref(), &mut result);
+            done += 1;
             last_end = m.end();
             // Check running size: current result + remaining unprocessed text.
             check_estimated_size(result.len() + (text.len() - last_end), &heap.tracker)?;
         }
 
         result.push_str(&text[last_end..]);
-        Ok(allocate_string(result, heap))
+        Ok((allocate_string(result, heap), done))
     }
 
     /// `pattern.split(string, maxsplit=0)` — split string by pattern occurrences.
@@ -575,7 +577,7 @@ pub(crate) fn sub_callable<'h>(
     count: usize,
     mut next: impl FnMut(&mut VM<'h>) -> RunResult<Option<(usize, usize, Value)>>,
     vm: &mut VM<'h>,
-) -> RunResult<Value> {
+) -> RunResult<(Value, usize)> {
     let limit = if count == 0 { usize::MAX } else { count };
     let mut result = String::new();
     let mut last_end = 0;
@@ -613,7 +615,19 @@ pub(crate) fn sub_callable<'h>(
         )));
     }
     result.push_str(&text[last_end..]);
-    Ok(allocate_string(result, vm.heap))
+    Ok((allocate_string(result, vm.heap), done))
+}
+
+/// The result of `sub`, or of `subn` when `counted`: the new string, and the tuple of it and the number of
+/// substitutions.
+pub(crate) fn subbed(result: (Value, usize), counted: bool, heap: &Heap) -> Value {
+    if !counted {
+        return result.0;
+    }
+    let mut items = TupleVec::new();
+    items.push(result.0);
+    items.push(Value::Int(i64::try_from(result.1).unwrap_or(i64::MAX)));
+    allocate_tuple(items, heap)
 }
 
 /// Which method of `re.Pattern` reads `string, pos=0, endpos=sys.maxsize`.
@@ -862,7 +876,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, RePattern> {
             Some(StaticStrings::Match) => call_pattern_within(self, Within::Match, args, vm),
             Some(StaticStrings::Fullmatch) => call_pattern_within(self, Within::Fullmatch, args, vm),
             Some(StaticStrings::Findall) => call_pattern_within(self, Within::Findall, args, vm),
-            Some(StaticStrings::Sub) => call_pattern_sub(self, args, vm),
+            Some(StaticStrings::Sub) => call_pattern_sub(self, args, vm, false),
+            Some(StaticStrings::Subn) => call_pattern_sub(self, args, vm, true),
             Some(StaticStrings::Split) => call_pattern_split(self, args, vm),
             Some(StaticStrings::Finditer) => call_pattern_within(self, Within::Finditer, args, vm),
             _ => return Err(ExcType::attribute_error_method(Type::RePattern, attr, args, vm)),
@@ -877,17 +892,24 @@ impl HeapItem for RePattern {
     }
 }
 
-/// Handles `pattern.sub(repl, string, count=0)` argument extraction and dispatch.
+/// Handles `pattern.sub(repl, string, count=0)` argument extraction and dispatch, and `pattern.subn` when `counted`.
 ///
 /// Separated from the main `py_call_attr` match to keep the borrow checker happy —
 /// extracting multiple string arguments requires careful ordering of borrows.
 /// Supports `count` as either positional or keyword argument.
-fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: &mut VM<'h>) -> RunResult<Value> {
-    let PatternSubArgs {
-        repl: repl_val,
-        string: string_val,
-        count: count_val,
-    } = PatternSubArgs::from_args(args, vm)?;
+fn call_pattern_sub<'h>(
+    pattern: &HeapRead<'h, RePattern>,
+    args: ArgValues,
+    vm: &mut VM<'h>,
+    counted: bool,
+) -> RunResult<Value> {
+    let (repl_val, string_val, count_val) = if counted {
+        let PatternSubnArgs { repl, string, count } = PatternSubnArgs::from_args(args, vm)?;
+        (repl, string, count)
+    } else {
+        let PatternSubArgs { repl, string, count } = PatternSubArgs::from_args(args, vm)?;
+        (repl, string, count)
+    };
     defer_drop!(repl_val, vm);
     defer_drop!(string_val, vm);
 
@@ -896,7 +918,7 @@ fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: 
     if repl_val.to_str(vm).is_err() && repl_val.is_callable(vm) {
         let Some(count) = count else {
             let _ = string_val.to_str(vm)?;
-            return Ok(string_val.clone_with_heap(vm.heap));
+            return Ok(subbed((string_val.clone_with_heap(vm.heap), 0), counted, vm.heap));
         };
         let text = string_val.to_str(vm)?.to_owned();
         let all_ascii = text.is_ascii();
@@ -911,7 +933,8 @@ fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: 
                     .next_match(&mut scan, string_val, &text, all_ascii, vm.heap)
             },
             vm,
-        );
+        )
+        .map(|result| subbed(result, counted, vm.heap));
     }
 
     // CPython processes the replacement template *before* its match loop, so
@@ -928,11 +951,14 @@ fn call_pattern_sub<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm: 
         // `expected string, not {t}` wording) before the refcount bump; no
         // need to re-allocate.
         let _ = string_val.to_str(vm)?;
-        return Ok(string_val.clone_with_heap(vm.heap));
+        return Ok(subbed((string_val.clone_with_heap(vm.heap), 0), counted, vm.heap));
     };
 
     let text = string_val.to_str(vm)?;
-    pattern.get(vm.heap).sub(repl, text, count, vm.heap)
+    pattern
+        .get(vm.heap)
+        .sub(repl, text, count, vm.heap)
+        .map(|result| subbed(result, counted, vm.heap))
 }
 
 /// Handles `pattern.split(string, maxsplit=0)` argument extraction and dispatch.
@@ -959,6 +985,17 @@ fn call_pattern_split<'h>(pattern: &HeapRead<'h, RePattern>, args: ArgValues, vm
 #[derive(FromArgs)]
 #[from_args(name = "sub", style = c_named, at_most_total)]
 struct PatternSubArgs {
+    repl: Value,
+    #[from_args(static_string = "StringAttr")]
+    string: Value,
+    #[from_args(default)]
+    count: Option<Value>,
+}
+
+/// Argument shape for `Pattern.subn(repl, string, count=0)` — see `PatternSubArgs`.
+#[derive(FromArgs)]
+#[from_args(name = "subn", style = c_named, at_most_total)]
+struct PatternSubnArgs {
     repl: Value,
     #[from_args(static_string = "StringAttr")]
     string: Value,

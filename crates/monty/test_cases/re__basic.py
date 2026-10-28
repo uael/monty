@@ -988,3 +988,19 @@ assert len(matches) == 2
 assert matches[0].group(1) == 'a'
 assert matches[0].group(2) == '1'
 assert matches[1].group(1) == 'b'
+
+# === re.subn() ===
+assert re.subn(r'\d+', 'X', 'a1 b2 c3') == ('aX bX cX', 3), 're.subn counts each substitution'
+assert re.subn(r'\d+', 'X', 'a1 b2 c3', 2) == ('aX bX c3', 2), 're.subn count caps the substitutions'
+assert re.subn(r'\d+', 'X', 'abc') == ('abc', 0), 're.subn with no match counts zero'
+assert re.subn(r'\d+', 'X', 'a1 b2', -1) == ('a1 b2', 0), 're.subn with a negative count changes nothing'
+assert re.subn(r'(\d)', r'<\1>', 'a1b2') == ('a<1>b<2>', 2), 're.subn expands groups'
+assert re.subn(r'\d', lambda m: '#', 'a1b2') == ('a#b#', 2), 're.subn calls a function of the match'
+assert re.compile(r'\d').subn('X', 'a1b2c3') == ('aXbXcX', 3), 'pattern.subn counts each substitution'
+assert re.compile(r'\d').subn('X', 'a1b2c3', count=1) == ('aXb2c3', 1), 'pattern.subn takes a count'
+
+try:
+    re.subn(r'\d+')
+    assert False, 're.subn(pattern) should raise TypeError'
+except TypeError as e:
+    assert str(e) == "subn() missing 2 required positional arguments: 'repl' and 'string'", f're.subn missing two: {e}'
