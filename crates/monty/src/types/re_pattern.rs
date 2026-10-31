@@ -1228,7 +1228,9 @@ pub(crate) fn translate_replacement(repl: &str) -> RunResult<Cow<'_, str>> {
                         _ => {
                             // The iterator has consumed the backslash alone.
                             let position = repl.chars().count() - chars.clone().count() - 1;
-                            return Err(ExcType::re_pattern_error(format!("bad escape \\{e} at position {position}")));
+                            return Err(ExcType::re_pattern_error(format!(
+                                "bad escape \\{e} at position {position}"
+                            )));
                         }
                     };
                     result.push(decoded);
