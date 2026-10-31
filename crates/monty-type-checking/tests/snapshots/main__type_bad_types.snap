@@ -36,3 +36,5 @@ bad_types.py:149:7: error[unresolved-attribute] Module `functools` has no member
 bad_types.py:159:18: error[invalid-argument-type] Argument to bound method `_lru_cache_wrapper.__call__` is incorrect: Expected `int`, found `Literal["nope"]`
 bad_types.py:160:21: error[too-many-positional-arguments] Too many positional arguments to bound method `_lru_cache_wrapper.__call__`: expected 2, got 3
 bad_types.py:161:18: error[invalid-argument-type] Argument to bound method `_lru_cache_wrapper.__call__` is incorrect: Expected `int`, found `Literal["nope"]`
+bad_types.py:164:6: error[invalid-argument-type] Argument to function `next` is incorrect: Expected `SupportsNext[Unknown]`, found `list[int]`
+bad_types.py:165:6: error[invalid-argument-type] Argument to function `next` is incorrect: Expected `SupportsNext[Unknown]`, found `list[str]`

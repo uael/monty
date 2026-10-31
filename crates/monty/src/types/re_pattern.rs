@@ -1146,6 +1146,8 @@ fn is_size_limit_error(err: &RegexError) -> bool {
 /// - `\g<N>` → `${N}` (numeric backreference with explicit syntax)
 /// - `\g<name>` → `${name}` (named group backreference)
 /// - `\\` → literal backslash
+/// - `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v` → the character they name
+/// - `\` before another ASCII letter, or at the end → `re.error` (bad escape), as CPython raises
 /// - `$` → `$$` (escape literal `$` so `fancy_regex` doesn't misinterpret it)
 ///
 /// Returns a `Cow` to avoid allocation when no translation is needed.
@@ -1213,6 +1215,30 @@ pub(crate) fn translate_replacement(repl: &str) -> RunResult<Cow<'_, str>> {
                 Some(&'\\') => {
                     result.push('\\');
                     chars.next();
+                }
+                Some(&e) if e.is_ascii_alphabetic() => {
+                    let decoded = match e {
+                        'a' => '\x07',
+                        'b' => '\x08',
+                        'f' => '\x0c',
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        'v' => '\x0b',
+                        _ => {
+                            // The iterator has consumed the backslash alone.
+                            let position = repl.chars().count() - chars.clone().count() - 1;
+                            return Err(ExcType::re_pattern_error(format!("bad escape \\{e} at position {position}")));
+                        }
+                    };
+                    result.push(decoded);
+                    chars.next();
+                }
+                None => {
+                    let position = repl.chars().count() - 1;
+                    return Err(ExcType::re_pattern_error(format!(
+                        "bad escape (end of pattern) at position {position}"
+                    )));
                 }
                 _ => {
                     result.push('\\');

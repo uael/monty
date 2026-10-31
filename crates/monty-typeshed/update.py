@@ -81,12 +81,12 @@ ALLOWED_CLASSES = {
     'set',
     'frozenset',
     'range',
-    # Iterator types (these are classes, not functions)
+    # Monty runs these as functions that give a list; upstream types them as
+    # classes whose instances are the iterators the calls give, which `listed`
+    # writes as functions
     'enumerate',
     'reversed',
     'zip',
-    # Monty runs these as functions; upstream types them as classes whose
-    # instances are the iterators the calls give
     'filter',
     'map',
     # Slicing
@@ -383,6 +383,61 @@ def hierarchy(nodes: list[ast.stmt]) -> dict[str, list[str]]:
     return found
 
 
+# Monty runs these as functions that give a list, where CPython gives a lazy iterator: `next(filter(...))` raises
+# `TypeError` in Monty. `listed` writes each class as the overloads of its `__new__` that give that list, so the
+# checker refuses what the interpreter refuses.
+LISTED = {'enumerate', 'filter', 'map', 'reversed', 'zip'}
+
+
+def listed(nodes: list[ast.stmt]) -> list[ast.stmt]:
+    """Write each class of `LISTED` as a function whose overloads give a list of the items of its iterator."""
+    result: list[ast.stmt] = []
+    for node in nodes:
+        if isinstance(node, ast.If):
+            node.body = listed(node.body) or [ast.Pass()]
+            node.orelse = listed(node.orelse)
+            result.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name in LISTED:
+            item = next(
+                part.returns
+                for part in node.body
+                if isinstance(part, ast.FunctionDef) and part.name == '__next__' and part.returns is not None
+            )
+            result += constructors(node.body, node.name, item)
+        else:
+            result.append(node)
+    return result
+
+
+def constructors(nodes: list[ast.stmt], name: str, item: ast.expr) -> list[ast.stmt]:
+    """The `__new__` overloads of a class body as functions of the module named `name`, each giving a list."""
+    result: list[ast.stmt] = []
+    for node in nodes:
+        if isinstance(node, ast.If):
+            body = constructors(node.body, name, item)
+            orelse = constructors(node.orelse, name, item)
+            if body or orelse:
+                result.append(ast.copy_location(ast.If(test=node.test, body=body or [ast.Pass()], orelse=orelse), node))
+        elif isinstance(node, ast.FunctionDef) and node.name == '__new__':
+            node.name = name
+            if node.args.posonlyargs:
+                node.args.posonlyargs = node.args.posonlyargs[1:]
+            else:
+                node.args.args = node.args.args[1:]
+            given = node.returns
+            if (
+                isinstance(given, ast.Subscript)
+                and isinstance(given.value, ast.Name)
+                and given.value.id in (name, 'Iterator')
+            ):
+                given = given.slice
+            else:
+                given = item
+            node.returns = ast.Subscript(value=ast.Name(id='list', ctx=ast.Load()), slice=given, ctx=ast.Load())
+            result.append(node)
+    return result
+
+
 def filter_if_block(node: ast.If) -> ast.If | None:
     """Filter an if block, recursively filtering function and class definitions.
 
@@ -427,6 +482,7 @@ def filter_builtins(source: str) -> str:
     bases = hierarchy(tree.body)
     tree.body = filter_statements(tree.body)
     rebase(tree.body, bases)
+    tree.body = listed(tree.body)
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
 

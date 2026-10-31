@@ -1016,12 +1016,7 @@ class frozenset(AbstractSet[_T_co]):
     def __hash__(self) -> int: ...
     def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
 
-@disjoint_base
-class enumerate(Generic[_T]):
-    def __new__(cls, iterable: Iterable[_T], start: int = 0) -> Self: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> tuple[int, _T]: ...
-    def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
+def enumerate(iterable: Iterable[_T], start: int = 0) -> list[tuple[int, _T]]: ...
 
 @final
 class range(Sequence[int]):
@@ -1175,19 +1170,14 @@ else:
         /,
     ) -> None: ...
 
-@disjoint_base
-class filter(Generic[_T]):
-    @overload
-    def __new__(cls, function: None, iterable: Iterable[_T | None], /) -> Self: ...
-    @overload
-    def __new__(cls, function: Callable[[_S], TypeGuard[_T]], iterable: Iterable[_S], /) -> Self: ...
-    @overload
-    def __new__(cls, function: Callable[[_S], TypeIs[_T]], iterable: Iterable[_S], /) -> Self: ...
-    @overload
-    def __new__(cls, function: Callable[[_T], Any], iterable: Iterable[_T], /) -> Self: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> _T: ...
-
+@overload
+def filter(function: None, iterable: Iterable[_T | None], /) -> list[_T]: ...
+@overload
+def filter(function: Callable[[_S], TypeGuard[_T]], iterable: Iterable[_S], /) -> list[_T]: ...
+@overload
+def filter(function: Callable[[_S], TypeIs[_T]], iterable: Iterable[_S], /) -> list[_T]: ...
+@overload
+def filter(function: Callable[[_T], Any], iterable: Iterable[_T], /) -> list[_T]: ...
 def format(value: object, format_spec: str = '', /) -> str: ...
 @overload
 def getattr(o: object, name: str, /) -> Any: ...
@@ -1230,122 +1220,99 @@ def issubclass(cls: type, class_or_tuple: _ClassInfo, /) -> bool: ...
 def len(obj: Sized, /) -> int: ...
 def locals() -> dict[str, Any]: ...
 
-@disjoint_base
-class map(Generic[_S]):
-    if sys.version_info >= (3, 14):
-        @overload
-        def __new__(cls, func: Callable[[_T1], _S], iterable: Iterable[_T1], /, *, strict: bool = False) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            /,
-            *,
-            strict: bool = False,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2, _T3], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            /,
-            *,
-            strict: bool = False,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2, _T3, _T4], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            /,
-            *,
-            strict: bool = False,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            iter5: Iterable[_T5],
-            /,
-            *,
-            strict: bool = False,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[..., _S],
-            iterable: Iterable[Any],
-            iter2: Iterable[Any],
-            iter3: Iterable[Any],
-            iter4: Iterable[Any],
-            iter5: Iterable[Any],
-            iter6: Iterable[Any],
-            /,
-            *iterables: Iterable[Any],
-            strict: bool = False,
-        ) -> Self: ...
-    else:
-        @overload
-        def __new__(cls, func: Callable[[_T1], _S], iterable: Iterable[_T1], /) -> Self: ...
-        @overload
-        def __new__(cls, func: Callable[[_T1, _T2], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], /) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2, _T3], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            /,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2, _T3, _T4], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            /,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
-            iterable: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            iter5: Iterable[_T5],
-            /,
-        ) -> Self: ...
-        @overload
-        def __new__(
-            cls,
-            func: Callable[..., _S],
-            iterable: Iterable[Any],
-            iter2: Iterable[Any],
-            iter3: Iterable[Any],
-            iter4: Iterable[Any],
-            iter5: Iterable[Any],
-            iter6: Iterable[Any],
-            /,
-            *iterables: Iterable[Any],
-        ) -> Self: ...
-
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> _S: ...
+if sys.version_info >= (3, 14):
+    @overload
+    def map(func: Callable[[_T1], _S], iterable: Iterable[_T1], /, *, strict: bool = False) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], /, *, strict: bool = False
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        iter5: Iterable[_T5],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[..., _S],
+        iterable: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+        strict: bool = False,
+    ) -> list[_S]: ...
+else:
+    @overload
+    def map(func: Callable[[_T1], _S], iterable: Iterable[_T1], /) -> list[_S]: ...
+    @overload
+    def map(func: Callable[[_T1, _T2], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], /) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        /,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        iter5: Iterable[_T5],
+        /,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[..., _S],
+        iterable: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+    ) -> list[_S]: ...
 
 @overload
 def max(
@@ -1533,17 +1500,10 @@ def pow(base: _SupportsPow3[_E_contra, _M_contra, _T_co], exp: _E_contra, mod: _
 def pow(base: _SupportsSomeKindOfPow, exp: float, mod: None = None) -> Any: ...
 @overload
 def pow(base: _SupportsSomeKindOfPow, exp: complex, mod: None = None) -> complex: ...
-
-@disjoint_base
-class reversed(Generic[_T]):
-    @overload
-    def __new__(cls, sequence: Reversible[_T], /) -> Iterator[_T]: ...
-    @overload
-    def __new__(cls, sequence: SupportsLenAndGetItem[_T], /) -> Iterator[_T]: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> _T: ...
-    def __length_hint__(self) -> int: ...
-
+@overload
+def reversed(sequence: Reversible[_T], /) -> list[_T]: ...
+@overload
+def reversed(sequence: SupportsLenAndGetItem[_T], /) -> list[_T]: ...
 def repr(obj: object, /) -> str: ...
 
 @type_check_only
@@ -1587,97 +1547,78 @@ def vars(object: type, /) -> types.MappingProxyType[str, Any]: ...
 @overload
 def vars(object: Any = ..., /) -> dict[str, Any]: ...
 
-@disjoint_base
-class zip(Generic[_T_co]):
-    if sys.version_info >= (3, 10):
-        @overload
-        def __new__(cls, *, strict: bool = False) -> zip[Any]: ...
-        @overload
-        def __new__(cls, iter1: Iterable[_T1], /, *, strict: bool = False) -> zip[tuple[_T1]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], /, *, strict: bool = False
-        ) -> zip[tuple[_T1, _T2]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /, *, strict: bool = False
-        ) -> zip[tuple[_T1, _T2, _T3]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            /,
-            *,
-            strict: bool = False,
-        ) -> zip[tuple[_T1, _T2, _T3, _T4]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            iter5: Iterable[_T5],
-            /,
-            *,
-            strict: bool = False,
-        ) -> zip[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[Any],
-            iter2: Iterable[Any],
-            iter3: Iterable[Any],
-            iter4: Iterable[Any],
-            iter5: Iterable[Any],
-            iter6: Iterable[Any],
-            /,
-            *iterables: Iterable[Any],
-            strict: bool = False,
-        ) -> zip[tuple[Any, ...]]: ...
-    else:
-        @overload
-        def __new__(cls) -> zip[Any]: ...
-        @overload
-        def __new__(cls, iter1: Iterable[_T1], /) -> zip[tuple[_T1]]: ...
-        @overload
-        def __new__(cls, iter1: Iterable[_T1], iter2: Iterable[_T2], /) -> zip[tuple[_T1, _T2]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /
-        ) -> zip[tuple[_T1, _T2, _T3]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], iter4: Iterable[_T4], /
-        ) -> zip[tuple[_T1, _T2, _T3, _T4]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            iter5: Iterable[_T5],
-            /,
-        ) -> zip[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[Any],
-            iter2: Iterable[Any],
-            iter3: Iterable[Any],
-            iter4: Iterable[Any],
-            iter5: Iterable[Any],
-            iter6: Iterable[Any],
-            /,
-            *iterables: Iterable[Any],
-        ) -> zip[tuple[Any, ...]]: ...
-
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> _T_co: ...
+if sys.version_info >= (3, 10):
+    @overload
+    def zip(*, strict: bool = False) -> list[Any]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], /, *, strict: bool = False) -> list[tuple[_T1]]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], iter2: Iterable[_T2], /, *, strict: bool = False) -> list[tuple[_T1, _T2]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /, *, strict: bool = False
+    ) -> list[tuple[_T1, _T2, _T3]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[tuple[_T1, _T2, _T3, _T4]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        iter5: Iterable[_T5],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+        strict: bool = False,
+    ) -> list[tuple[Any, ...]]: ...
+else:
+    @overload
+    def zip() -> list[Any]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], /) -> list[tuple[_T1]]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], iter2: Iterable[_T2], /) -> list[tuple[_T1, _T2]]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /) -> list[tuple[_T1, _T2, _T3]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], iter4: Iterable[_T4], /
+    ) -> list[tuple[_T1, _T2, _T3, _T4]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], iter4: Iterable[_T4], iter5: Iterable[_T5], /
+    ) -> list[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+    ) -> list[tuple[Any, ...]]: ...
 
 if sys.version_info >= (3, 10):
     from types import EllipsisType, NotImplementedType

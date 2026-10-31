@@ -1,6 +1,5 @@
 ---
 source: crates/monty-type-checking/tests/main.rs
-assertion_line: 359
 expression: actual
 ---
 reveal_types.py:4:13: info[revealed-type] Revealed type: `None`
@@ -17,9 +16,9 @@ reveal_types.py:20:13: info[revealed-type] Revealed type: `dict[int, int]`
 reveal_types.py:21:13: info[revealed-type] Revealed type: `set[int]`
 reveal_types.py:22:13: info[revealed-type] Revealed type: `frozenset[int]`
 reveal_types.py:23:13: info[revealed-type] Revealed type: `range`
-reveal_types.py:26:13: info[revealed-type] Revealed type: `enumerate[int]`
-reveal_types.py:27:13: info[revealed-type] Revealed type: `Iterator[int]`
-reveal_types.py:28:13: info[revealed-type] Revealed type: `zip[tuple[int, int]]`
+reveal_types.py:26:13: info[revealed-type] Revealed type: `list[tuple[int, int]]`
+reveal_types.py:27:13: info[revealed-type] Revealed type: `list[int]`
+reveal_types.py:28:13: info[revealed-type] Revealed type: `list[tuple[int, int]]`
 reveal_types.py:31:13: info[revealed-type] Revealed type: `slice[Literal[1], Literal[2], Any]`
 reveal_types.py:34:13: info[revealed-type] Revealed type: `BaseException`
 reveal_types.py:35:13: info[revealed-type] Revealed type: `Exception`
@@ -49,3 +48,5 @@ reveal_types.py:64:13: info[revealed-type] Revealed type: `time`
 reveal_types.py:65:13: info[revealed-type] Revealed type: `datetime`
 reveal_types.py:66:13: info[revealed-type] Revealed type: `timedelta`
 reveal_types.py:67:13: info[revealed-type] Revealed type: `timezone`
+reveal_types.py:68:13: info[revealed-type] Revealed type: `list[int]`
+reveal_types.py:69:13: info[revealed-type] Revealed type: `list[str]`

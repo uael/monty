@@ -1004,3 +1004,20 @@ try:
     assert False, 're.subn(pattern) should raise TypeError'
 except TypeError as e:
     assert str(e) == "subn() missing 2 required positional arguments: 'repl' and 'string'", f're.subn missing two: {e}'
+# === re.sub() replacement escapes decode as CPython parses a template ===
+assert re.sub('x', r'\n', 'axb') == 'a\nb', 'raw \\n becomes a newline'
+assert re.sub('x', r'\t\r\a\b\f\v', 'x') == '\t\r\a\b\f\v', 'each letter escape decodes'
+assert re.sub('x', r'\\n', 'x') == '\\n', 'an escaped backslash stays literal'
+assert re.sub('x', r'\.', 'x') == '\\.', 'a backslash before punctuation stays'
+assert re.compile('(x)').sub(r'[\1]\n', 'x') == '[x]\n', 'a group and an escape in one template'
+assert re.subn('x', r'\n', 'xx') == ('\n\n', 2), 'subn decodes the escapes too'
+try:
+    re.sub('x', r'a\q', 'x')
+    assert False, 'an unknown letter escape should raise'
+except re.error as e:
+    assert str(e) == 'bad escape \\q at position 1', f'bad escape: {e}'
+try:
+    re.sub('x', 'ab\\', 'x')
+    assert False, 'a trailing backslash should raise'
+except re.error as e:
+    assert str(e) == 'bad escape (end of pattern) at position 2', f'trailing backslash: {e}'

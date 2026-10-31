@@ -159,3 +159,7 @@ def cached_takes_int(n: int) -> int:
 cached_takes_int('nope')
 cached_takes_int(1, 2)
 cached_takes_int(n='nope')
+
+# Monty gives a list for filter and the like, which next() refuses as CPython refuses a list.
+next(filter(None, [1]))
+next(map(str, [1]))
