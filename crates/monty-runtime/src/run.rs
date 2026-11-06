@@ -389,7 +389,8 @@ fn run_repl(file_path: &str, code: &str, tracker: ResourceTracker, mut host: Hos
 
         let detected_mode = detect_repl_continuation_mode(&pending_snippet);
         match detected_mode {
-            ReplContinuationMode::Complete => {
+            // An invalid snippet runs too, so its SyntaxError shows at once.
+            ReplContinuationMode::Complete | ReplContinuationMode::Invalid => {
                 if continuation_mode == ReplContinuationMode::IncompleteBlock {
                     continue;
                 }

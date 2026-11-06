@@ -1236,11 +1236,15 @@ impl ReplResolveFutures {
 // ReplContinuationMode — public utility for interactive input collection
 // ---------------------------------------------------------------------------
 
-/// Parse-derived continuation state for interactive REPL input collection.
+/// Parse-derived continuation state for interactive REPL input collection: one
+/// answer for a source, as `codeop` gives for CPython, whether it is complete,
+/// incomplete, or invalid.
 ///
 /// `monty-runtime` uses this to decide whether to execute the buffered snippet
 /// immediately, keep collecting continuation lines, or require a terminating
-/// blank line for block statements (`if:`, `def:`, etc.).
+/// blank line for block statements (`if:`, `def:`, etc.). A host that streams
+/// source, as the text a model writes, uses it to run a prefix only once it is
+/// complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplContinuationMode {
     /// The current snippet is syntactically complete and can run now.
@@ -1250,6 +1254,9 @@ pub enum ReplContinuationMode {
     /// The snippet opened an indented block and should wait for a trailing blank
     /// line before execution, matching CPython interactive behavior.
     IncompleteBlock,
+    /// The snippet holds a syntax error that no continuation line can mend, so
+    /// feeding it raises `SyntaxError` at once.
+    Invalid,
 }
 
 /// Detects whether REPL source is complete or needs more input.
@@ -1259,13 +1266,14 @@ pub enum ReplContinuationMode {
 /// - Decorators continue until their class or function definition arrives.
 /// - Clause headers (`if:`, `def:`, etc.) require an indented body and then a
 ///   terminating blank line before execution.
-/// - All other parse outcomes are treated as complete (either valid code or a
-///   syntax error that should be shown immediately).
+/// - Source that parses is complete.
+/// - Any other syntax error is invalid: no later line mends it, and feeding the
+///   source shows it at once.
 #[must_use]
 pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
-    // Complete because feeding it raises the SyntaxError; parsing it here would grow the stack unguarded.
+    // Invalid because feeding it raises the SyntaxError; parsing it here would grow the stack unguarded.
     if !source_within_nesting_bound(source, SOURCE_SCAN_THRESHOLD) {
-        return ReplContinuationMode::Complete;
+        return ReplContinuationMode::Invalid;
     }
     let Err(error) = parse_module(source) else {
         return ReplContinuationMode::Complete;
@@ -1284,7 +1292,7 @@ pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
             {
                 ReplContinuationMode::IncompleteImplicit
             } else {
-                ReplContinuationMode::Complete
+                ReplContinuationMode::Invalid
             }
         }
         ParseErrorType::Lexical(
@@ -1303,7 +1311,7 @@ pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
         ParseErrorType::Lexical(LexicalErrorType::UnclosedStringError) if starts_with_triple_quote(error_source) => {
             ReplContinuationMode::IncompleteImplicit
         }
-        _ => ReplContinuationMode::Complete,
+        _ => ReplContinuationMode::Invalid,
     }
 }
 

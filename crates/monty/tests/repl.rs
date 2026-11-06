@@ -300,6 +300,21 @@ fn repl_heap_mutations_are_not_replayed() {
 }
 
 #[test]
+fn repl_calls_a_triple_quote_incomplete_through_a_paragraph_at_the_left_edge() {
+    // A paragraph after a blank line inside a triple quote starts at the left
+    // edge, and the string is still open, as text that a model streams holds it.
+    let open = "close(\"\"\"My take:\n\nSecond at the left edge\n";
+    assert_eq!(
+        detect_repl_continuation_mode(open),
+        ReplContinuationMode::IncompleteImplicit
+    );
+    assert_eq!(
+        detect_repl_continuation_mode(&format!("{open}end\"\"\")\n")),
+        ReplContinuationMode::Complete
+    );
+}
+
+#[test]
 fn repl_detects_continuation_mode_for_common_cases() {
     assert_eq!(
         detect_repl_continuation_mode("value = 1\n"),
@@ -327,10 +342,10 @@ fn repl_detects_continuation_mode_for_common_cases() {
             "source: {source:?}",
         );
     }
-    for source in ["value = 'first line\n", "value = \"first line\n"] {
+    for source in ["value = 'first line\n", "value = \"first line\n", "x = )\n"] {
         assert_eq!(
             detect_repl_continuation_mode(source),
-            ReplContinuationMode::Complete,
+            ReplContinuationMode::Invalid,
             "source: {source:?}",
         );
     }
@@ -348,11 +363,11 @@ fn repl_detects_continuation_mode_for_common_cases() {
     );
     assert_eq!(
         detect_repl_continuation_mode("@decorator\nvalue = 1"),
-        ReplContinuationMode::Complete
+        ReplContinuationMode::Invalid
     );
     assert_eq!(
         detect_repl_continuation_mode("@decorator\nvalue = 1\n"),
-        ReplContinuationMode::Complete
+        ReplContinuationMode::Invalid
     );
     assert_eq!(
         detect_repl_continuation_mode("@decorator\nclass SearchResult:\n"),
@@ -366,7 +381,7 @@ fn repl_detects_continuation_mode_for_common_cases() {
         detect_repl_continuation_mode("@decorator\nasync def search():\n"),
         ReplContinuationMode::IncompleteBlock
     );
-    assert_eq!(detect_repl_continuation_mode("@\n"), ReplContinuationMode::Complete);
+    assert_eq!(detect_repl_continuation_mode("@\n"), ReplContinuationMode::Invalid);
 }
 
 #[test]
