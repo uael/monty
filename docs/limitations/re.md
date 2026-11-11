@@ -95,6 +95,12 @@ representation does not carry them.
 These valid CPython patterns raise `re.PatternError` with a message from `fancy-regex`:
 
 - A quantifier on a lookaround or an empty group, such as `(?=a)*` or `(?:)*`.
+
+The engine also differs in these results:
+
+- An empty match just after a match does not count, as in the Rust `regex` crate: `re.sub('x*', '-', 'abxd')`
+    gives `'-a-b-d-'` and `re.findall('x*', 'axb')` gives `['', 'x', '']`, where CPython gives `'-a-b--d-'` and
+    `['', 'x', '', '']`.
 - Patterns whose *compiled* form is very large, e.g. huge counted repeats
     like `a{5000000}` (`fancy-regex`/`regex` enforce a compiled-size limit).
 

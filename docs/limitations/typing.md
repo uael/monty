@@ -120,6 +120,7 @@ Divergences:
 - **A function's annotations are re-evaluated on every call**, including any side effects, where CPython evaluates them once (on `__annotations__`) and caches the result; a class's are evaluated once and cached.
     A builtin rebound after the first call (`exec('int = str')`) is therefore seen by the next call for a function.
 - **Modules record no annotations**, so `get_type_hints(module)` is `{}`.
+- **A class gives its own annotations alone**, where CPython adds those of each class of its `__mro__`.
 - **Evaluation errors show a `<string>` frame** in the traceback, where CPython shows its `typing` / `annotationlib` frames.
 - **Host functions and host classes** return the hints the host answers with, unevaluated in the sandbox; see [host-values.md](host-values.md#type-hints).
     The host evaluates them in `VALUE` form whatever the `format`: `FORWARDREF` raises where CPython would return a `ForwardRef`, and `STRING` raises `NotImplementedError`.
@@ -234,9 +235,8 @@ Divergences:
 repeated `(type, value)` pair, compares as a set of them, and takes part in `|`. Divergences:
 
 - **Error messages name the type with its module.** `Literal[1] < Literal[2]` raises
-    `TypeError: '<' not supported between instances of 'typing._LiteralGenericAlias' and ...`, and an unknown
-    attribute `AttributeError: 'typing._LiteralGenericAlias' object has no attribute 'foo'`, where CPython prints
-    `'_LiteralGenericAlias'` and `AttributeError: foo`.
+    `TypeError: '<' not supported between instances of 'typing._LiteralGenericAlias' and ...`, where CPython prints
+    `'_LiteralGenericAlias'`. An unknown attribute raises `AttributeError: foo`, as in CPython.
 - **No attributes beyond `__origin__`, `__args__`, `__parameters__`, `__name__` and `__qualname__`.** CPython also
     gives the other attributes of `typing._GenericAlias`, such as `copy_with` and `__mro_entries__`.
 - **Not iterable.** `iter(Literal['a'])` raises `TypeError` where CPython yields `typing.Unpack[Literal['a']]`.
