@@ -169,6 +169,21 @@ pub(crate) trait ExcTypeExt: Sized {
         Self::type_error(format!("typing.Optional requires a single type. Got {repr}."))
     }
 
+    /// Creates the TypeError `isinstance()` and `issubclass()` raise for a
+    /// `typing` alias such as `Literal['a']`, which CPython's `typing` refuses
+    /// to check against.
+    #[must_use]
+    fn type_error_subscripted_generic_check() -> RunError {
+        Self::type_error("Subscripted generics cannot be used with class and instance checks")
+    }
+
+    /// Creates the TypeError for calling a `typing` form or an alias of one
+    /// (`Literal['a']()`), `form` being its name: `Cannot instantiate typing.Literal`.
+    #[must_use]
+    fn type_error_cannot_instantiate(form: &str) -> RunError {
+        Self::type_error(format!("Cannot instantiate {form}"))
+    }
+
     /// Creates the TypeError `isinstance()` raises for a `types.GenericAlias`
     /// second argument, which CPython refuses to check against.
     #[must_use]
@@ -229,6 +244,18 @@ pub(crate) trait ExcTypeExt: Sized {
     #[must_use]
     fn cannot_reuse_already_awaited_coroutine() -> RunError {
         SimpleException::new_msg(ExcType::RuntimeError, "cannot reuse already awaited coroutine").into()
+    }
+
+    /// Creates a `TypeError` for item deletion on a type that does not support it.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object doesn't support item deletion`
+    #[must_use]
+    fn type_error_no_item_deletion(type_: &str) -> RunError {
+        SimpleException::new_msg(
+            ExcType::TypeError,
+            format!("'{type_}' object doesn't support item deletion"),
+        )
+        .into()
     }
 
     /// `ValueError: generator already executing` — a generator advanced from
@@ -1167,6 +1194,19 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::TypeError, format!("cannot convert '{type_}' object to bytes")).into()
     }
 
+    /// Creates the `AttributeError` a write to a read-only `@property` raises.
+    ///
+    /// Matches CPython's format:
+    /// `AttributeError: property '{attr}' of '{class}' object has no setter`
+    #[must_use]
+    fn attribute_error_no_setter(attr: &str, class: &str) -> RunError {
+        SimpleException::new_msg(
+            ExcType::AttributeError,
+            format!("property '{attr}' of '{class}' object has no setter"),
+        )
+        .into()
+    }
+
     /// Creates a TypeError for calling a non-callable type.
     ///
     /// Matches CPython's format: `TypeError: cannot create '{type}' instances`
@@ -1969,7 +2009,11 @@ pub(crate) trait ExcTypeExt: Sized {
             // qualified "collections.deque", so this can't share the branch below.
             format!("can only concatenate deque (not \"{rhs_name}\") to deque")
         } else if (op == "+" || op == "+=") && matches!(lhs_type, Type::Str | Type::List) {
-            format!("can only concatenate {lhs_name} (not \"{rhs_name}\") to {lhs_name}")
+            // Hardcoded like the branch above, because CPython names the builtin
+            // here even when the left operand is an instance of a class that
+            // inherits it: `Act('x') + 1` reports `can only concatenate str`.
+            let builtin = if matches!(lhs_type, Type::Str) { "str" } else { "list" };
+            format!("can only concatenate {builtin} (not \"{rhs_name}\") to {builtin}")
         } else {
             format!("unsupported operand type(s) for {op}: '{lhs_name}' and '{rhs_name}'")
         };
@@ -2158,6 +2202,42 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(
             ExcType::TypeError,
             "The fill character must be exactly one character long",
+        )
+        .into()
+    }
+
+    /// Creates the `GeneratorExit` that `close()` throws into a generator.
+    #[must_use]
+    fn generator_exit() -> RunError {
+        SimpleException::new_none(ExcType::GeneratorExit).into()
+    }
+
+    /// Creates the `RuntimeError` for a generator that yields while closing.
+    ///
+    /// Matches CPython's format: `RuntimeError: generator ignored GeneratorExit`
+    #[must_use]
+    fn runtime_error_generator_ignored_exit() -> RunError {
+        SimpleException::new_msg(ExcType::RuntimeError, "generator ignored GeneratorExit").into()
+    }
+
+    /// Creates the `ValueError` for resuming a generator that is running.
+    ///
+    /// Matches CPython's format: `ValueError: generator already executing`
+    #[must_use]
+    fn value_error_generator_running() -> RunError {
+        SimpleException::new_msg(ExcType::ValueError, "generator already executing").into()
+    }
+
+    /// Creates the `TypeError` for `send()`ing a value to an unstarted generator.
+    ///
+    /// Matches CPython's format:
+    /// `TypeError: can't send non-None value to a just-started generator`,
+    /// which names a coroutine when that is what was sent to.
+    #[must_use]
+    fn type_error_send_to_just_started(kind: &str) -> RunError {
+        SimpleException::new_msg(
+            ExcType::TypeError,
+            format!("can't send non-None value to a just-started {kind}"),
         )
         .into()
     }
@@ -2677,7 +2757,19 @@ impl ExcTypeExt for ExcType {
 #[derive(Debug, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SimpleException {
     exc_type: ExcType,
-    arg: Option<String>,
+    /// Boxed, with `user_type` and `chain`, because `RunError` carries this type through every fallible
+    /// interpreter call, and clippy's `result_large_err` is what holds that size down.
+    arg: Option<Box<str>>,
+    /// The name of the sandbox class this was raised from, when it was raised
+    /// from one. `exc_type` stays that class's builtin ancestor, so every
+    /// handler and message keeps working; this only changes what a traceback
+    /// and a `repr()` call the exception.
+    ///
+    /// Boxed because `RunError` carries this type through every fallible
+    /// interpreter call, and clippy's `result_large_err` is what holds that
+    /// size down.
+    #[serde(default)]
+    user_type: Option<Box<str>>,
     /// Structured payload (e.g. unicode-error constructor fields), carried
     /// through catch/re-raise so it reaches the public `MontyException` when
     /// the exception escapes the sandbox.
@@ -2699,6 +2791,7 @@ impl Clone for SimpleException {
             arg: self.arg.clone(),
             data: self.data.clone(),
             chain: None,
+            user_type: self.user_type.clone(),
         }
     }
 }
@@ -2728,8 +2821,9 @@ impl From<MontyException> for SimpleException {
     fn from(mut exc: MontyException) -> Self {
         Self {
             exc_type: exc.exc_type(),
+            user_type: exc.user_type().map(|name| name.to_owned().into_boxed_str()),
             data: exc.take_data(),
-            arg: exc.into_message(),
+            arg: exc.into_message().map(String::into_boxed_str),
             chain: None,
         }
     }
@@ -2741,10 +2835,18 @@ impl SimpleException {
     pub fn new(exc_type: ExcType, arg: Option<String>) -> Self {
         Self {
             exc_type,
-            arg,
+            arg: arg.map(String::into_boxed_str),
+            user_type: None,
             data: ExcData::None,
             chain: None,
         }
+    }
+
+    /// Names the sandbox class this exception was raised from.
+    #[must_use]
+    pub fn with_user_type(mut self, name: String) -> Self {
+        self.user_type = Some(name.into_boxed_str());
+        self
     }
 
     /// Creates a new exception with the given type and argument message.
@@ -2752,7 +2854,8 @@ impl SimpleException {
     pub fn new_msg(exc_type: ExcType, arg: impl fmt::Display) -> Self {
         Self {
             exc_type,
-            arg: Some(arg.to_string()),
+            arg: Some(arg.to_string().into_boxed_str()),
+            user_type: None,
             data: ExcData::None,
             chain: None,
         }
@@ -2764,6 +2867,7 @@ impl SimpleException {
         Self {
             exc_type,
             arg: None,
+            user_type: None,
             data: ExcData::None,
             chain: None,
         }
@@ -2782,8 +2886,8 @@ impl SimpleException {
     }
 
     #[must_use]
-    pub fn arg(&self) -> Option<&String> {
-        self.arg.as_ref()
+    pub fn arg(&self) -> Option<&str> {
+        self.arg.as_deref()
     }
 
     /// str() for an exception
@@ -2792,7 +2896,7 @@ impl SimpleException {
         match (self.exc_type, &self.arg) {
             // KeyError expecificaly uses repr of the key for str(exc)
             (ExcType::KeyError, Some(exc)) => StringRepr(exc).to_string(),
-            (_, Some(arg)) => arg.to_owned(),
+            (_, Some(arg)) => arg.to_string(),
             (_, None) => String::new(),
         }
     }
@@ -2835,7 +2939,7 @@ impl SimpleException {
 
     /// Returns the exception formatted as Python would repr it.
     pub fn py_repr_fmt(&self, f: &mut impl Write) -> fmt::Result {
-        let type_str: &'static str = self.exc_type.into();
+        let type_str: &str = self.user_type.as_deref().unwrap_or_else(|| self.exc_type.into());
         write!(f, "{type_str}(")?;
 
         if let Some(arg) = &self.arg {
@@ -3031,7 +3135,12 @@ impl ExceptionRaise {
             traceback.push(*frame);
         }
 
-        MontyException::with_traceback(self.exc.exc_type, self.exc.arg, traceback).with_data(self.exc.data)
+        let exc = MontyException::with_traceback(self.exc.exc_type, self.exc.arg.map(String::from), traceback)
+            .with_data(self.exc.data);
+        match self.exc.user_type {
+            Some(name) => exc.with_user_type(name.into_string()),
+            None => exc,
+        }
     }
 }
 
@@ -3149,6 +3258,12 @@ impl RunError {
     /// Matching only `Exc` prevents uncatchable errors being mistaken for exhaustion.
     pub(crate) fn is_stop_iteration(&self) -> bool {
         matches!(self, Self::Exc(raise) if matches!(raise.exc.exc_type(), ExcType::StopIteration))
+    }
+
+    /// Whether this is the `GeneratorExit` a `close()` threw in, which is how
+    /// a generator ends well rather than an error to report.
+    pub(crate) fn is_generator_exit(&self) -> bool {
+        matches!(self, Self::Exc(raise) if matches!(raise.exc.exc_type(), ExcType::GeneratorExit))
     }
 
     /// Wraps a host exception so it builds a traceback but bypasses `except`.

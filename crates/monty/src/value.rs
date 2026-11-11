@@ -29,7 +29,7 @@ use crate::{
         bytes::PyBytes,
         decimal, host_class_type,
         inline_str::InlineStr,
-        instance::{class_defines, instance_getattr, instance_str, instance_user_eq},
+        instance::{class_defines, class_name, instance_getattr, instance_str, instance_user_eq},
         long_int::{
             PyInt, bigint_cmp_f64, bigint_cmp_i64, bigint_divmod_tuple, bigint_eq_f64, bigint_eq_i64, i64_cmp_f64,
         },
@@ -483,7 +483,12 @@ impl<'h> PyTrait<'h> for Value {
             // the bytes into a fresh allocation.
             Self::InternString(string_id) => Ok(Self::InternString(*string_id)),
             Self::InlineString(text) => Ok(Self::InlineString(*text)),
-            Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Str(_)) => Ok(self.clone_with_heap(vm.heap)),
+            // A string carrying a class is an instance of a `class ...(str)`, and
+            // `str()` of one is the plain string of the same characters, so it
+            // falls through to the copy `HeapRead<Str>::py_str` makes.
+            Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Str(value) if value.class().is_none()) => {
+                Ok(self.clone_with_heap(vm.heap))
+            }
             // Instances dispatch to a user `__str__`/`__repr__` (needs the heap id).
             Self::Ref(id) if matches!(vm.heap.get(*id), HeapData::Instance(_)) => instance_str(*id, vm),
             Self::Ref(id) => PyValue::from_heap(*id, vm.heap).py_str(vm),
@@ -790,6 +795,15 @@ impl<'h> PyTrait<'h> for Value {
         }
     }
 
+    fn py_delitem(&mut self, key: Self, vm: &mut VM<'_>) -> RunResult<()> {
+        if let Self::Ref(id) = self {
+            PyValue::from_heap(*id, vm.heap).py_delitem(key, vm)
+        } else {
+            key.drop_with(vm);
+            Err(ExcType::type_error_no_item_deletion(&self.py_type_name(vm)))
+        }
+    }
+
     fn py_is_iterator(&self, vm: &VM<'_>) -> bool {
         // No immediate value is an iterator; interned `str`/`bytes` are iterable
         // but, as in CPython, are not their own iterators.
@@ -989,6 +1003,10 @@ impl Value {
         };
         let name = match heap.get(*heap_id) {
             HeapData::NamedTuple(nt) => nt.name_either(),
+            // An instance of a class that inherits `str` is a string that
+            // carries its class, and CPython names that class in a message
+            // about the object (`'Act' object has no attribute 'nope'`).
+            HeapData::Str(value) => return value.class().map(|id| class_name(id, heap, interns)),
             HeapData::HostClass(hc) => host_class_type(heap, hc.class_id()).name_either(),
             // A Python class in CPython, so messages carry the bare name and
             // only `repr(type(x))` the module-qualified one.
@@ -1128,11 +1146,6 @@ impl Value {
     /// Rust consumers which cannot yield must explicitly require synchronous completion.
     pub fn py_iter(&self, vm: &mut VM<'_>) -> RunResult<CallResult> {
         <Self as PyTrait<'_>>::py_iter(self, vm)
-    }
-
-    /// Advances this value synchronously for native iterator consumers.
-    pub(crate) fn py_next(&mut self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
-        <Self as PyTrait<'_>>::py_next(self, vm)
     }
 
     /// Converts an owned value into its Python iterator and releases the original reference.
@@ -1306,6 +1319,16 @@ impl Value {
             PyValue::from_heap(*heap_id, vm.heap).py_set_attr(name, value, vm)
         } else {
             value.drop_with(vm);
+            let type_name = self.py_type_name(vm);
+            Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
+        }
+    }
+
+    /// Removes an attribute (`del obj.attr`).
+    pub fn py_del_attr(&self, name: &EitherStr, vm: &mut VM<'_>) -> RunResult<()> {
+        if let Self::Ref(heap_id) = self {
+            PyValue::from_heap(*heap_id, vm.heap).py_del_attr(name, vm)
+        } else {
             let type_name = self.py_type_name(vm);
             Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
         }

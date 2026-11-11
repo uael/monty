@@ -1,54 +1,61 @@
 # Standard library modules
 
-Monty provides a fixed set of stdlib modules.
-Other imports ask the host, which answers with a [host module](#host-modules) or the module's
-[`.py` file](#modules-from-files) from the working directory, and raise `ModuleNotFoundError` if it has neither.
-There is no `sys.path` or site-packages.
+Monty provides a fixed set of stdlib modules. Other imports read `sys.modules` first, then ask the host, which answers with a [host module](#host-modules) or the module's [`.py` file](#modules-from-files) from the working directory, and raise `ModuleNotFoundError` if it has neither.
+There is no `sys.path` or site-packages; sandboxed code cannot load additional modules itself, so a module of
+your own reaches the sandbox by being put in `sys.modules`, served as a host module or read from a file.
 
 `os.path` (also importable as `posixpath`) is the only submodule.
 
-Every bundled import builds a fresh module object; there is no `sys.modules` cache, except for
-[modules from files](#modules-from-files).
-Thus `import math as a; import math as b` leaves `a is not b`, and changes such as `sys.argv.append(...)` do not
-survive the next import.
-Assigning a bundled module's attributes raises `AttributeError`, as in `sys.x = 1`.
-[Host modules](#host-modules) are module objects too, bound afresh by every import.
-The one exception is `random`'s module-level generator, which is session
-state: a `random.seed(...)` is still in effect after a later `import random`,
-in the next feed, and after a dump (see [random.md](random.md)).
+`sys.modules` is the session's own table, and `import` answers from it first, as
+in CPython. So a module is built once and every later import of that name finds
+the same object, across feeds and across a dump. Binding a name in it is what
+makes `import <name>` work for anything else: `sys.modules['x'] = obj` then
+`import x` binds `obj`, whatever `obj` is, exactly as CPython does.
+
+`import` is the only thing that reads the table. `__import__` and `importlib`
+are absent, a dotted name is not split into parent packages, and nothing else
+(a `from x import y`, a submodule, a reload) consults or writes it.
+Assigning a bundled module's attributes raises `AttributeError`, as in `sys.x = 1`, so
+state is shared through a module a program built itself rather than through a
+stdlib one.
 
 ## Modules available
 
-| Module          | See                                  |
-| --------------- | ------------------------------------ |
-| `annotationlib` | [annotationlib.md](annotationlib.md) |
-| `asyncio`       | [asyncio.md](asyncio.md)             |
-| `base64`        | [base64.md](base64.md)               |
-| `binascii`      | [base64.md](base64.md)               |
-| `bisect`        | [bisect.md](bisect.md)               |
-| `collections`   | [collections.md](collections.md)     |
-| `copy`          | [copy.md](copy.md)                   |
-| `csv`           | [csv.md](csv.md)                     |
-| `dataclasses`   | [dataclasses.md](dataclasses.md)     |
-| `datetime`      | [datetime.md](datetime.md)           |
-| `decimal`       | [decimal.md](decimal.md)             |
-| `fnmatch`       | [fnmatch.md](fnmatch.md)             |
-| `functools`     | [functools.md](functools.md)         |
-| `hashlib`       | [hashlib.md](hashlib.md)             |
-| `itertools`     | [itertools.md](itertools.md)         |
-| `json`          | [json.md](json.md)                   |
-| `math`          | [math.md](math.md)                   |
-| `os`            | [os.md](os.md)                       |
-| `os.path`       | [os.md](os.md)                       |
-| `pathlib`       | [pathlib.md](pathlib.md)             |
-| `posixpath`     | [os.md](os.md)                       |
-| `random`        | [random.md](random.md)               |
-| `re`            | [re.md](re.md)                       |
-| `sys`           | [sys.md](sys.md)                     |
-| `time`          | [time.md](time.md)                   |
-| `tomllib`       | [tomllib.md](tomllib.md)             |
-| `typing`        | [typing.md](typing.md)               |
-| `unicodedata`   | [unicodedata.md](unicodedata.md)     |
+| Module               | See                                            |
+| -------------------- | ---------------------------------------------- |
+| `annotationlib`      | [annotationlib.md](annotationlib.md)           |
+| `ast`                | [ast.md](ast.md)                               |
+| `asyncio`            | [asyncio.md](asyncio.md)                       |
+| `base64`             | [base64.md](base64.md)                         |
+| `binascii`           | [base64.md](base64.md)                         |
+| `bisect`             | [bisect.md](bisect.md)                         |
+| `builtins`           | [builtins.md](builtins.md)                     |
+| `collections`        | [collections.md](collections.md)               |
+| `collections.abc`    | [collections.md](collections.md)               |
+| `contextvars`        | [contextvars.md](contextvars.md)               |
+| `copy`               | [copy.md](copy.md)                             |
+| `csv`                | [csv.md](csv.md)                               |
+| `dataclasses`        | [dataclasses.md](dataclasses.md)               |
+| `datetime`           | [datetime.md](datetime.md)                     |
+| `decimal`            | [decimal.md](decimal.md)                       |
+| `fnmatch`            | [fnmatch.md](fnmatch.md)                       |
+| `functools`          | [functools.md](functools.md)                   |
+| `hashlib`            | [hashlib.md](hashlib.md)                       |
+| `itertools`          | [itertools.md](itertools.md)                   |
+| `json`               | [json.md](json.md)                             |
+| `math`               | [math.md](math.md)                             |
+| `os`                 | [os.md](os.md)                                 |
+| `os.path`            | [os.md](os.md)                                 |
+| `pathlib`            | [pathlib.md](pathlib.md)                       |
+| `posixpath`          | [os.md](os.md)                                 |
+| `random`             | [random.md](random.md)                         |
+| `re`                 | [re.md](re.md)                                 |
+| `string.templatelib` | [string_templatelib.md](string_templatelib.md) |
+| `sys`                | [sys.md](sys.md)                               |
+| `time`               | [time.md](time.md)                             |
+| `tomllib`            | [tomllib.md](tomllib.md)                       |
+| `typing`             | [typing.md](typing.md)                         |
+| `unicodedata`        | [unicodedata.md](unicodedata.md)               |
 
 `collections` is importable and exposes `deque`, `Counter`, `defaultdict`,
 and `namedtuple`; `OrderedDict`, `ChainMap`, and the `UserDict` / `UserList`

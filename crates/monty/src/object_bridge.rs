@@ -21,7 +21,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{RunError, RunResult, SimpleException},
-    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput},
+    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, Held},
     modules::dataclasses,
     types::{
         Complex, HostClass, HostClassType, LongInt, Module, NamedTuple, OpenFile, Path, PyTrait, TimeZone, Type,
@@ -30,7 +30,8 @@ use crate::{
         date as date_type, datetime as datetime_type, decimal as decimal_type,
         decimal::py as py_decimal,
         dict::Dict,
-        instance::class_name,
+        generator::GeneratorKind,
+        instance::{Instance, class_name},
         list::List,
         set::{FrozenSet, Set},
         str::allocate_string,
@@ -208,7 +209,7 @@ impl GraphExporter {
             Value::Builtin(Builtins::Function(f)) => MontyNode::BuiltinFunction(*f),
             #[cfg(feature = "memory-model-checks")]
             Value::Dereferenced => panic!("Dereferenced found while exporting a value"),
-            _ => self.repr_node(value, vm),
+            _ => self.handle_node(value, vm),
         };
         self.push_node(node)
     }
@@ -224,6 +225,11 @@ impl GraphExporter {
         // A host class's type object *is* its shared class node.
         if matches!(vm.heap.get(id), HeapData::HostClassType(_)) {
             return self.host_class_node(id, vm);
+        }
+        // A session that holds handles gives a sandbox class as its type
+        // node, which it holds, so the host can call it.
+        if vm.heap.holds_handles() && matches!(vm.heap.get(id), HeapData::Class(_)) {
+            return self.sandbox_class_node(id, vm);
         }
         if self.in_progress.contains(&id) {
             let placeholder = match vm.heap.get(id) {
@@ -484,7 +490,10 @@ impl GraphExporter {
                     MontyNode::Repr(m.get(vm.heap).repr(vm.interns))
                 }
             }
-            HeapReadOutput::Coroutine(coro) => {
+            // A coroutine crosses without the address its `repr()` carries, so
+            // the same call gives a host the same node twice. A generator has
+            // always crossed as its `repr()` and still does.
+            HeapReadOutput::Generator(coro) if coro.get(vm.heap).kind == GeneratorKind::Coroutine => {
                 let func_id = coro.get(vm.heap).func_id;
                 let func = vm.interns.get_function(func_id);
                 let name = vm.interns.get_str(func.name.name_id);
@@ -513,8 +522,23 @@ impl GraphExporter {
                     is_async: function.is_async(),
                 }
             }
-            _ => self.repr_node(value, vm),
+            _ => self.handle_node(value, vm),
         }
+    }
+
+    /// A value with no data form as the handle its session holds it under, when
+    /// the session holds handles; any other value, or any value of a session that
+    /// holds none, as its `repr()`.
+    fn handle_node(&mut self, value: &Value, vm: &mut VM<'_>) -> MontyNode {
+        if let Some(held) = Held::of(value)
+            && let Some(id) = vm.heap.hold(held, None)
+        {
+            return MontyNode::Handle {
+                id,
+                type_name: value.py_type_name(vm).into_owned(),
+            };
+        }
+        self.repr_node(value, vm)
     }
 
     /// Converts a value to its repr node, falling back to a descriptive error
@@ -559,9 +583,11 @@ impl GraphExporter {
         if let Some(node_id) = self.memo.get(&class_id) {
             return *node_id;
         }
+        let id = vm.heap.boundary_uuid(class_id);
+        vm.heap.hold(Held::Ref(class_id), Some(id));
         let node = MontyNode::ClassType(Box::new(ClassTypeNode {
             name: class_name(class_id, vm.heap, vm.interns).into_owned(),
-            id: vm.heap.boundary_uuid(class_id),
+            id,
             host_defined: false,
             is_dataclass: dataclasses::is_dataclass_class(class_id, vm),
             attrs: Vec::new(),
@@ -668,6 +694,12 @@ impl MontyTypeExt for MontyType {
     /// both matches are exhaustive so the compiler enforces totality.
     fn to_internal(&self) -> Type {
         match self {
+            Self::TypeAliasType => Type::TypeAliasType,
+            Self::Template => Type::Template,
+            Self::Interpolation => Type::Interpolation,
+            Self::ContextVar => Type::ContextVar,
+            Self::ContextVarToken => Type::ContextVarToken,
+            Self::EventLoop => Type::EventLoop,
             Self::Ellipsis => Type::Ellipsis,
             Self::NotImplementedType => Type::NotImplementedType,
             Self::Type => Type::Type,
@@ -723,6 +755,7 @@ impl MontyTypeExt for MontyType {
             Self::Partial => Type::Partial,
             Self::GenericAlias => Type::GenericAlias,
             Self::Union => Type::Union,
+            Self::LiteralGenericAlias => Type::LiteralGenericAlias,
             Self::LruCacheWrapper => Type::LruCacheWrapper,
             Self::Tuple => Type::Tuple,
             Self::NamedTuple => Type::NamedTuple,
@@ -763,6 +796,12 @@ impl MontyTypeExt for MontyType {
     /// routes a sandbox class to [`GraphExporter::sandbox_class_node`] first.
     fn from_internal_static(ty: Type) -> Option<Self> {
         Some(match ty {
+            Type::TypeAliasType => Self::TypeAliasType,
+            Type::Template => Self::Template,
+            Type::Interpolation => Self::Interpolation,
+            Type::ContextVar => Self::ContextVar,
+            Type::ContextVarToken => Self::ContextVarToken,
+            Type::EventLoop => Self::EventLoop,
             Type::Ellipsis => Self::Ellipsis,
             Type::NotImplementedType => Self::NotImplementedType,
             Type::Type => Self::Type,
@@ -821,8 +860,11 @@ impl MontyTypeExt for MontyType {
             Type::Partial => Self::Partial,
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
+            Type::LiteralGenericAlias => Self::LiteralGenericAlias,
             Type::LruCacheWrapper => Self::LruCacheWrapper,
+            // No host-side code type: a code object crosses as its repr.
             Type::Random
+            | Type::Code
             | Type::HashlibHash
             | Type::HashlibHashXof
             | Type::Blake2b
@@ -863,7 +905,7 @@ impl MontyTypeExt for MontyType {
             Type::BuiltinFunction => Self::BuiltinFunction,
             Type::Cell => Self::Cell,
             Type::Iterator => Self::Iterator,
-            Type::Coroutine => Self::Coroutine,
+            Type::Coroutine | Type::Generator => Self::Coroutine,
             Type::Module => Self::Module,
             Type::TextIOWrapper => Self::TextIOWrapper,
             Type::BufferedReader => Self::BufferedReader,
@@ -1035,6 +1077,10 @@ fn import_node(
             let exc = SimpleException::new(exc_type, arg);
             Ok(Value::Ref(vm.heap.allocate(HeapData::Exception(exc))))
         }
+        // A value the session holds for the host is the same object again.
+        MontyNode::Handle { id, type_name } => vm.heap.held(&id).ok_or_else(|| {
+            InvalidInputError::invalid_type(format!("'{type_name}' handle (id {id}) is no longer held"))
+        }),
         // A sandbox class the host hands back resolves to the class object
         // itself; a host class resolves to its single `HostClassType` entry,
         // and calling it (or a classmethod on it) suspends to the host, whose
@@ -1054,8 +1100,11 @@ fn import_node(
             ))),
         },
         // A sandbox instance the host hands back resolves to the original
-        // object by uuid (identity survives the round trip); anything else
-        // is host-backed, whatever its class id resolved to as a type object.
+        // object by uuid (identity survives the round trip); a session that
+        // holds handles makes it again from its class and its attrs, with no
+        // `__init__` run, once that object is gone, and any other session
+        // refuses it. Anything else is host-backed, whatever its class id
+        // resolved to as a type object.
         MontyNode::ClassInstance {
             class_type,
             instance_id,
@@ -1087,10 +1136,30 @@ fn import_node(
                 let Value::Ref(class_id) = built[class_type.index()] else {
                     unreachable!("class nodes always import as heap references");
                 };
-                Err(InvalidInputError::invalid_type(format!(
-                    "sandbox instance of '{}' (id {instance_id}) no longer exists",
-                    class_name(class_id, vm.heap, vm.interns)
-                )))
+                if !vm.heap.holds_handles() {
+                    return Err(InvalidInputError::invalid_type(format!(
+                        "sandbox instance of '{}' (id {instance_id}) no longer exists",
+                        class_name(class_id, vm.heap, vm.interns)
+                    )));
+                }
+                let pairs = clone_pairs(&attrs, built, vm);
+                if pairs.iter().any(|(key, _)| !key.is_str(vm.heap)) {
+                    pairs.drop_with(vm);
+                    return Err(InvalidInputError::invalid_type(format!(
+                        "an instance of '{}' is keyed by str",
+                        class_name(class_id, vm.heap, vm.interns)
+                    )));
+                }
+                let dict = Dict::from_pairs(pairs, vm)
+                    .map_err(|_| InvalidInputError::invalid_type("unhashable class instance attr keys"))?;
+                vm.heap.inc_ref(class_id);
+                let id = vm.heap.allocate(HeapData::Instance(Box::new(Instance::crossed(
+                    class_id,
+                    dict,
+                    instance_id,
+                ))));
+                vm.heap.boundary_uuid(id);
+                Ok(Value::Ref(id))
             }
         },
         // A host module is a real module object: attribute errors are raised

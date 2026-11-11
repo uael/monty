@@ -18,16 +18,16 @@ use crate::{
     },
     py_value::PyValue,
     types::{
-        Bytes, Deque, Dict, ForwardRef, FrozenSet, GenericAlias, List, LongInt, Partial, Path, PyTrait, Random, Range,
-        Set, Slice, Str, TimeZone, Tuple,
+        Bytes, ContextVar, Deque, Dict, ForwardRef, FrozenSet, GenericAlias, List, LongInt, Partial, Path, PyTrait,
+        Random, Range, Set, Slice, Str, TimeZone, Tuple,
         bytes::{bytes_fromhex, bytes_repr},
         complex, date, datetime, decimal,
         dict::{DictKind, dict_fromkeys},
         instance::class_name,
         long_int::INT_MAX_STR_DIGITS,
-        path,
-        str::{StringRepr, allocate_string},
-        time,
+        path, property,
+        str::{StringRepr, allocate_string, str_maketrans},
+        template, time,
         timedelta::{self, DAY_MICROSECONDS, MAX_TIMEDELTA_DAYS, MIN_TIMEDELTA_DAYS},
         timezone::{self, MAX_TIMEZONE_CONSTANT_SECONDS},
     },
@@ -183,8 +183,10 @@ pub enum Type {
     /// The iterator `os.scandir()` returns.
     #[strum(serialize = "posix.ScandirIterator")]
     ScandirIterator,
-    /// The iterator `os.walk()` and `Path.walk()` return; CPython's is a generator.
-    #[strum(serialize = "generator")]
+    /// The iterator `os.walk()` and `Path.walk()` return; CPython's is a generator,
+    /// and [`name`](Self::name) shows it as one. Its own name stays apart from
+    /// [`Generator`](Self::Generator)'s, so the name `generator` parses to that.
+    #[strum(serialize = "os._walk_generator")]
     WalkGenerator,
     // Variants serialize by name into dumps: renaming one needs `#[serde(alias)]`.
     #[strum(serialize = "tuple_iterator")]
@@ -345,6 +347,34 @@ pub enum Type {
     /// `annotationlib.ForwardRef`, an unevaluated annotation.
     #[strum(serialize = "annotationlib.ForwardRef")]
     ForwardRef,
+    /// A code object, what `compile()` answers. CPython names the type `code`.
+    Code,
+    /// A generator object, from calling a function whose body yields.
+    Generator,
+    /// PEP 750 `string.templatelib.Template`, the value of a `t"..."` literal.
+    /// Dotted like `re.Match`; only `__name__` diverges from CPython's bare
+    /// `'Template'`. See `limitations/string_templatelib.md`.
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    /// PEP 750 `string.templatelib.Interpolation`, one `{...}` field of a template.
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
+    /// PEP 695 `typing.TypeAliasType`, the value of `type X = ...`.
+    #[strum(serialize = "typing.TypeAliasType")]
+    TypeAliasType,
+    /// `contextvars.ContextVar`, qualified as CPython's C module names it.
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    /// `contextvars.Token`, what `ContextVar.set()` returns.
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
+    /// The running event loop, named as `asyncio`'s own loop classes are.
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
+    /// `typing._LiteralGenericAlias`, the type of `Literal['a']`. CPython
+    /// defines it in Python, so its `__name__` is `'_LiteralGenericAlias'`.
+    #[strum(serialize = "typing._LiteralGenericAlias")]
+    LiteralGenericAlias,
 }
 
 /// Writes the canonical static name of every non-[`Instance`](Type::Instance)
@@ -384,6 +414,7 @@ impl Type {
         match self {
             Self::Instance(class_id) => class_name(class_id, heap, interns),
             Self::Exception(exc_type) => Cow::Borrowed(exc_type.into()),
+            Self::WalkGenerator => Cow::Borrowed(Self::Generator.into()),
             other => Cow::Borrowed(other.into()),
         }
     }
@@ -450,6 +481,27 @@ impl Type {
     ///
     /// This replaces the previous strum `FromStr` derive which matched ALL variants,
     /// including internal types that shouldn't be resolvable from bare names.
+    /// Every name [`Self::from_builtin_name`] answers, for a caller that must
+    /// walk them rather than ask about one.
+    pub const BUILTIN_NAMES: &'static [&'static str] = &[
+        "bool",
+        "int",
+        "float",
+        "str",
+        "bytes",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "range",
+        "slice",
+        "iter",
+        "type",
+        "property",
+        "object",
+    ];
+
     #[must_use]
     pub fn from_builtin_name(name: &str) -> Option<Self> {
         match name {
@@ -498,6 +550,8 @@ impl Type {
                 // The one `itertools` type CPython gives a
                 // `__class_getitem__`; the rest reject a subscript.
                 | Self::ItertoolsChain
+                | Self::ContextVar
+                | Self::ContextVarToken
         )
     }
 
@@ -515,7 +569,9 @@ impl Type {
     pub(crate) const fn is_iterator(self) -> bool {
         matches!(
             self,
-            Self::ListIterator
+            // A generator is its own iterator, which is what `iter()` asks.
+            Self::Generator
+                | Self::ListIterator
                 | Self::DequeIterator
                 | Self::TupleIterator
                 | Self::StrAsciiIterator
@@ -662,6 +718,7 @@ impl Type {
                 Err(ExcType::not_implemented("Counter.fromkeys() is undefined.  Use Counter(iterable) instead.").into())
             }
             (Self::Bytes, Some(StaticStrings::Fromhex)) => bytes_fromhex(args, vm).map(CallResult::Value),
+            (Self::Str, Some(StaticStrings::Maketrans)) => str_maketrans(args, vm).map(CallResult::Value),
             (Self::Complex, Some(StaticStrings::FromNumber)) => {
                 complex::class_from_number(vm, args).map(CallResult::Value)
             }
@@ -838,6 +895,8 @@ impl Type {
             Self::ForwardRef => ForwardRef::init(vm, args),
             Self::Partial => Partial::init(vm, args),
             Self::Random => Random::init(vm, args),
+            Self::Template => template::template_init(vm, args),
+            Self::Interpolation => template::interpolation_init(vm, args),
             Self::Blake2b => hashlib::blake2_init(Blake2Kind::Blake2b, vm, args),
             Self::Blake2s => hashlib::blake2_init(Blake2Kind::Blake2s, vm, args),
 
@@ -896,6 +955,15 @@ impl Type {
                 };
                 defer_drop!(v, vm);
                 Ok(Value::Bool(v.py_bool(vm)?))
+            }
+
+            Self::Property => property::property_init(vm, args),
+            Self::ContextVar => ContextVar::init(vm, args),
+
+            // CPython gives `Token` no constructor of its own.
+            Self::ContextVarToken => {
+                args.drop_with(vm);
+                Err(SimpleException::new_msg(ExcType::RuntimeError, "Tokens can only be created by ContextVars").into())
             }
 
             // CPython words this one differently from the other uncallable types.

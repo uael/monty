@@ -23,9 +23,9 @@ use crate::{
     builtins::{Builtins, BuiltinsFunctions},
     exception_private::{ExcType, ExceptionRaise, RunError, SimpleException},
     expressions::{
-        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DictItem, Expr, ExprLoc, Identifier,
-        ImportName, Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem, Submodule,
-        UnpackTarget,
+        AssignTarget, Callable, CaptureSource, CmpOperator, Comprehension, DeleteTarget, DictItem, Expr, ExprLoc,
+        Identifier, ImportName, Literal, NameScope, Node, Operator, PreparedFunctionDef, PreparedNode, SequenceItem,
+        Submodule, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     function::Function,
@@ -35,6 +35,7 @@ use crate::{
     parse::{CodeRange, ExceptHandler, Try, syntax_error_in_snippet},
     run::CompileOptions,
     source_map::{SourceMap, StackFrameExt},
+    tstring::ParsedTemplate,
     types::Type,
     value::{EitherStr, Value},
 };
@@ -127,6 +128,19 @@ fn check_comp_generators(count: usize, position: CodeRange) -> Result<(), Compil
     }
 }
 
+/// The single-character `str` CPython stores in `Interpolation.conversion`,
+/// or `None` when the field carries no `!` conversion.
+///
+/// A t-string never applies the conversion; it reports which one was written.
+fn conversion_char(conversion: ConversionFlag) -> Option<u8> {
+    match conversion {
+        ConversionFlag::None => None,
+        ConversionFlag::Str => Some(b's'),
+        ConversionFlag::Repr => Some(b'r'),
+        ConversionFlag::Ascii => Some(b'a'),
+    }
+}
+
 /// Returns a position that locates `target` in source for error reporting.
 ///
 /// `Name` carries the identifier's position, `Starred` its inner target's, and
@@ -184,49 +198,6 @@ fn collection_too_large(count: usize, position: CodeRange) -> CompileError {
     )
 }
 
-/// Converts the index of a newly-defined function into the `u16` operand used
-/// by `MakeFunction`/`MakeClosure`. The cap is the total number of
-/// `def`/`lambda`/comprehension function objects in the *whole module*, since
-/// `FunctionId`s are allocated linearly across nested scopes.
-fn check_function_count_u16(func_id: usize, position: CodeRange) -> Result<u16, CompileError> {
-    u16::try_from(func_id).map_err(|_| too_many_functions(func_id, position))
-}
-
-#[cold]
-#[inline(never)]
-fn too_many_functions(func_id: usize, position: CodeRange) -> CompileError {
-    CompileError::new(
-        format!(
-            "module defines too many functions/lambdas ({}); maximum is {}",
-            func_id + 1,
-            u16::MAX
-        ),
-        position,
-    )
-}
-
-/// Converts a `StringId` (intern pool index) into the `u16` operand used by
-/// every name-bearing opcode (`LoadAttr`, `StoreAttr`, `LoadGlobal`,
-/// `CallFunctionKw` keyword names, etc.). Called inline at every emission
-/// site — overflow only happens when the intern pool exceeded `u16::MAX`
-/// during parse/prepare, so the error construction is `#[cold]` and the
-/// success path inlines to a single `as u16`.
-fn check_name_index_u16(name_id: StringId, position: CodeRange) -> Result<u16, CompileError> {
-    u16::try_from(name_id.index()).map_err(|_| name_index_too_large(position))
-}
-
-#[cold]
-#[inline(never)]
-fn name_index_too_large(position: CodeRange) -> CompileError {
-    CompileError::new(
-        format!(
-            "module has too many distinct names; the bytecode format supports up to {} interned strings",
-            usize::from(u16::MAX) + 1,
-        ),
-        position,
-    )
-}
-
 /// Converts a call-related count (positional args, keyword args, defaults,
 /// closure cells) into the `u8` operand used by the corresponding opcodes.
 /// `kind` (e.g. "default parameter values") is interpolated into the error
@@ -249,7 +220,7 @@ fn too_many_call_args(count: usize, kind: &'static str, position: CodeRange) -> 
 ///
 /// Functions are compiled recursively through [`CompileInterns`].
 /// Each function's body is compiled before registering it, so nested functions
-/// receive lower IDs. Those IDs become MakeFunction/MakeClosure operands.
+/// receive lower IDs. Each body indexes the IDs it makes in its own function table.
 pub struct Compiler<'a, 'i> {
     /// Current code being built.
     pub(super) code: CodeBuilder,
@@ -294,10 +265,6 @@ pub struct Compiler<'a, 'i> {
 
 /// Compiler settings inherited by nested scopes, with await restrictions reset for functions.
 #[derive(Debug, Clone, Copy)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent switches copied into nested scopes"
-)]
 struct ScopeFlags {
     /// Whether to compile pytest-style assert failure annotations.
     assert_message_annotations: bool,
@@ -305,13 +272,26 @@ struct ScopeFlags {
     /// `NAME_GLOBAL_ONLY`) because the running frame's globals are an explicit
     /// `exec()` / `eval()` dict.
     globals_by_name: bool,
-    /// Rejects `await` at snippet top level and in its class bodies.
-    /// Nested function bodies reset this restriction.
-    forbid_await: bool,
+    /// Why `await` cannot appear in the body being compiled, or `None` where it
+    /// can, with CPython's message: at the top level of a snippet that does not
+    /// allow it and in any class body, `await` is outside a function, and in a
+    /// `def` or a `lambda` it is outside an async function.
+    await_refusal: Option<&'static str>,
+    /// Why `yield` cannot appear in the body being compiled, or `None` where it
+    /// can. A message rather than a flag because the reasons differ: outside a
+    /// function it is CPython's own syntax error, while in an `async def` it is
+    /// a body Monty does not compile yet.
+    yield_refusal: Option<&'static str>,
     /// Whether the compile unit runs under `from __future__ import annotations`,
     /// stamped on every `Code` it produces.
     future_annotations: bool,
 }
+
+/// CPython's message for a `yield` that is not inside a function.
+const YIELD_OUTSIDE_FUNCTION: &str = "'yield' outside function";
+
+/// CPython's message for an `await` that is not inside a function.
+const AWAIT_OUTSIDE_FUNCTION: &str = "'await' outside function";
 
 /// Jump targets needed to compile `break` and `continue`.
 struct LoopInfo {
@@ -545,7 +525,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         options: CompileOptions,
         future_annotations: bool,
     ) -> Result<Code, CompileError> {
-        Self::compile_module_inner(nodes, interns, globals, options, None, future_annotations)
+        Self::compile_module_inner(nodes, interns, globals, options, None, false, future_annotations)
     }
 
     /// Compiles a prepared `eval()` / `exec()` snippet, rejecting top-level await.
@@ -557,6 +537,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         globals: &NameMap,
         options: CompileOptions,
         globals_by_name: bool,
+        top_level_await: bool,
         future_annotations: bool,
     ) -> Result<Code, CompileError> {
         Self::compile_module_inner(
@@ -565,17 +546,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
             globals,
             options,
             Some(globals_by_name),
+            top_level_await,
             future_annotations,
         )
     }
 
-    /// Shared module compiler; `snippet` is `Some(globals_by_name)` for eval/exec.
+    /// Shared module compiler; `snippet` is `Some(globals_by_name)` for
+    /// eval/exec, and `top_level_await` is what
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` lets one of those do.
     fn compile_module_inner(
         nodes: &[PreparedNode],
         interns: &mut CompileInterns<'_>,
         globals: &NameMap,
         options: CompileOptions,
         snippet: Option<bool>,
+        top_level_await: bool,
         future_annotations: bool,
     ) -> Result<Code, CompileError> {
         check_namespace_size_u16(globals.len(), "module")?;
@@ -585,7 +570,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
         let flags = ScopeFlags {
             assert_message_annotations: options.assert_message_annotations.enabled(),
             globals_by_name: snippet.unwrap_or(false),
-            forbid_await: snippet.is_some(),
+            await_refusal: (snippet.is_some() && !top_level_await).then_some(AWAIT_OUTSIDE_FUNCTION),
+            yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
             future_annotations,
         };
         let mut compiler = Compiler::new(interns, true, 0, flags);
@@ -622,7 +608,12 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // comp-var load/store opcodes use `num_locals + offset` to skip past
         // the locals region into the operand-stack region.
         let flags = ScopeFlags {
-            forbid_await: false,
+            await_refusal: (!func_def.is_async).then_some("'await' outside async function"),
+            // An `async def` that yields is an async generator, which needs the
+            // `__aiter__` / `__anext__` protocol rather than this one.
+            yield_refusal: func_def
+                .is_async
+                .then_some("'yield' inside an async function is not supported"),
             ..flags
         };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
@@ -687,6 +678,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.compile_expr(object)?;
                 self.emit_unpack_store(targets, *targets_position)?;
             }
+            Node::Delete(targets) => {
+                for target in targets {
+                    self.compile_delete_target(target)?;
+                }
+            }
+            Node::TypeAlias { name, value } => {
+                // The value stays unevaluated inside the alias: PEP 695 defers it
+                // to the first `__value__` read, which is what lets an alias name
+                // itself.
+                self.emit_make_function(value, "type alias value")?;
+                let name_idx = self.code.name(name.name_id, name.position)?;
+                self.code.set_location(name.position, None);
+                self.code.emit_u16(Opcode::MakeTypeAlias, name_idx)?;
+                self.compile_store(name)?;
+            }
             Node::OpAssign { target, op, value } => {
                 let Some(opcode) = operator_to_inplace_opcode(op) else {
                     return Err(CompileError::new(
@@ -746,7 +752,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     ));
                 };
                 let name_id = attr.string_id().expect("LoadAttr requires interned attr name");
-                let name_idx = check_name_index_u16(name_id, *target_position)?;
+                let name_idx = self.code.name(name_id, *target_position)?;
                 // Stack: compile object, dup for later store, load attr, apply op, rotate, store
                 self.compile_expr(object)?; // [obj]
                 self.code.emit(Opcode::Dup)?; // [obj, obj]
@@ -808,9 +814,10 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 name,
                 body,
                 members,
+                bases,
                 decorators,
                 position,
-            } => self.compile_class_def(name, body, members, decorators, *position)?,
+            } => self.compile_class_def(name, body, members, bases, decorators, *position)?,
             Node::Try(try_block) => self.compile_try(try_block)?,
             Node::Match {
                 subject,
@@ -966,13 +973,12 @@ impl<'a, 'i> Compiler<'a, 'i> {
         for default_expr in &func_def.default_exprs {
             self.compile_expr(default_expr)?;
         }
-        let func_id_u16 = check_function_count_u16(func_id, func_pos)?;
+        let function = self.code.function(func_id, func_pos)?;
 
         // 4. Emit MakeFunction or MakeClosure (if has free vars)
         if func_def.free_var_enclosing_slots.is_empty() {
-            // MakeFunction: func_id (u16) + defaults_count (u8)
-            self.code
-                .emit_u16_u8(Opcode::MakeFunction, func_id_u16, defaults_count)?;
+            // MakeFunction: function (u16) + defaults_count (u8)
+            self.code.emit_u16_u8(Opcode::MakeFunction, function, defaults_count)?;
         } else {
             // Push captured cells from enclosing scope.
             for source in &func_def.free_var_enclosing_slots {
@@ -987,9 +993,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 };
                 self.code.emit_load_local(slot)?;
             }
-            // MakeClosure: func_id (u16) + defaults_count (u8) + cell_count (u8)
+            // MakeClosure: function (u16) + defaults_count (u8) + cell_count (u8)
             self.code
-                .emit_u16_u8_u8(Opcode::MakeClosure, func_id_u16, defaults_count, cell_count)?;
+                .emit_u16_u8_u8(Opcode::MakeClosure, function, defaults_count, cell_count)?;
         }
 
         Ok(())
@@ -1018,11 +1024,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             false,
             code,
         );
-        let func_id = self.interns.push_function(function);
-        Ok(FunctionId::from_index(check_function_count_u16(
-            func_id,
-            annotate.name.position,
-        )?))
+        Ok(self.interns.push_function(function))
     }
 
     /// The name a function reports in tracebacks: a synthesized `__annotate__` is
@@ -1048,6 +1050,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         name: &Identifier,
         body: &PreparedFunctionDef,
         members: &[Identifier],
+        bases: &[ExprLoc],
         decorators: &[ExprLoc],
         position: CodeRange,
     ) -> Result<(), CompileError> {
@@ -1056,14 +1059,27 @@ impl<'a, 'i> Compiler<'a, 'i> {
         for decorator in decorators {
             self.compile_expr(decorator)?;
         }
+        // `type(name, bases, namespace)`: the name and the bases tuple are
+        // pushed here, in the enclosing scope, because that is where CPython
+        // evaluates a base expression. Evaluating one in the class body would
+        // let a base name collide with a member of the same name.
+        let class_name_const = self.code.add_const(Value::InternString(name.name_id))?;
+        self.code.emit_u16(Opcode::LoadConst, class_name_const)?;
+        for base in bases {
+            self.compile_expr(base)?;
+        }
+        let base_count = check_collection_size_u16(bases.len(), position)?;
+        self.code.emit_u16(Opcode::BuildTuple, base_count)?;
         // Build the class-body function/closure value on the stack...
-        self.emit_make_class_body(body, members, name, position)?;
-        // ...call it with zero args — it runs the body and returns the `Class`.
-        // Record the class statement as the call site so a traceback from inside
-        // the class body attributes this frame to the `class` statement (like
-        // CPython) rather than falling back to `CodeRange::default()`.
+        self.emit_make_class_body(body, members, position)?;
+        // ...call it with zero args — it runs the body and returns the namespace
+        // dict. Record the class statement as the call site so a traceback from
+        // inside the class body attributes this frame to the `class` statement
+        // (like CPython) rather than falling back to `CodeRange::default()`.
         self.code.set_location(position, None);
         self.code.emit_u8(Opcode::CallFunction, 0)?;
+        // ...and the 3-arg `type()` builtin turns the three into the class.
+        self.code.emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         // Each call consumes the callable below the current value: `deco(value)`.
         // Reversed so the bottom-most (last pushed) applies first, and located at
         // its own decorator so a traceback pins the one that raised, like CPython.
@@ -1087,30 +1103,21 @@ impl<'a, 'i> Compiler<'a, 'i> {
         &mut self,
         body: &PreparedFunctionDef,
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
     ) -> Result<(), CompileError> {
         let flags = self.flags;
         self.emit_make_callable(body, "class body", |interns, namespace_size| {
-            Self::compile_class_body(
-                &body.body,
-                members,
-                class_name,
-                position,
-                interns,
-                namespace_size,
-                flags,
-            )
+            Self::compile_class_body(&body.body, members, position, interns, namespace_size, flags)
         })
     }
 
     /// Compiles a class body, mirroring
     /// [`compile_function_body`](Self::compile_function_body) but replacing the
-    /// implicit `LoadNone; ReturnValue` tail with a `type(name, (), {...})`
-    /// call: push the class name and an empty bases tuple, then for each member
-    /// (in source order) `LoadConst <name>` and the member's value from its
-    /// class-body slot, build the namespace dict, call the 3-arg `type()`
-    /// builtin (which builds the `Class`), then `ReturnValue`.
+    /// implicit `LoadNone; ReturnValue` tail with the namespace dict: for each
+    /// member (in source order) push `LoadConst <name>` and the member's value
+    /// from its class-body slot, build the dict, and return it. The caller
+    /// passes it to the 3-arg `type()` builtin along with the class name and
+    /// the bases, both of which belong to the enclosing scope.
     ///
     /// Members are plain locals (the prepare phase forces class-body locals to
     /// never be cells — see `prepare_class_def`), so [`compile_name`](Self::compile_name)
@@ -1119,12 +1126,16 @@ impl<'a, 'i> Compiler<'a, 'i> {
     fn compile_class_body(
         body: &[PreparedNode],
         members: &[Identifier],
-        class_name: &Identifier,
         position: CodeRange,
         interns: &mut CompileInterns<'_>,
         num_locals: u16,
         flags: ScopeFlags,
     ) -> Result<Code, CompileError> {
+        let flags = ScopeFlags {
+            await_refusal: Some(AWAIT_OUTSIDE_FUNCTION),
+            yield_refusal: Some(YIELD_OUTSIDE_FUNCTION),
+            ..flags
+        };
         let mut compiler = Compiler::new(interns, false, num_locals, flags);
         compiler.compile_block(body)?;
 
@@ -1132,12 +1143,9 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // should point at the class statement, not the last member's line.
         compiler.code.set_location(position, None);
 
-        // type(name, (), {members...}): push the name and empty bases tuple...
-        let class_name_const = compiler.code.add_const(Value::InternString(class_name.name_id))?;
-        compiler.code.emit_u16(Opcode::LoadConst, class_name_const)?;
-        compiler.code.emit_u16(Opcode::BuildTuple, 0)?;
-
-        // ...then the namespace dict: (name, value) for each member in order.
+        // The namespace dict: (name, value) for each member in source order.
+        // The caller turns it into the class, because the name and the bases
+        // belong to the enclosing scope.
         for member in members {
             let name_const = compiler.code.add_const(Value::InternString(member.name_id))?;
             compiler.code.emit_u16(Opcode::LoadConst, name_const)?;
@@ -1145,11 +1153,6 @@ impl<'a, 'i> Compiler<'a, 'i> {
         }
         let member_count = check_collection_size_u16(members.len(), position)?;
         compiler.code.emit_u16(Opcode::BuildDict, member_count)?;
-
-        // ...and call the 3-arg type() builtin, which builds the class object.
-        compiler
-            .code
-            .emit_call_builtin_function(BuiltinsFunctions::Type as u8, 3)?;
         compiler.code.emit(Opcode::ReturnValue)?;
 
         Ok(compiler.finish())
@@ -1160,8 +1163,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
     fn compile_import(&mut self, import: &ImportName) -> Result<(), CompileError> {
         let position = import.binding.position;
         self.code.set_location(position, None);
-        self.code
-            .emit_u16(Opcode::LoadModule, check_name_index_u16(import.module_name, position)?)?;
+        let module = self.code.name(import.module_name, position)?;
+        self.code.emit_u16(Opcode::LoadModule, module)?;
         if import.binds_top_level {
             self.code.emit(Opcode::Dup)?;
         }
@@ -1175,8 +1178,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// Replaces the stack top with each successive submodule of a dotted import.
     fn compile_submodules(&mut self, submodules: &[Submodule], position: CodeRange) -> Result<(), CompileError> {
         for submodule in submodules {
-            let name_idx = check_name_index_u16(submodule.name, position)?;
-            let path_idx = check_name_index_u16(submodule.path, position)?;
+            let name_idx = self.code.name(submodule.name, position)?;
+            let path_idx = self.code.name(submodule.path, position)?;
             self.code.emit_u16_u16(Opcode::LoadSubmodule, name_idx, path_idx)?;
         }
         Ok(())
@@ -1192,7 +1195,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         position: CodeRange,
     ) -> Result<(), CompileError> {
         self.code.set_location(position, None);
-        let module_idx = check_name_index_u16(module_name, position)?;
+        let module_idx = self.code.name(module_name, position)?;
         self.code.emit_u16(Opcode::LoadModule, module_idx)?;
         self.compile_submodules(submodules, position)?;
         for (i, (import_name, binding)) in names.iter().enumerate() {
@@ -1200,8 +1203,8 @@ impl<'a, 'i> Compiler<'a, 'i> {
             if i < names.len() - 1 {
                 self.code.emit(Opcode::Dup)?;
             }
-            let name_idx = check_name_index_u16(*import_name, position)?;
             // LoadModule or the last LoadSubmodule saved the error's module name on the frame.
+            let name_idx = self.code.name(*import_name, position)?;
             self.code.emit_u16(Opcode::LoadAttrImport, name_idx)?;
             self.compile_store(binding)?;
         }
@@ -1413,7 +1416,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
                 let name_id = attr.string_id().expect("LoadAttr requires interned attr name");
-                let name_idx = check_name_index_u16(name_id, expr_loc.position)?;
+                let name_idx = self.code.name(name_id, expr_loc.position)?;
                 self.code.emit_u16(Opcode::LoadAttr, name_idx)?;
             }
 
@@ -1442,6 +1445,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let part_count = self.compile_fstring_parts(parts)?;
                 self.code.emit_u16(Opcode::BuildFString, part_count)?;
             }
+            Expr::TString(template) => self.compile_tstring(template, expr_loc.position)?,
 
             Expr::ListComp {
                 elt,
@@ -1476,17 +1480,88 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 // LambdaRaw should be converted to Lambda during prepare phase
                 unreachable!("Expr::LambdaRaw should not exist after prepare phase")
             }
+            Expr::GenExprRaw { .. } => {
+                // GenExprRaw should be converted to Lambda during prepare phase
+                unreachable!("Expr::GenExprRaw should not exist after prepare phase")
+            }
+
+            Expr::YieldFrom(value) => {
+                if let Some(refusal) = self.flags.yield_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
+                }
+                // The delegation loop, which is one `Send` step per turn:
+                //
+                //   <value>; GetIter     receiver
+                //   LoadNone             receiver, None: the first send
+                // start:
+                //   Send -> done         receiver, yielded  (or jumps to done)
+                //   Yield                receiver, sent-in
+                //   Jump start
+                // done:                  what the receiver returned
+                //
+                // The receiver stays beneath the value being passed either way,
+                // so `Yield` hands out what the inner one yielded and leaves
+                // what was sent in exactly where the next `Send` wants it.
+                self.compile_expr(value)?;
+                self.code.set_location(expr_loc.position, None);
+                // A generator is its own iterator, so this passes one straight
+                // through and calls `iter()` on anything else.
+                self.code.mark_generator();
+                self.code.emit(Opcode::GetIter)?;
+                self.code.emit(Opcode::LoadNone)?;
+                let start = self.code.current_jump_target();
+                let done = self.code.emit_jump(Opcode::Send)?;
+                self.code.emit(Opcode::Yield)?;
+                self.code.emit_jump_to(Opcode::Jump, start)?;
+                self.code.patch_jump(done)?;
+            }
+
+            Expr::Yield(value) => {
+                if let Some(refusal) = self.flags.yield_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
+                }
+                // `yield` with no value yields `None`, so the instruction always
+                // has exactly one operand to take.
+                match value {
+                    Some(value) => self.compile_expr(value)?,
+                    None => self.code.emit(Opcode::LoadNone)?,
+                }
+                self.code.set_location(expr_loc.position, None);
+                self.code.mark_generator();
+                self.code.emit(Opcode::Yield)?;
+            }
 
             Expr::Await(value) => {
-                if self.flags.forbid_await {
-                    return Err(CompileError::new("'await' outside function", expr_loc.position));
+                if let Some(refusal) = self.flags.await_refusal {
+                    return Err(CompileError::new(refusal, expr_loc.position));
                 }
-                // Await expressions: compile the inner expression, then emit Await
-                // Await handles ExternalFuture, Coroutine, and GatherFuture
+                // The same delegation loop `yield from` compiles to, which is
+                // how CPython compiles an `await` too:
+                //
+                //   <value>; Await       receiver
+                //   LoadNone             receiver, None: the first send
+                // start:
+                //   Send -> done         receiver, yielded  (or jumps to done)
+                //   Yield                receiver, sent-in
+                //   Jump start
+                // done:                  what the receiver settled on
+                //
+                // `Await` leaves what drives the wait: a coroutine, a future,
+                // or what the object's own `__await__` handed back. `Send`
+                // steps it, and the `Yield` between the two is reached only by
+                // a `__await__` that yields, which is how a word of a model
+                // says an act to whoever drives its frame.
                 self.compile_expr(value)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
+                self.code.mark_coroutine();
                 self.code.emit(Opcode::Await)?;
+                self.code.emit(Opcode::LoadNone)?;
+                let start = self.code.current_jump_target();
+                let done = self.code.emit_jump(Opcode::Send)?;
+                self.code.emit(Opcode::Yield)?;
+                self.code.emit_jump_to(Opcode::Jump, start)?;
+                self.code.patch_jump(done)?;
             }
 
             Expr::Slice { lower, upper, step } => {
@@ -1973,7 +2048,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let mut kwname_ids = Vec::with_capacity(kwargs.len());
                 for kwarg in kwargs {
                     self.compile_expr(&kwarg.value)?;
-                    kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                    kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                 }
                 self.code.set_location(call_pos, None);
                 self.code.emit_call_function_kw(0, &kwname_ids)?;
@@ -2027,7 +2102,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     if let Some(kwargs) = kwargs {
                         for kwarg in kwargs {
                             self.compile_expr(&kwarg.value)?;
-                            kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                            kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                         }
                     }
 
@@ -2041,7 +2116,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             ArgExprs::GeneralizedCall { args, kwargs } => {
                 // PEP 448: generalized unpacking — multiple *args or **kwargs.
                 // Callable was already pushed above this match; delegate to the helper.
-                let func_name_id = self.get_callable_name_id(callable)?;
+                let func_name_id = self.get_callable_name_id(callable, call_pos)?;
                 self.compile_generalized_call_body(args, kwargs, func_name_id, call_pos)?;
             }
         }
@@ -2093,7 +2168,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let mut kwname_ids = Vec::with_capacity(kwargs.len());
                 for kwarg in kwargs {
                     self.compile_expr(&kwarg.value)?;
-                    kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                    kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                 }
                 self.code.set_location(call_pos, None);
                 self.code.emit_call_function_kw(0, &kwname_ids)?;
@@ -2146,7 +2221,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                     let mut kwname_ids = Vec::with_capacity(kw_count);
                     for kwarg in kw_args {
                         self.compile_expr(&kwarg.value)?;
-                        kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                        kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                     }
 
                     self.code.set_location(call_pos, None);
@@ -2286,7 +2361,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
     ) -> Result<(), CompileError> {
         // Get function name for error messages. Builtins use their real interned name
         // so duplicate-kwargs errors from **unpacking match CPython.
-        let func_name_id = self.get_callable_name_id(callable)?;
+        let func_name_id = self.get_callable_name_id(callable, call_pos)?;
 
         // 1. Build args tuple
         // Push regular positional args and build list
@@ -2339,17 +2414,20 @@ impl<'a, 'i> Compiler<'a, 'i> {
         Ok(())
     }
 
-    /// Returns the best available function name id for call-site error messages.
+    /// Returns the best available function name operand for call-site error messages.
     ///
     /// This is primarily used by `DictMerge` during `**kwargs` unpacking so
     /// duplicate-key and non-mapping errors can mention the actual callee name.
     /// When the callable is not a named local/global, we still try to resolve
     /// builtin functions, builtin exception constructors, and builtin types to
     /// their interned public names.
-    fn get_callable_name_id(&self, callable: &Callable) -> Result<u16, CompileError> {
+    fn get_callable_name_id(&mut self, callable: &Callable, position: CodeRange) -> Result<u16, CompileError> {
         match callable {
-            Callable::Name(ident) => check_name_index_u16(ident.name_id, ident.position),
-            Callable::Builtin(builtin) => Ok(self.get_builtin_name_id(*builtin).unwrap_or(0xFFFF)),
+            Callable::Name(ident) => self.code.name(ident.name_id, ident.position),
+            Callable::Builtin(builtin) => match self.get_builtin_name_id(*builtin) {
+                Some(name_id) => self.code.name(name_id, position),
+                None => Ok(0xFFFF),
+            },
         }
     }
 
@@ -2358,7 +2436,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// Returning `None` falls back to `<unknown>` in the VM, which is still
     /// correct but less helpful. In practice these names should already be
     /// interned during preparation because builtin names are resolved from source.
-    fn get_builtin_name_id(&self, builtin: Builtins) -> Option<u16> {
+    fn get_builtin_name_id(&self, builtin: Builtins) -> Option<StringId> {
         let name_id = match builtin {
             Builtins::Function(function) => {
                 let name: &'static str = function.into();
@@ -2371,7 +2449,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
             }
         };
 
-        u16::try_from(name_id.index()).ok()
+        Some(name_id)
     }
 
     /// Compiles an attribute call on an object.
@@ -2387,7 +2465,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // Get the interned attribute name, converted up-front so the limit check
         // happens once per method call rather than at every emit-site below.
         let name_id = attr.string_id().expect("CallAttr requires interned attr name");
-        let name_idx = check_name_index_u16(name_id, call_pos)?;
+        let name_idx = self.code.name(name_id, call_pos)?;
 
         // Compile arguments based on the argument type
         match args {
@@ -2433,7 +2511,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 let mut kwname_ids = Vec::with_capacity(kwargs.len());
                 for kwarg in kwargs {
                     self.compile_expr(&kwarg.value)?;
-                    kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                    kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                 }
                 self.code.set_location(call_pos, None);
                 self.code.emit_call_attr_kw(name_idx, 0, &kwname_ids)?;
@@ -2485,7 +2563,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 if let Some(kwargs) = kwargs {
                     for kwarg in kwargs {
                         self.compile_expr(&kwarg.value)?;
-                        kwname_ids.push(check_name_index_u16(kwarg.key.name_id, call_pos)?);
+                        kwname_ids.push(self.code.name(kwarg.key.name_id, call_pos)?);
                     }
                 }
 
@@ -2564,7 +2642,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         // Convert the attribute name id up front so the overflow check happens
         // once and both `DictMerge` (for error messages) and `CallAttrExtended`
         // can reuse the converted value.
-        let name_idx = check_name_index_u16(name_id, call_pos)?;
+        let name_idx = self.code.name(name_id, call_pos)?;
         // 1. Build args tuple
         // Push regular positional args and build list
         let pos_count = args.map_or(0, Vec::len);
@@ -3486,7 +3564,7 @@ impl<'a, 'i> Compiler<'a, 'i> {
         target_position: CodeRange,
     ) -> Result<(), CompileError> {
         let name_id = attr.string_id().expect("attribute name in AST must be interned");
-        let name_idx = check_name_index_u16(name_id, target_position)?;
+        let name_idx = self.code.name(name_id, target_position)?;
         self.compile_expr(object)?;
         self.code.set_location(target_position, None);
         self.code.emit_u16(Opcode::StoreAttr, name_idx)?;
@@ -3593,6 +3671,47 @@ impl<'a, 'i> Compiler<'a, 'i> {
                 self.code.emit_u8(Opcode::Assert, assert_flags(None))?;
             }
         }
+        Ok(())
+    }
+
+    /// Compiles a t-string into a `Template`.
+    ///
+    /// Nothing is joined: the literal segments become one tuple, and each
+    /// replacement field becomes an `Interpolation` holding its value and the
+    /// three pieces of metadata a consumer inspects. Only the *format spec* is
+    /// rendered here, because CPython stores its text after substituting any
+    /// nested field (`t"{x:>{w}}"` records `">5"`).
+    fn compile_tstring(&mut self, template: &ParsedTemplate, position: CodeRange) -> Result<(), CompileError> {
+        let strings_len = u16::try_from(template.strings.len())
+            .map_err(|_| CompileError::new("t-string has too many literal segments", position))?;
+        for string_id in &template.strings {
+            let const_idx = self.code.add_const(Value::InternString(*string_id))?;
+            self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, strings_len)?;
+
+        let interpolations_len = u16::try_from(template.interpolations.len())
+            .map_err(|_| CompileError::new("t-string has too many interpolations", position))?;
+        for interpolation in &template.interpolations {
+            self.compile_expr(&interpolation.expr)?;
+            let expression_idx = self.code.add_const(Value::InternString(interpolation.expression))?;
+            self.code.emit_u16(Opcode::LoadConst, expression_idx)?;
+            match conversion_char(interpolation.conversion) {
+                Some(flag) => {
+                    let const_idx = self.code.add_const(Value::InternString(StringId::from_ascii(flag)))?;
+                    self.code.emit_u16(Opcode::LoadConst, const_idx)?;
+                }
+                None => self.code.emit(Opcode::LoadNone)?,
+            }
+            let spec_parts = self.compile_fstring_parts(&interpolation.format_spec)?;
+            self.code.emit_u16(Opcode::BuildFString, spec_parts)?;
+            self.code.set_location(interpolation.expr.position, None);
+            self.code.emit(Opcode::BuildInterpolation)?;
+        }
+        self.code.emit_u16(Opcode::BuildTuple, interpolations_len)?;
+
+        self.code.set_location(position, None);
+        self.code.emit(Opcode::BuildTemplate)?;
         Ok(())
     }
 
@@ -3985,6 +4104,55 @@ impl<'a, 'i> Compiler<'a, 'i> {
     /// implicitly emits a delete on the bound name, but functions with 256+
     /// locals plus an `except as` are exotic enough that we surface a
     /// `SyntaxError` rather than introduce a new opcode just for this).
+    /// Compiles one `del` target.
+    ///
+    /// A name delete emits a load first: `DeleteLocal` and `DeleteCell`
+    /// overwrite unconditionally, and it is that load which raises the
+    /// `UnboundLocalError` CPython raises for a name that was never bound.
+    fn compile_delete_target(&mut self, target: &DeleteTarget) -> Result<(), CompileError> {
+        match target {
+            DeleteTarget::Name(ident) => {
+                // `DeleteName` and `DeleteGlobal` raise for themselves; only the
+                // two that overwrite unconditionally need the guarding load.
+                let needs_guard = match ident.scope {
+                    NameScope::Local => !self.is_module_scope,
+                    NameScope::Cell => true,
+                    NameScope::Global | NameScope::CompVar | NameScope::Name => false,
+                };
+                if needs_guard {
+                    self.compile_name(ident)?;
+                    self.code.set_location(ident.position, None);
+                    self.code.emit(Opcode::Pop)?;
+                }
+                self.code.set_location(ident.position, None);
+                self.compile_delete(ident)?;
+            }
+            DeleteTarget::Attr { object, attr, position } => {
+                let Some(name_id) = attr.string_id() else {
+                    return Err(CompileError::new(
+                        "internal error: attribute name in AST must be interned",
+                        *position,
+                    ));
+                };
+                let name_idx = self.code.name(name_id, *position)?;
+                self.compile_expr(object)?;
+                self.code.set_location(*position, None);
+                self.code.emit_u16(Opcode::DeleteAttr, name_idx)?;
+            }
+            DeleteTarget::Subscript {
+                object,
+                index,
+                position,
+            } => {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                self.code.set_location(*position, None);
+                self.code.emit(Opcode::DeleteSubscr)?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_delete(&mut self, target: &Identifier) -> Result<(), CompileError> {
         let slot = target.namespace_id().as_u16();
         match target.scope {

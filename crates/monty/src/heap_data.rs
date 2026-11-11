@@ -11,7 +11,7 @@ use monty_types::ExcType;
 use crate::{
     annotations,
     args::ArgValues,
-    asyncio::{Awaiter, Coroutine, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
+    asyncio::{Awaiter, ExternalFuture, ExternalFutureState, GatherFuture, GatherState},
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcTypeExt, RunResult, SimpleException},
@@ -73,6 +73,8 @@ macro_rules! heap_payloads {
             Range(inline $crate::types::Range),
             /// A slice object such as `slice(1, 10, 2)`.
             Slice(inline $crate::types::Slice),
+            /// A code object, what `compile()` answers and `eval()`/`exec()` take.
+            Code(boxed $crate::types::Code),
             /// An exception instance such as `ValueError('message')`.
             #[serde(rename = "X")]
             Exception(inline $crate::exception_private::SimpleException),
@@ -128,9 +130,9 @@ macro_rules! heap_payloads {
             Complex(inline $crate::types::Complex),
             /// A Python module and its attributes.
             Module(boxed $crate::types::Module),
-            /// A coroutine object from an async function call.
-            #[serde(rename = "O")]
-            Coroutine(inline $crate::asyncio::Coroutine),
+            /// A generator or coroutine object: a function body frozen between
+            /// two `yield`s or two `await`s.
+            Generator(boxed $crate::types::generator::Generator),
             /// An `asyncio.gather()` result tracking multiple coroutines or tasks.
             GatherFuture(boxed $crate::asyncio::GatherFuture),
             /// An external future driven by the host.
@@ -177,6 +179,24 @@ macro_rules! heap_payloads {
             DirScan(boxed $crate::types::DirScan),
             /// Any `csv` object: a reader, writer, `DictReader`, `DictWriter` or dialect.
             Csv(boxed $crate::types::CsvObject),
+            /// PEP 695 `typing.TypeAliasType`: the value of `type X = ...`.
+            TypeAliasType(inline $crate::types::TypeAliasType),
+            /// A `@property` on a user-defined class: the getter it binds.
+            ClassProperty(inline $crate::types::property::ClassProperty),
+            /// PEP 750 `string.templatelib.Template`: a `t"..."` literal's value.
+            Template(inline $crate::types::Template),
+            /// PEP 750 `string.templatelib.Interpolation`: one `{...}` field of a
+            /// template. Boxed: four `Value`s would otherwise sit just under `Dict`'s
+            /// payload ceiling for a type nothing hot allocates.
+            Interpolation(boxed $crate::types::Interpolation),
+            /// The event loop `asyncio.get_running_loop()` hands back.
+            EventLoop(inline $crate::types::EventLoop),
+            /// A `contextvars.ContextVar` and the value it currently holds.
+            ContextVar(inline $crate::types::ContextVar),
+            /// The `contextvars.Token` a `ContextVar.set()` handed back.
+            ContextVarToken(inline $crate::types::ContextVarToken),
+            /// A `typing._LiteralGenericAlias` such as `Literal['a', 'b']`.
+            LiteralGenericAlias(inline $crate::types::LiteralGenericAlias),
             /// A `decimal.Decimal` value.
             Decimal(inline $crate::types::decimal::Decimal),
             /// A mutable `decimal.Context`.
@@ -267,21 +287,38 @@ impl HeapData {
             | Self::SetIterator(_)
             | Self::CallableIterator(_)
             | Self::Module(_)
-            | Self::Coroutine(_)
+            | Self::Generator(_)
             | Self::GatherFuture(_)
             | Self::ExternalFuture(_)
             | Self::Partial(_)
             | Self::GenericAlias(_)
+            | Self::LiteralGenericAlias(_)
             | Self::Union(_)
             | Self::ForwardRef(_)
             | Self::LruCache(_)
-            | Self::Csv(_) => true,
+            | Self::Csv(_)
+            // An alias's memoized `__value__` can reach back to the alias itself,
+            // and a template holds arbitrary interpolated values.
+            | Self::TypeAliasType(_)
+            | Self::Template(_)
+            | Self::Interpolation(_)
+            // A context variable holds whatever was set in it, and its token
+            // holds the variable back.
+            | Self::EventLoop(_)
+            | Self::ContextVar(_)
+            | Self::ContextVarToken(_)
+            // A getter is a closure, which can capture the class it belongs to.
+            | Self::ClassProperty(_) => true,
+            // An instance of a class that inherits `str` holds that class, which
+            // can reach the instance again through a method default or a class
+            // variable; a plain string holds nothing and stays a leaf.
+            Self::Str(value) => value.class().is_some(),
             // Leaf types, plus iterators whose heap refs only point at leaves and so
             // cannot close a cycle. Move one up if it gains a container-valued field.
-            Self::Str(_)
-            | Self::Bytes(_)
+            Self::Bytes(_)
             | Self::Range(_)
             | Self::Slice(_)
+            | Self::Code(_)
             | Self::Exception(_)
             | Self::DataclassParams(_)
             | Self::StringIterator(_)
@@ -309,13 +346,11 @@ impl HeapData {
         }
     }
 
-    /// Whether calling a `Ref` to this heap data would succeed at dispatch.
+    /// Whether calling a `Ref` to this heap data would dispatch.
     ///
-    /// A conservative subset of the types overriding [`PyTrait::py_call`]: it
-    /// is what `partial()` and friends screen a callable argument with, and it
-    /// has never admitted `HostClassType` or `NamedTupleClass`, both of which
-    /// dispatch perfectly well. Widening it changes what those builtins accept,
-    /// so it is not simply the list of `py_call` overrides.
+    /// Exactly the types overriding [`PyTrait::py_call`], so it is what
+    /// `callable()` answers and what `partial()` and friends screen a callable
+    /// argument with. A new callable type belongs here as well as there.
     #[must_use]
     pub(crate) fn is_callable(&self) -> bool {
         matches!(
@@ -328,6 +363,9 @@ impl HeapData {
                 | Self::ExtFunction(_)
                 | Self::Partial(_)
                 | Self::GenericAlias(_)
+                | Self::LiteralGenericAlias(_)
+                | Self::NamedTupleClass(_)
+                | Self::HostClassType(_)
                 | Self::LruCache(_)
         )
     }
@@ -349,8 +387,16 @@ impl HeapData {
             Self::Dict(_) => Type::Dict,
             Self::Partial(_) => Type::Partial,
             Self::Random(_) => Type::Random,
+            Self::TypeAliasType(_) => Type::TypeAliasType,
+            Self::EventLoop(_) => Type::EventLoop,
+            Self::ContextVar(_) => Type::ContextVar,
+            Self::ContextVarToken(_) => Type::ContextVarToken,
+            Self::ClassProperty(_) => Type::Property,
+            Self::Template(_) => Type::Template,
+            Self::Interpolation(_) => Type::Interpolation,
             Self::HashObject(hash) => hash.algorithm().py_type(),
             Self::GenericAlias(_) => Type::GenericAlias,
+            Self::LiteralGenericAlias(_) => Type::LiteralGenericAlias,
             Self::Union(_) => Type::Union,
             Self::ForwardRef(_) => Type::ForwardRef,
             Self::LruCache(_) => Type::LruCacheWrapper,
@@ -363,6 +409,7 @@ impl HeapData {
             Self::Cell(_) => Type::Cell,
             Self::Range(_) => Type::Range,
             Self::Slice(_) => Type::Slice,
+            Self::Code(_) => Type::Code,
             Self::Exception(e) => Type::Exception(e.exc_type()),
             Self::HostClass(_) => Type::HostClass,
             Self::HostClassType(_) => Type::Type,
@@ -376,7 +423,8 @@ impl HeapData {
             Self::LongInt(_) => Type::Int,
             Self::Complex(_) => Type::Complex,
             Self::Module(_) => Type::Module,
-            Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::Generator(generator) => generator.py_type(),
             Self::Path(_) => Type::Path,
             Self::OpenFile(file) => file.file_type(),
             Self::RePattern(_) => Type::RePattern,
@@ -644,16 +692,6 @@ impl HeapItem for SimpleException {
 impl HeapItem for LongInt {
     fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {
         // LongInt doesn't contain heap references
-    }
-}
-
-impl HeapItem for Coroutine {
-    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
-        // Decrement ref count for namespace values that are heap references
-        for value in &mut self.namespace {
-            value.py_dec_ref_ids(stack);
-        }
-        stack.extend(self.globals);
     }
 }
 

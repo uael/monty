@@ -7,23 +7,26 @@ mod abs;
 mod all;
 mod any;
 mod bin;
+mod callable;
 mod chr;
 mod divmod;
 mod enumerate;
 pub(crate) mod eval_exec;
-mod filter;
+pub(crate) mod filter;
 mod format;
 mod getattr;
+mod globals;
 mod hasattr;
 mod hash;
 mod hex;
 mod id;
 pub(crate) mod isinstance;
+mod issubclass;
 pub(crate) mod iter;
 mod len;
 mod locals;
-mod map;
-mod min_max; // min and max share implementation
+pub(crate) mod map;
+pub(crate) mod min_max; // min and max share implementation
 pub(crate) use min_max::candidate_wins;
 pub(crate) mod next;
 pub(crate) mod object_setattr;
@@ -39,7 +42,8 @@ mod setattr;
 mod sorted;
 mod sum;
 mod type_;
-mod zip;
+mod vars;
+pub(crate) mod zip;
 
 use std::{fmt, fmt::Write, str::FromStr};
 
@@ -92,6 +96,25 @@ impl Builtins {
         }
     }
 
+    /// Whether this builtin reads its first argument whole, given the count of
+    /// its positional arguments. A generator there fills a list on the VM's
+    /// own loop first, and the builtin runs on the list.
+    ///
+    /// `any()`, `all()` and `next()` read a generator one value at a time
+    /// instead; see [`Reader`](crate::types::generator::Reader).
+    pub(crate) fn reads_whole(self, pos_count: usize) -> bool {
+        match self {
+            Self::Function(BuiltinsFunctions::Sum | BuiltinsFunctions::Sorted | BuiltinsFunctions::Enumerate) => {
+                pos_count > 0
+            }
+            Self::Function(BuiltinsFunctions::Min | BuiltinsFunctions::Max) => pos_count == 1,
+            Self::Type(
+                BuiltinType::List | BuiltinType::Tuple | BuiltinType::Set | BuiltinType::FrozenSet | BuiltinType::Dict,
+            ) => pos_count > 0,
+            _ => false,
+        }
+    }
+
     /// Writes the Python repr() string for this callable to a formatter.
     pub fn py_repr_fmt<W: Write>(self, f: &mut W) -> fmt::Result {
         match self {
@@ -140,25 +163,32 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
     fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
         let r = match self {
             Self::Abs => abs::builtin_abs(vm, args),
-            Self::All => all::builtin_all(vm, args),
-            Self::Any => any::builtin_any(vm, args),
+            // `all()`, `any()` and `next()` read a generator on the VM's own loop.
+            Self::All => return all::builtin_all(vm, args),
+            Self::Any => return any::builtin_any(vm, args),
             Self::Bin => bin::builtin_bin(vm, args),
+            Self::Callable => callable::builtin_callable(vm, args),
             Self::Chr => chr::builtin_chr(vm, args),
             Self::Divmod => divmod::builtin_divmod(vm, args),
             Self::Enumerate => enumerate::builtin_enumerate(vm, args),
-            Self::Filter => filter::builtin_filter(vm, args),
+            // `filter()`, `map()`, `min()`, `max()`, `sorted()` and `zip()` call back on the VM's own loop.
+            Self::Filter => return filter::builtin_filter(vm, args),
             Self::Format => format::builtin_format(vm, args),
             // `getattr()` / `hasattr()` may suspend a lazy host attribute lookup.
             Self::Getattr => return getattr::builtin_getattr(vm, args),
             Self::Hasattr => return hasattr::builtin_hasattr(vm, args),
+            Self::Globals => globals::builtin_globals(vm, args),
+            Self::Vars => vars::builtin_vars(vm, args),
             Self::Hash => hash::builtin_hash(vm, args),
             Self::Hex => hex::builtin_hex(vm, args),
             Self::Id => id::builtin_id(vm, args),
             Self::Isinstance => isinstance::builtin_isinstance(vm, args),
+            Self::Issubclass => issubclass::builtin_issubclass(vm, args),
+            Self::Compile => eval_exec::builtin_compile(vm, args),
             Self::Len => len::builtin_len(vm, args),
-            Self::Map => map::builtin_map(vm, args),
-            Self::Max => min_max::builtin_max(vm, args),
-            Self::Min => min_max::builtin_min(vm, args),
+            Self::Map => return map::builtin_map(vm, args),
+            Self::Max => return min_max::builtin_max(vm, args),
+            Self::Min => return min_max::builtin_min(vm, args),
             // `next()` on an unread file yields the read that loads it.
             Self::Next => return next::builtin_next(vm, args),
             Self::Oct => oct::builtin_oct(vm, args),
@@ -172,10 +202,10 @@ impl BuiltinsFunctionsExt for BuiltinsFunctions {
             Self::Round => round::builtin_round(vm, args),
             Self::Setattr => setattr::builtin_setattr(vm, args),
             Self::ObjectSetattr => object_setattr::builtin_object_setattr(vm, args),
-            Self::Sorted => sorted::builtin_sorted(vm, args),
+            Self::Sorted => return sorted::builtin_sorted(vm, args),
             Self::Sum => sum::builtin_sum(vm, args),
             Self::Type => type_::builtin_type(vm, args),
-            Self::Zip => zip::builtin_zip(vm, args),
+            Self::Zip => return zip::builtin_zip(vm, args),
             // `eval()` / `exec()` push the compiled snippet's frame.
             Self::Eval => return eval_exec::builtin_eval(vm, args),
             Self::Exec => return eval_exec::builtin_exec(vm, args),

@@ -34,7 +34,11 @@ pub(crate) use crate::{
 };
 
 mod free_list;
+mod handles;
 mod stable_heap;
+
+use handles::Handles;
+pub(crate) use handles::Held;
 pub(crate) use stable_heap::StableHeap;
 
 /// Unique identifier for values stored inside the heap arena.
@@ -996,16 +1000,20 @@ pub(crate) struct Heap {
     /// `boundary_index` because host and sandbox uuids are distinct namespaces.
     /// Weak like the others: cleared on free, rebuilt on restore.
     host_type_index: BTreeMap<MontyUuid, HeapId>,
+    /// The callables and classes held for the host by handle, when the
+    /// session holds handles; strong, unlike the indexes above.
+    handles: Option<Handles>,
 }
 
 impl serde::Serialize for Heap {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Heap", 6)?;
+        let mut state = serializer.serialize_struct("Heap", 7)?;
         state.serialize_field("entries", &self.entries)?;
         state.serialize_field("tracker", &self.tracker)?;
         state.serialize_field("purple_count", &self.purple_count)?;
         state.serialize_field("allocations_since_gc", &self.allocations_since_gc.get())?;
         state.serialize_field("timezone_utc", &self.timezone_utc)?;
+        state.serialize_field("handles", &self.handles)?;
         state.serialize_field("decimal_contexts", &self.decimal_contexts)?;
         state.end()
     }
@@ -1021,6 +1029,7 @@ impl<'de> serde::Deserialize<'de> for Heap {
             allocations_since_gc: u32,
             timezone_utc: Option<HeapId>,
             #[serde(default)]
+            handles: Option<Handles>,
             decimal_contexts: [Option<HeapId>; DecimalSlot::COUNT],
         }
         let fields = HeapFields::deserialize(deserializer)?;
@@ -1029,7 +1038,14 @@ impl<'de> serde::Deserialize<'de> for Heap {
             ext_function_cache,
             boundary_index,
             host_type_index,
-        } = restore_entries(&mut entries).map_err(D::Error::custom)?;
+        } = match restore_entries(&mut entries) {
+            Ok(indexes) => indexes,
+            Err(message) => {
+                // A refused snapshot frees its entries as a dropped heap does.
+                free_entries(&mut entries);
+                return Err(D::Error::custom(message));
+            }
+        };
         Ok(Self {
             entries,
             tracker: fields.tracker,
@@ -1042,6 +1058,7 @@ impl<'de> serde::Deserialize<'de> for Heap {
             ext_function_cache,
             boundary_index,
             host_type_index,
+            handles: fields.handles,
         })
     }
 }
@@ -1159,6 +1176,7 @@ impl Heap {
             ext_function_cache: BTreeMap::new(),
             boundary_index: BTreeMap::new(),
             host_type_index: BTreeMap::new(),
+            handles: None,
         };
 
         // The empty-tuple singleton starts with refcount = 1 — that single ref *is* the
@@ -1869,12 +1887,18 @@ impl HeapReader<'_> {
 #[cfg(feature = "memory-model-checks")]
 impl Drop for Heap {
     fn drop(&mut self) {
-        for id in 0..self.entries.len() {
-            if let Some(mut entry) = self.entries.entry(HeapId::from_index(id)) {
-                // Mark all `Value::Ref` payloads as `Dereferenced` so they don't panic when dropped
-                py_dec_ref_ids_for_data(entry.get_mut().data.0.get_mut(), &mut Vec::new());
-                entry.free();
-            }
+        free_entries(&mut self.entries);
+    }
+}
+
+/// Frees every entry of a heap that goes away whole: a dropped heap, or the
+/// entries of a snapshot that [`restore_entries`] refused.
+fn free_entries(entries: &mut StableHeap<HeapEntry>) {
+    for id in 0..entries.len() {
+        if let Some(mut entry) = entries.entry(HeapId::from_index(id)) {
+            // Mark all `Value::Ref` payloads as `Dereferenced` so they don't panic when dropped
+            py_dec_ref_ids_for_data(entry.get_mut().data.0.get_mut(), &mut Vec::new());
+            entry.free();
         }
     }
 }
@@ -2057,7 +2081,9 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
             }
         }
         HeapData::Class(class) => {
-            // The class namespace holds method/class-variable values.
+            // The class namespace holds method/class-variable values, and the
+            // class owns a reference on each of its bases and on the dict it
+            // was made under. Mirrors `Class::py_dec_ref_ids`.
             for (k, v) in class.namespace() {
                 if let Value::Ref(id) = k {
                     on_child(*id);
@@ -2065,6 +2091,12 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
                 if let Value::Ref(id) = v {
                     on_child(*id);
                 }
+            }
+            for base in class.bases() {
+                on_child(*base);
+            }
+            if let Some(globals) = class.globals() {
+                on_child(globals);
             }
         }
         HeapData::Instance(instance) => {
@@ -2126,20 +2158,78 @@ fn for_each_child_id<F: FnMut(HeapId)>(data: &HeapData, mut on_child: F) {
         HeapData::Csv(csv) => csv.for_each_child_id(on_child),
         HeapData::Partial(partial) => partial.for_each_child_id(on_child),
         HeapData::GenericAlias(alias) => alias.for_each_child_id(on_child),
+        HeapData::LiteralGenericAlias(alias) => alias.for_each_child_id(on_child),
         HeapData::Union(union) => union.for_each_child_id(on_child),
-        HeapData::ForwardRef(forward_ref) => forward_ref.for_each_child_id(on_child),
-        HeapData::LruCache(cache) => cache.for_each_child_id(on_child),
-        // Attrs and, for a file module, its namespace dict.
-        HeapData::Module(m) => m.for_each_child_id(on_child),
-        HeapData::Coroutine(coro) => {
-            // Add namespace values that are heap references
-            for value in &coro.namespace {
+        // Mirrors `py_dec_ref_ids_for_data`: an alias owns its thunk plus any
+        // memoized `__value__`.
+        HeapData::TypeAliasType(alias) => alias.for_each_owned_value(|value| {
+            if let Value::Ref(id) = value {
+                on_child(*id);
+            }
+        }),
+        // Mirrors `Str::py_dec_ref_ids`: an instance of a class that inherits
+        // `str` owns that class, and a plain string owns nothing.
+        HeapData::Str(value) => {
+            if let Some(class_id) = value.class() {
+                on_child(class_id);
+            }
+        }
+        // Mirrors `py_dec_ref_ids_for_data`: a property owns its getter.
+        HeapData::ClassProperty(property) => {
+            if let Value::Ref(id) = property.fget() {
+                on_child(*id);
+            }
+        }
+        // Mirrors `py_dec_ref_ids_for_data`: a template owns its two tuples and
+        // an interpolation its four fields.
+        HeapData::Template(template) => {
+            for value in template.owned_values() {
                 if let Value::Ref(id) = value {
                     on_child(*id);
                 }
             }
-            if let Some(globals) = coro.globals {
-                on_child(globals);
+        }
+        HeapData::Interpolation(interpolation) => {
+            for value in interpolation.owned_values() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        // Mirrors `py_dec_ref_ids_for_data`: a context variable owns its name,
+        // default and current value, a token its variable and old value.
+        HeapData::ContextVar(var) => {
+            for value in var.owned_values().into_iter().flatten() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::ContextVarToken(token) => {
+            for value in token.owned_values().into_iter().flatten() {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+        }
+        HeapData::LruCache(cache) => cache.for_each_child_id(on_child),
+        // Attrs and, for a file module, its namespace dict.
+        HeapData::Module(m) => m.for_each_child_id(on_child),
+        HeapData::ForwardRef(forward_ref) => forward_ref.for_each_child_id(on_child),
+        // Mirrors `Generator::py_dec_ref_ids`: a suspended frame owns every
+        // value in both of its saved regions, plus its globals dict. A
+        // generator can hold itself, so this edge is what lets the collector
+        // see such a cycle. A coroutine is one of these too.
+        HeapData::Generator(generator) => {
+            for value in generator.stack.iter().chain(&generator.exception_stack) {
+                if let Value::Ref(id) = value {
+                    on_child(*id);
+                }
+            }
+            if let Some(namespace) = generator.namespace.as_deref() {
+                for id in namespace.owned_ids() {
+                    on_child(id);
+                }
             }
         }
         HeapData::GatherFuture(gather) => {
@@ -2281,17 +2371,24 @@ fn py_dec_ref_ids_for_data(data: &mut HeapData, stack: &mut Vec<HeapId>) {
         HeapData::Csv(csv) => csv.py_dec_ref_ids(stack),
         HeapData::Partial(partial) => partial.py_dec_ref_ids(stack),
         HeapData::GenericAlias(alias) => alias.py_dec_ref_ids(stack),
+        HeapData::LiteralGenericAlias(alias) => alias.py_dec_ref_ids(stack),
         HeapData::Union(union) => union.py_dec_ref_ids(stack),
+        // Release the alias's thunk and memoized value (mirrors `for_each_child_id`).
+        HeapData::TypeAliasType(alias) => alias.py_dec_ref_ids(stack),
+        // Release the getter (mirrors `for_each_child_id`).
+        HeapData::ClassProperty(property) => property.py_dec_ref_ids(stack),
+        // Release the template and interpolation references (mirrors `for_each_child_id`).
+        HeapData::Template(template) => template.py_dec_ref_ids(stack),
+        HeapData::Interpolation(interpolation) => interpolation.py_dec_ref_ids(stack),
+        // Release the context variable's and token's references (mirrors `for_each_child_id`).
+        HeapData::ContextVar(var) => var.py_dec_ref_ids(stack),
+        HeapData::ContextVarToken(token) => token.py_dec_ref_ids(stack),
         HeapData::ForwardRef(forward_ref) => forward_ref.py_dec_ref_ids(stack),
         HeapData::LruCache(cache) => cache.py_dec_ref_ids(stack),
         HeapData::Module(m) => m.py_dec_ref_ids(stack),
-        HeapData::Coroutine(coro) => {
-            // Decrement ref count for namespace values that are heap references
-            for value in &mut coro.namespace {
-                value.py_dec_ref_ids(stack);
-            }
-            stack.extend(coro.globals);
-        }
+        // Mirrors `for_each_child_id` above; the body lives on `Generator` as
+        // its `HeapItem` impl, so the two walkers cannot drift.
+        HeapData::Generator(generator) => generator.py_dec_ref_ids(stack),
         HeapData::GatherFuture(gather) => {
             // Decrement ref count for owned item HeapIds (coroutines and
             // external futures are both owned by the gather).

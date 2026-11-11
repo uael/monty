@@ -15,11 +15,15 @@ use crate::{
 };
 
 pub(crate) mod annotationlib;
+pub(crate) mod ast;
 pub(crate) mod asyncio;
 pub(crate) mod base64;
 pub(crate) mod binascii;
 pub(crate) mod bisect;
+pub(crate) mod builtins_module;
 pub(crate) mod collections;
+pub(crate) mod collections_abc;
+pub(crate) mod contextvars;
 pub(crate) mod copy;
 pub(crate) mod csv;
 pub(crate) mod dataclasses;
@@ -33,12 +37,15 @@ pub(crate) mod hashlib;
 pub(crate) mod itertools;
 pub(crate) mod json;
 pub(crate) mod math;
+pub(crate) mod monty;
 pub(crate) mod os;
 pub(crate) mod os_path;
 pub(crate) mod pathlib;
 pub(crate) mod random;
 pub(crate) mod re;
+pub(crate) mod string_templatelib;
 pub(crate) mod sys;
+pub(crate) mod table;
 pub(crate) mod time;
 pub(crate) mod tomllib;
 pub(crate) mod typing;
@@ -53,6 +60,8 @@ pub(crate) enum StandardLib {
     Typing,
     /// The `asyncio` module providing async/await support (only `run()` and `gather()` implemented).
     Asyncio,
+    /// The `ast` module, which here is `PyCF_ALLOW_TOP_LEVEL_AWAIT` alone.
+    Ast,
     /// The `pathlib` module providing object-oriented filesystem paths.
     Pathlib,
     /// The `os` module: environment access, host-mediated filesystem calls and `os.path`.
@@ -89,6 +98,14 @@ pub(crate) enum StandardLib {
     Random,
     /// The `copy` module providing `copy()` and `deepcopy()`.
     Copy,
+    /// The `collections.abc` module exposing the abstract base classes as
+    /// annotation markers.
+    CollectionsAbc,
+    /// The `string.templatelib` module exposing the PEP 750 `Template` and
+    /// `Interpolation` type objects (no functions).
+    StringTemplatelib,
+    /// The `string` package, which holds `string.templatelib` alone.
+    String,
     /// The `time` module providing `time()` and `sleep()`, both of which the
     /// host serves.
     Time,
@@ -101,6 +118,13 @@ pub(crate) enum StandardLib {
     Csv,
     /// The `tomllib` module: `loads()`, `load()` and `TOMLDecodeError`.
     Tomllib,
+    /// The `builtins` module: every name a bare identifier resolves to.
+    Builtins,
+    /// The `contextvars` module exposing `ContextVar` and its `Token`.
+    Contextvars,
+    /// The `monty` module: what this interpreter does that CPython does not,
+    /// for the host that embeds it.
+    Monty,
     /// The `decimal` module: `Decimal`, `Context` and the signals.
     Decimal,
     /// The `fnmatch` module: shell-style pattern matching.
@@ -121,6 +145,7 @@ impl StandardLib {
             StaticStrings::Sys => Some(Self::Sys),
             StaticStrings::Typing => Some(Self::Typing),
             StaticStrings::Asyncio => Some(Self::Asyncio),
+            StaticStrings::Ast => Some(Self::Ast),
             StaticStrings::Pathlib => Some(Self::Pathlib),
             StaticStrings::Os => Some(Self::Os),
             StaticStrings::OsPath | StaticStrings::Posixpath => Some(Self::OsPath),
@@ -137,11 +162,17 @@ impl StandardLib {
             StaticStrings::Binascii => Some(Self::Binascii),
             StaticStrings::Random => Some(Self::Random),
             StaticStrings::Copy => Some(Self::Copy),
+            StaticStrings::CollectionsAbc => Some(Self::CollectionsAbc),
+            StaticStrings::StringTemplatelib => Some(Self::StringTemplatelib),
+            StaticStrings::StringAttr => Some(Self::String),
             StaticStrings::Time => Some(Self::Time),
             StaticStrings::Hashlib => Some(Self::Hashlib),
             StaticStrings::Bisect => Some(Self::Bisect),
             StaticStrings::Csv => Some(Self::Csv),
             StaticStrings::Tomllib => Some(Self::Tomllib),
+            StaticStrings::Contextvars => Some(Self::Contextvars),
+            StaticStrings::Builtins => Some(Self::Builtins),
+            StaticStrings::Monty => Some(Self::Monty),
             StaticStrings::DecimalMod => Some(Self::Decimal),
             StaticStrings::Fnmatch => Some(Self::Fnmatch),
             StaticStrings::Annotationlib => Some(Self::Annotationlib),
@@ -165,6 +196,7 @@ impl StandardLib {
             Self::Sys => sys::create_module(vm),
             Self::Typing => typing::create_module(vm),
             Self::Asyncio => asyncio::create_module(vm),
+            Self::Ast => ast::create_module(vm),
             Self::Pathlib => pathlib::create_module(vm),
             Self::Os => os::create_module(vm),
             Self::OsPath => os_path::create_module(vm),
@@ -181,11 +213,17 @@ impl StandardLib {
             Self::Binascii => binascii::create_module(vm),
             Self::Random => random::create_module(vm),
             Self::Copy => copy::create_module(vm),
+            Self::CollectionsAbc => collections_abc::create_module(vm),
+            Self::StringTemplatelib => string_templatelib::create_module(vm),
+            Self::String => string_templatelib::create_package(vm),
             Self::Time => time::create_module(vm),
             Self::Hashlib => hashlib::create_module(vm),
             Self::Bisect => bisect::create_module(vm),
             Self::Csv => csv::create_module(vm),
             Self::Tomllib => tomllib::create_module(vm),
+            Self::Contextvars => contextvars::create_module(vm),
+            Self::Builtins => builtins_module::create_module(vm),
+            Self::Monty => monty::create_module(vm),
             Self::Decimal => decimal::create_module(vm),
             Self::Fnmatch => fnmatch::create_module(vm),
             Self::Annotationlib => annotationlib::create_module(vm),
@@ -223,6 +261,7 @@ pub(crate) enum ModuleFunctions {
     Bisect(bisect::BisectFunctions),
     Csv(csv::CsvFunctions),
     Tomllib(tomllib::TomllibFunctions),
+    Monty(monty::MontyFunctions),
     Decimal(decimal::DecimalFunctions),
     Fnmatch(fnmatch::FnmatchFunctions),
     Typing(typing::TypingFunctions),
@@ -264,6 +303,7 @@ impl fmt::Display for ModuleFunctions {
             Self::Bisect(func) => write!(f, "{func}"),
             Self::Csv(func) => write!(f, "{func}"),
             Self::Tomllib(func) => write!(f, "{func}"),
+            Self::Monty(func) => write!(f, "{func}"),
             Self::Decimal(func) => write!(f, "{func}"),
             Self::Fnmatch(func) => write!(f, "{func}"),
             Self::Typing(func) => write!(f, "{func}"),
@@ -304,6 +344,7 @@ impl ModuleFunctions {
             Self::Bisect(functions) => bisect::call(vm, functions, args).map(CallResult::Value),
             Self::Csv(functions) => csv::call(vm, functions, args),
             Self::Tomllib(functions) => tomllib::call(vm, functions, args),
+            Self::Monty(functions) => monty::call(vm, functions, args).map(CallResult::Value),
             Self::Decimal(functions) => decimal::call(vm, functions, args).map(CallResult::Value),
             Self::Fnmatch(functions) => fnmatch::call(vm, functions, args).map(CallResult::Value),
             Self::Typing(functions) => typing::call(vm, functions, args),

@@ -149,7 +149,9 @@ impl VM<'_> {
         let bytecode = self.current_frame.bytecode;
         (bytecode.get(ip) == Some(&(Opcode::LoadSubmodule as u8))).then(|| {
             // operands: u16 attribute name_id, then u16 path name_id, little-endian
-            StringId::from_index(u16::from_le_bytes([bytecode[ip + 3], bytecode[ip + 4]]))
+            self.current_frame
+                .code
+                .name(u16::from_le_bytes([bytecode[ip + 3], bytecode[ip + 4]]))
         })
     }
 
@@ -167,7 +169,9 @@ impl VM<'_> {
         let bytecode = self.current_frame.bytecode;
         (bytecode.get(ip) == Some(&(Opcode::LoadModule as u8))).then(|| {
             // operand: u16 module name_id, little-endian
-            StringId::from_index(u16::from_le_bytes([bytecode[ip + 1], bytecode[ip + 2]]))
+            self.current_frame
+                .code
+                .name(u16::from_le_bytes([bytecode[ip + 1], bytecode[ip + 2]]))
         })
     }
 
@@ -183,6 +187,17 @@ impl VM<'_> {
         let value = this.pop();
         // py_set_attr takes ownership of value and drops it on error
         obj.py_set_attr(&EitherStr::Interned(name_id), value, this)
+    }
+
+    /// Removes the named attribute from the object on top of the stack
+    /// (`del obj.attr`).
+    pub(super) fn delete_attr(&mut self, name_id: StringId) -> Result<(), RunError> {
+        let this = self;
+
+        let obj = this.pop();
+        defer_drop!(obj, this);
+
+        obj.py_del_attr(&EitherStr::Interned(name_id), this)
     }
 }
 

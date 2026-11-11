@@ -10,6 +10,11 @@
 //! - `W` suffix, 2 bytes (u16/i16): `LoadLocalW`, `Jump`, `LoadConst`
 //! - Compound (multiple operands): `CallFunctionKw` (u8 + u8), `MakeClosure` (u16 + u8 + u8),
 //!   `LoadName` (u16 + u16 + u8)
+//!
+//! A `name` operand is a u16 index into the name table of the code object that holds the
+//! instruction (`Code::name`), never a session `StringId`, and a `function` operand is a u16
+//! index into its function table (`Code::function`), never a session `FunctionId`: a session
+//! keeps every string and function it compiles, so only what one body uses bounds the operand.
 
 #[cfg(test)]
 use strum::IntoEnumIterator;
@@ -136,13 +141,13 @@ pub enum Opcode {
     /// Delete local variable. Operand: u8 slot.
     DeleteLocal = 21,
     /// Load global in call context: pushes an external function for undefined names
-    /// instead of yielding `NameLookup`. Operands: u16 slot, u16 name_id.
+    /// instead of yielding `NameLookup`. Operands: u16 slot, u16 name.
     ///
     /// Used when compiling function calls like `foo()` where `foo` is a global.
     /// If the variable is defined, behaves identically to `LoadGlobal`.
     /// If undefined, pushes an `ExtFunction` value so execution continues to `CallFunction`,
     /// which naturally yields `FunctionCall` instead of `NameLookup`.
-    /// The name_id is encoded in the operand because global and local slot indices
+    /// The name is encoded in the operand because global and local slot indices
     /// belong to different namespaces — using the current frame's local_names would
     /// return the wrong name when called from inside a function.
     LoadGlobalCallable = 22,
@@ -272,9 +277,10 @@ pub enum Opcode {
     /// Used after building the args list to create the final args tuple
     /// for `CallFunctionEx`.
     ListToTuple = 70,
-    /// Pop mapping, pop dict, update dict with mapping. Operand: u16 func_name_id.
+    /// Pop mapping, pop dict, update dict with mapping. Operand: u16 name of the
+    /// callee, or `u16::MAX` when the compiler knows no callee.
     ///
-    /// Used for `**kwargs` unpacking. The func_name_id is used for error messages
+    /// Used for `**kwargs` unpacking. The callee name is used for error messages
     /// when the mapping contains non-string keys.
     DictMerge = 71,
 
@@ -304,17 +310,15 @@ pub enum Opcode {
     BinarySubscr = 75,
     /// a[b] = c: pop value, pop index, pop obj.
     StoreSubscr = 76,
-    // NOTE: DeleteSubscr removed - `del` statement not supported by parser
-    /// Pop obj, push obj.attr. Operand: u16 name_id.
+    /// Pop obj, push obj.attr. Operand: u16 name.
     LoadAttr = 77,
-    /// Pop module, push module.attr for `from ... import`. Operand: u16 name_id.
+    /// Pop module, push module.attr for `from ... import`. Operand: u16 name.
     ///
     /// Missing attributes raise `ImportError` using the frame's `import_from_module`:
     /// host-provided values need not be `Module`s.
     LoadAttrImport = 78,
-    /// Pop value, pop obj, set obj.attr. Operand: u16 name_id.
+    /// Pop value, pop obj, set obj.attr. Operand: u16 name.
     StoreAttr = 79,
-    // NOTE: DeleteAttr removed - `del` statement not supported by parser
 
     // === Function Calls ===
     /// Call TOS with n positional args. Operand: u8 arg_count.
@@ -338,19 +342,19 @@ pub enum Opcode {
     ///
     /// Stack: [callable, pos_args..., kw_values...]
     /// After the two count bytes, there are kw_count little-endian u16 values,
-    /// each being a StringId index for the corresponding keyword argument name.
+    /// each being the name of the corresponding keyword argument.
     CallFunctionKw = 83,
-    /// Call attribute on object. Operands: u16 name_id, u8 arg_count.
+    /// Call attribute on object. Operands: u16 name, u8 arg_count.
     ///
     /// This is used for both method calls (`obj.method(args)`) and module
     /// attribute calls (`module.func(args)`). The attribute is looked up
     /// on the object and called with the given arguments.
     CallAttr = 84,
-    /// Call attribute with keyword args. Operands: u16 name_id, u8 pos_count, u8 kw_count, then kw_count u16 name indices.
+    /// Call attribute with keyword args. Operands: u16 name, u8 pos_count, u8 kw_count, then kw_count u16 name indices.
     ///
     /// Stack: [obj, pos_args..., kw_values...]
     /// After the operands, there are kw_count little-endian u16 values,
-    /// each being a StringId index for the corresponding keyword argument name.
+    /// each being the name of the corresponding keyword argument.
     CallAttrKw = 85,
     /// Call a defined function with *args tuple and **kwargs dict. Operand: u8 flags.
     ///
@@ -364,7 +368,7 @@ pub enum Opcode {
     ///
     /// Used for calls with `*args` and/or `**kwargs` unpacking.
     CallFunctionExtended = 86,
-    /// Call attribute with *args tuple and **kwargs dict. Operands: u16 name_id, u8 flags.
+    /// Call attribute with *args tuple and **kwargs dict. Operands: u16 name, u8 flags.
     ///
     /// Flags:
     /// - bit 0: has kwargs dict on stack
@@ -396,9 +400,9 @@ pub enum Opcode {
     ForIter = 94,
 
     // === Function Definition ===
-    /// Create function object. Operand: u16 func_id.
+    /// Create function object. Operands: u16 function, u8 defaults_count.
     MakeFunction = 95,
-    /// Create closure. Operands: u16 func_id, u8 cell_count.
+    /// Create closure. Operands: u16 function, u8 defaults_count, u8 cell_count.
     MakeClosure = 96,
 
     // === Exception Handling ===
@@ -421,16 +425,37 @@ pub enum Opcode {
     ReturnValue = 101,
 
     // === Async/Await ===
-    /// Await the TOS value.
+    /// Replace the TOS awaitable with what drives the wait.
     ///
-    /// Handles `ExternalFuture`, `Coroutine`, and `GatherFuture` awaitables.
-    /// For `ExternalFuture`: if resolved, pushes result; if pending, blocks task.
-    /// For `Coroutine`: validates state is `New`, then starts execution.
-    /// For `GatherFuture`: spawns all coroutines as tasks and blocks until completion.
+    /// A coroutine, an `ExternalFuture` and a `GatherFuture` drive their own
+    /// wait and stay where they are. Anything else must define `__await__`,
+    /// and what that hands back takes its place. The `Send` loop the compiler
+    /// emits after this steps whichever it is; see `Expr::Await`.
     ///
     /// Raises `TypeError` if TOS is not awaitable.
-    /// Raises `RuntimeError` if coroutine/future has already been awaited.
+    /// Raises `RuntimeError` if the coroutine has already been awaited.
     Await = 102,
+
+    // === Generators ===
+    /// Suspend the running generator, handing TOS to whoever resumed it.
+    ///
+    /// A return that keeps the frame: the frame's stack region and its slice of
+    /// the exception stack move into the generator object, the frame is popped,
+    /// and the yielded value is pushed onto the resumer's operand stack exactly
+    /// where a call's return value would land. Resuming pushes the frame back
+    /// and leaves the sent value on top, which is what this instruction's result
+    /// is, so `x = yield v` reads it.
+    Yield = 137,
+
+    /// One step of a `yield from` delegation. Operand: the offset past the
+    /// loop, taken when the receiver is done.
+    ///
+    /// TOS is the value to send and TOS1 the receiver. When the receiver
+    /// yields, TOS becomes what it yielded and the receiver stays beneath, so
+    /// the [`Yield`](Self::Yield) that follows hands it straight out. When the
+    /// receiver is done, both are popped, what it returned is pushed in their
+    /// place, and the jump leaves the loop.
+    Send = 131,
 
     // === Unpacking ===
     /// Unpack TOS into n values. Operand: u8 count.
@@ -523,7 +548,7 @@ pub enum Opcode {
     /// comprehension's nesting depth (almost always tiny).
     LiftToTop = 115,
     /// Raise `UnboundLocalError: cannot access local variable 'NAME' where
-    /// it is not associated with a value`. Operand: u16 name_id.
+    /// it is not associated with a value`. Operand: u16 name.
     ///
     /// Emitted by the comprehension compiler at sites where static analysis
     /// proves a comp-target read happens before the corresponding `for`
@@ -567,8 +592,8 @@ pub enum Opcode {
     /// Push a name resolved at runtime through the frame's namespace: locals
     /// dict → globals (slot array or dict) → builtins → module dunders and
     /// host lookup (slot globals only) → `NameError`. Operands: u16 slot,
-    /// u16 name_id, u8 flags (`NAME_*`). The slot is the session global slot
-    /// for `name_id`, so with slot globals the tail is exactly `LoadGlobal` /
+    /// u16 name, u8 flags (`NAME_*`). The slot is the session global slot
+    /// for that name, so with slot globals the tail is exactly `LoadGlobal` /
     /// `LoadGlobalCallable`; unused with dict globals.
     LoadName = 122,
     /// Pop and bind a name through the frame's namespace. Operands as `LoadName`.
@@ -597,6 +622,25 @@ pub enum Opcode {
     /// becomes `[v, a, b, c]`. Operand: u8 n. The inverse of `LiftToTop`; the
     /// pattern compiler uses it to park a capture under the pattern's temporaries.
     SinkTop = 129,
+
+    /// Pop a zero-arg thunk, push a `TypeAliasType` that calls it on the first
+    /// `__value__` read. Operand: u16 name (the alias's `__name__`).
+    MakeTypeAlias = 132,
+
+    // === `del` on containers ===
+    /// `del a[b]`: pop index, pop obj, remove the item.
+    DeleteSubscr = 133,
+    /// `del a.b`: pop obj, remove the attribute. Operand: u16 name.
+    DeleteAttr = 134,
+
+    // === PEP 750 template construction ===
+    /// Pop format_spec, conversion, expression and value (in that order from
+    /// TOS) and push one `string.templatelib.Interpolation`.
+    BuildInterpolation = 135,
+    /// Pop the interpolations tuple then the strings tuple, push a
+    /// `string.templatelib.Template`.
+    BuildTemplate = 136,
+
     /// `raise exc from cause`: stack `[exc, cause] -> []`. The cause becomes the
     /// raised exception's `__cause__` and suppresses its `__context__`.
     RaiseFrom = 130,
@@ -640,6 +684,7 @@ impl Opcode {
     fn operand_shape(self) -> OperandShape {
         match self {
             Self::Pop
+            | Self::Yield
             | Self::Dup
             | Self::Dup2
             | Self::Rot2
@@ -707,6 +752,9 @@ impl Opcode {
             | Self::BeforeWith
             | Self::WithExit
             | Self::WithExceptStart
+            | Self::DeleteSubscr
+            | Self::BuildInterpolation
+            | Self::BuildTemplate
             | Self::BuildCell => OperandShape::None,
             Self::LoadLocal
             | Self::StoreLocal
@@ -748,13 +796,16 @@ impl Opcode {
             | Self::StoreAttr
             | Self::DeleteGlobal
             | Self::RaiseUnboundLocal
-            | Self::MethodDictMerge => OperandShape::U16,
+            | Self::MethodDictMerge
+            | Self::DeleteAttr
+            | Self::MakeTypeAlias => OperandShape::U16,
             Self::Jump
             | Self::JumpIfTrue
             | Self::JumpIfFalse
             | Self::JumpIfTrueOrPop
             | Self::JumpIfFalseOrPop
-            | Self::ForIter => OperandShape::Offset,
+            | Self::ForIter
+            | Self::Send => OperandShape::Offset,
             Self::CallBuiltinFunction | Self::CallBuiltinType | Self::UnpackEx => OperandShape::U8U8,
             Self::CallAttr | Self::CallAttrExtended | Self::MakeFunction | Self::MatchShape => OperandShape::U16U8,
             Self::LoadGlobalCallable | Self::LoadSubmodule => OperandShape::U16U16,
@@ -802,13 +853,13 @@ pub enum Operand<'a> {
     U16U8(u16, u8),
     /// Two u16 little-endian (e.g. `LoadGlobalCallable`).
     U16U16(u16, u16),
-    /// Two u16 little-endian then a u8 (the `*Name` opcodes: slot, name_id, flags).
+    /// Two u16 little-endian then a u8 (the `*Name` opcodes: slot, name, flags).
     U16U16U8(u16, u16, u8),
     /// u16 then two u8s (e.g. `MakeClosure`).
     U16U8U8(u16, u8, u8),
-    /// `CallFunctionKw` shape: pos_count (u8), kw_count (u8), kw_count * name_id (u16 each).
+    /// `CallFunctionKw` shape: pos_count (u8), kw_count (u8), kw_count * name (u16 each).
     CallKw { pos_count: u8, kwname_ids: &'a [u16] },
-    /// `CallAttrKw` shape: attr_name_id (u16), pos_count (u8), kw_count (u8), kw_count * name_id (u16 each).
+    /// `CallAttrKw` shape: attr_name_id (u16), pos_count (u8), kw_count (u8), kw_count * name (u16 each).
     CallAttrKw {
         attr_name_id: u16,
         pos_count: u8,
@@ -963,7 +1014,12 @@ impl Opcode {
             (ListToTuple, Operand::None) => 0,
             (BinarySubscr, Operand::None) => -1,
             (StoreSubscr, Operand::None) => -3,
-            (GetIter | Await, Operand::None) => 0,
+            (DeleteSubscr, Operand::None) => -2,
+            // Four field values in, one `Interpolation` out.
+            (BuildInterpolation, Operand::None) => -3,
+            // Two tuples in, one `Template` out.
+            (BuildTemplate, Operand::None) => -1,
+            (GetIter | Await | Yield, Operand::None) => 0,
             (Raise, Operand::None) => -1,
             (RaiseFrom, Operand::None) => -2,
             (Reraise | ClearException | CheckExcMatch, Operand::None) => 0,
@@ -1017,12 +1073,15 @@ impl Opcode {
             (DeleteGlobal | DeleteCell, Operand::U16(_)) => 0,
             (LoadAttr | LoadAttrImport, Operand::U16(_)) => 0,
             (StoreAttr, Operand::U16(_)) => -2,
-            // `DictMerge` takes a u16 operand carrying the func_name_id for
+            (DeleteAttr, Operand::U16(_)) => -1,
+            // The thunk is replaced in place by the alias object.
+            (MakeTypeAlias, Operand::U16(_)) => 0,
+            // `DictMerge` takes a u16 operand carrying the callee name for
             // the duplicate-key TypeError message. `MethodDictMerge` shares
             // the stack effect and additionally peeks the receiver under
             // the popped operands to qualify the error wording.
             (DictMerge | MethodDictMerge, Operand::U16(_)) => -1,
-            // `RaiseUnboundLocal(name_id)` always raises — fall-through is dead
+            // `RaiseUnboundLocal(name)` always raises — fall-through is dead
             // code, but the tracker absorbs the bytes with effect 0 before the
             // following region starts.
             (RaiseUnboundLocal, Operand::U16(_)) => 0,
@@ -1045,6 +1104,11 @@ impl Opcode {
             (JumpIfTrue | JumpIfFalse | JumpIfTrueOrPop | JumpIfFalseOrPop, Operand::Offset(_)) => -1,
             // `ForIter` adds the value yielded by the iterator to the stack.
             (ForIter, Operand::Offset(_)) => 1,
+            // The fall-through effect: the sent value is replaced by what the
+            // receiver yielded, with the receiver still beneath it. Taking the
+            // jump instead leaves one value where both were, which the jump
+            // target's own depth records, exactly as `ForIter`'s does.
+            (Send, Operand::Offset(_)) => 0,
 
             // Catch-all: opcode emitted with the wrong operand variant, or a
             // new opcode added without an arm above. Every opcode has exactly
@@ -1073,6 +1137,8 @@ impl Opcode {
             Self::JumpIfTrueOrPop | Self::JumpIfFalseOrPop => 0,
             // Pop iterator on jump-taken (no value pushed).
             Self::ForIter => -1,
+            // Receiver and sent value both go, replaced by the result.
+            Self::Send => -1,
             _ => panic!("Opcode::jump_taken_delta: {self:?} is not a jump opcode"),
         }
     }

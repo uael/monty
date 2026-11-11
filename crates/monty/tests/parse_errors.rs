@@ -11,13 +11,6 @@ fn get_parse_err(code: impl Into<String>) -> MontyException {
 }
 
 #[test]
-fn yield_expressions_return_not_implemented_error() {
-    let err = get_parse_err("def foo():\n    yield 1");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support yield expressions");
-}
-
-#[test]
 fn repeated_class_keyword_returns_syntax_error() {
     // CPython reports the repeat before considering the metaclass.
     let err = get_parse_err("class C(metaclass=type, metaclass=type):\n    pass");
@@ -64,13 +57,26 @@ fn simple_classes_compile_successfully() {
 }
 
 #[test]
-fn class_inheritance_returns_not_implemented_error() {
-    let err = get_parse_err("class Foo(Bar): pass");
+fn metaclass_keyword_returns_not_implemented_error() {
+    let err = get_parse_err("class Foo(metaclass=type): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support class inheritance and metaclasses"
+        @"The monty syntax parser does not yet support metaclasses"
     );
+}
+
+#[test]
+fn class_inheritance_compiles_successfully() {
+    // A base list is an ordinary expression list of the enclosing scope; what
+    // it names is checked when the class statement runs.
+    let result = MontyRun::new(
+        "class Base: pass\n\nclass Derived(Base): pass".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "a class with a base should compile");
 }
 
 #[test]
@@ -98,13 +104,29 @@ fn method_default_walrus_returns_not_implemented_error() {
 }
 
 #[test]
-fn method_decorators_return_not_implemented_error() {
-    let err = get_parse_err("class Foo:\n    @staticmethod\n    def m(): pass");
+fn method_decorator_walrus_returns_not_implemented_error() {
+    // A method decorator is an ordinary expression evaluated in the class-body
+    // scope, so a walrus there would bind a class member and is rejected like
+    // any other class-scope walrus.
+    let err = get_parse_err("class Foo:\n    @(d := staticmethod)\n    def m(): pass");
     assert_eq!(err.exc_type(), ExcType::NotImplementedError);
     assert_snapshot!(
         err.message().unwrap(),
-        @"The monty syntax parser does not yet support method decorators (classmethod/staticmethod/property)"
+        @"The monty syntax parser does not yet support assignment expressions (`:=`) in class bodies"
     );
+}
+
+#[test]
+fn method_decorators_compile_successfully() {
+    // Decorators on a method apply any callable in scope, exactly like they do
+    // on a module-level `def`.
+    let result = MontyRun::new(
+        "def deco(fn):\n    return fn\n\nclass Foo:\n    @deco\n    def m(self): return 1".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "method decorators should compile");
 }
 
 #[test]
@@ -255,13 +277,13 @@ fn async_with_statement_returns_not_implemented_error() {
 #[test]
 fn error_display_format() {
     // Verify the Display format matches Python's exception output with traceback
-    let err = get_parse_err("type Alias = int");
+    let err = get_parse_err("class Foo(metaclass=type):\n    pass");
     assert_snapshot!(err, @r#"
     Traceback (most recent call last):
       File "test.py", line 1, in <module>
-        type Alias = int
-        ~~~~~~~~~~~~~~~~
-    NotImplementedError: The monty syntax parser does not yet support type aliases
+        class Foo(metaclass=type):
+            pass
+    NotImplementedError: The monty syntax parser does not yet support metaclasses
     "#);
 }
 
@@ -628,11 +650,26 @@ fn matrix_multiplication_augmented_assignment_returns_syntax_error() {
 }
 
 #[test]
-fn del_statement_returns_not_implemented_error() {
-    // The del statement is not supported at parse time
-    let err = get_parse_err("x = 1\ndel x");
-    assert_eq!(err.exc_type(), ExcType::NotImplementedError);
-    assert_snapshot!(err.message().unwrap(), @"The monty syntax parser does not yet support the 'del' statement");
+fn del_of_a_starred_target_returns_syntax_error() {
+    // `del` accepts names, attributes, subscripts and parenthesized lists of
+    // those. A starred target is rejected by ruff's parser before Monty sees
+    // it, so the message is ruff's rather than Monty's; CPython says
+    // "cannot delete starred".
+    let err = get_parse_err("a = [1]\ndel *a,");
+    assert_eq!(err.exc_type(), ExcType::SyntaxError);
+    assert_snapshot!(err.message().unwrap(), @"Invalid delete target");
+}
+
+#[test]
+fn del_statement_compiles_successfully() {
+    // Every target shape `del` accepts, in one statement.
+    let result = MontyRun::new(
+        "class C: pass\nc = C()\nc.a = 1\nd = {'k': 1}\nx = 1\ndel x, d['k'], c.a".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    );
+    assert!(result.is_ok(), "del should compile for every target shape");
 }
 
 #[test]
@@ -987,8 +1024,8 @@ fn module_with_too_many_names_returns_syntax_error() {
 
 #[test]
 fn module_with_too_many_interned_strings_returns_syntax_error() {
-    // 66 000 distinct attribute references push the executor-local interner
-    // beyond the bytecode format's `u16` ID range.
+    // 66 000 distinct attribute references in one module body overflow the
+    // `u16` name operands of that code object.
     let mut code = "x = None\n".to_owned();
     for i in 0..66_000 {
         writeln!(code, "x.a{i}").unwrap();
@@ -998,7 +1035,7 @@ fn module_with_too_many_interned_strings_returns_syntax_error() {
     assert_eq!(err.exc_type(), ExcType::SyntaxError);
     assert_eq!(
         err.message(),
-        Some("module has too many distinct names; the bytecode format supports up to 65536 interned strings"),
+        Some("function has too many distinct names; maximum is 65535 per function"),
     );
 }
 

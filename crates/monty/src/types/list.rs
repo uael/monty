@@ -9,7 +9,7 @@ use super::{
     iter::{collect_owned_iterable, collect_python_iterator},
 };
 use crate::{
-    args::ArgValues,
+    args::{ArgValues, FromArgs},
     bytecode::{CallResult, ContainsVM, RecursionToken, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
@@ -21,7 +21,7 @@ use crate::{
     modules::copy::{Memo, PyDeepCopy, deep_copy},
     py_value::PyValue,
     resource_checks::{check_repeat_size, check_value_buffer_growth, repeated_len, try_vec_with_capacity},
-    sorting::parse_and_sort,
+    sorting::{parse_sort_args, put_list_items, sort_by_key, sort_values, take_list_items},
     types::{
         LazyHeapSet, Type,
         slice::{normalize_sequence_index, slice_collect_iterator, value_to_i64_bound},
@@ -133,6 +133,37 @@ impl List {
 }
 
 impl<'h> HeapReadMut<'h, List> {
+    /// Removes every item a slice selects (`del lst[1:3]`, `del lst[::2]`).
+    ///
+    /// The selected positions are removed back to front, so each removal leaves
+    /// the positions still to go where they were. An empty selection is a no-op,
+    /// as it is in CPython.
+    fn delitem_slice(&self, slice: &super::Slice, vm: &mut VM<'h>) -> RunResult<()> {
+        let len = self.get(vm.heap).items.len();
+        let (start, stop, step) = slice.indices(len)?;
+        // Descending, so `Vec::remove` never shifts a position still to come.
+        let mut doomed: Vec<usize> = Vec::new();
+        let mut index = start;
+        if step > 0 {
+            while index < stop {
+                doomed.push(usize::try_from(index).expect("indices() keeps a forward walk non-negative"));
+                index += step;
+            }
+            doomed.reverse();
+        } else {
+            while index > stop {
+                doomed.push(usize::try_from(index).expect("indices() keeps a backward walk non-negative"));
+                index += step;
+            }
+        }
+        for (count, idx) in doomed.into_iter().enumerate() {
+            vm.heap.tracker.check_time_every(count)?;
+            let removed = self.get_mut(vm.heap).items.remove(idx);
+            removed.drop_with(vm);
+        }
+        Ok(())
+    }
+
     /// Collects replacements before assignment to support self-assignment and avoid
     /// partial writes on iterator failure. Bounds are normalized after collection
     /// because the iterator may have resized the target.
@@ -554,6 +585,28 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, List> {
         Ok(self.get(vm.heap).items[idx].clone_with_heap(vm))
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        defer_drop!(key, vm);
+        if let Value::Ref(id) = key
+            && let HeapData::Slice(slice) = vm.heap.get(*id)
+        {
+            let slice = slice.clone();
+            return self.delitem_slice(&slice, vm);
+        }
+        let index = key.as_index(vm, Type::List)?;
+        let len = i64::try_from(self.get(vm.heap).len()).expect("list length exceeds i64::MAX");
+        let normalized_index = if index < 0 { index + len } else { index };
+        if normalized_index < 0 || normalized_index >= len {
+            return Err(ExcType::list_assignment_index_error());
+        }
+        let idx = usize::try_from(normalized_index).expect("index validated non-negative");
+        // `contains_refs` stays set: it is a conservative "may contain" flag, and
+        // clearing it would need a full rescan of the remaining items.
+        let removed = self.get_mut(vm.heap).items.remove(idx);
+        removed.drop_with(vm);
+        Ok(())
+    }
+
     fn py_setitem(&mut self, key: Value, value: Value, vm: &mut VM<'h>) -> RunResult<()> {
         defer_drop!(key, vm);
         defer_drop_mut!(value, vm);
@@ -790,8 +843,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, List> {
     /// Delegates methods to `call_list_method`.
     fn py_call_attr(&mut self, vm: &mut VM<'h>, attr: &EitherStr, args: ArgValues) -> RunResult<CallResult> {
         if attr.static_string(vm.interns) == Some(StaticStrings::Sort) {
-            do_list_sort(self, args, vm)?;
-            return Ok(CallResult::Value(Value::None));
+            return do_list_sort(self, self.id(), args, vm);
         }
 
         let Some(method) = attr.static_string(vm.interns) else {
@@ -1087,16 +1139,35 @@ fn list_count<'h>(list: &HeapRead<'h, List>, args: ArgValues, vm: &mut VM<'h>) -
 /// list afterwards. If the user mutated the live (empty) list during the
 /// sort, we additionally raise `ValueError: list modified during sort`,
 /// matching CPython exactly.
-fn do_list_sort<'h>(list: &HeapReadMut<'h, List>, args: ArgValues, vm: &mut VM<'h>) -> Result<(), RunError> {
+///
+/// With a key, the detached buffer becomes a private list that a frame on the
+/// VM's own loop sorts, so the key may call the host; that frame gives the
+/// items back through [`call_restore_sorted`].
+fn do_list_sort<'h>(
+    list: &HeapReadMut<'h, List>,
+    list_id: HeapId,
+    args: ArgValues,
+    vm: &mut VM<'h>,
+) -> RunResult<CallResult> {
     // Detach the list's items so reentrant access via the list's heap id sees
     // an empty list. The detached buffer is always swapped back into the list
     // when we're done. Done *before* parsing args so the reentrancy guard is
     // in place if parsing somehow allocates or drops user values that run
     // arbitrary code.
     let items = mem::take(&mut list.get_mut(vm.heap).items);
-    defer_drop_mut!(items, vm);
+    let mut items_guard = DropGuard::new(items, vm);
+    let (items, vm) = items_guard.as_parts_mut();
 
-    let sort_result = parse_and_sort(items, args, vm);
+    let sort_result = match parse_sort_args(args, vm) {
+        Ok((Some(key), reverse)) => {
+            let (items, vm) = items_guard.into_parts();
+            let detached = Value::Ref(vm.heap.allocate(HeapData::List(List::new(items))));
+            vm.heap.inc_ref(list_id);
+            return sort_by_key(detached, key, reverse, Value::Ref(list_id), vm);
+        }
+        Ok((None, reverse)) => sort_values(items, reverse, vm),
+        Err(err) => Err(err),
+    };
 
     // Swap our (sorted) buffer back into the list. Whatever the user placed
     // on the live empty list during the sort ends up in `items`; if
@@ -1108,10 +1179,48 @@ fn do_list_sort<'h>(list: &HeapReadMut<'h, List>, args: ArgValues, vm: &mut VM<'
     // Surface any sort error first; otherwise the modification error (if any).
     sort_result?;
     if items.is_empty() {
-        Ok(())
+        Ok(CallResult::Value(Value::None))
     } else {
-        Err(SimpleException::new_msg(ExcType::ValueError, "list modified during sort").into())
+        Err(list_modified_during_sort())
     }
+}
+
+/// Arguments of the private helper that gives the items of a sort back.
+#[derive(FromArgs)]
+#[from_args(name = "restore_sorted")]
+struct RestoreSortedArgs {
+    #[from_args(pos_only)]
+    original: Value,
+    #[from_args(pos_only)]
+    items: Value,
+    #[from_args(pos_only)]
+    check: Value,
+}
+
+/// Gives the items of the private list `items` back to the list `original`
+/// that `list.sort()` detached them from, for the sort with a key.
+///
+/// What Python code put on `original` during the sort is dropped. With
+/// `check`, that is `ValueError: list modified during sort`; without it, the
+/// sort raised, and its error stands alone, as in CPython.
+pub(crate) fn call_restore_sorted(args: ArgValues, vm: &mut VM<'_>) -> RunResult<Value> {
+    let RestoreSortedArgs { original, items, check } = RestoreSortedArgs::from_args(args, vm)?;
+    defer_drop!(original, vm);
+    defer_drop!(items, vm);
+    let sorted = take_list_items(items, vm);
+    let added = put_list_items(original, sorted, vm);
+    let modified = !added.is_empty();
+    added.drop_with(vm);
+    if modified && matches!(check, Value::Bool(true)) {
+        Err(list_modified_during_sort())
+    } else {
+        Ok(Value::None)
+    }
+}
+
+/// `ValueError: list modified during sort`, as CPython raises it.
+fn list_modified_during_sort() -> RunError {
+    SimpleException::new_msg(ExcType::ValueError, "list modified during sort").into()
 }
 
 /// Writes a formatted sequence of values to a formatter.

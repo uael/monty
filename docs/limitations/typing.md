@@ -30,6 +30,42 @@ Annotations are compiled and evaluated lazily, as in CPython 3.14 (see [Annotati
     [language.md](language.md#module-level-dunder-variables)). Functions and
     classes have theirs; see below.
 
+## PEP 695 type parameters
+
+`def f[T](x: T) -> T:`, `class C[T]:` and `type X[T] = ...` all parse, but the
+type parameters bind **nothing**. CPython puts each one in an implicit scope
+around the construct, holding a `TypeVar` / `TypeVarTuple` / `ParamSpec`; Monty
+drops them. Consequences:
+
+- Reading a type parameter in a body raises `NameError`, where CPython returns
+    the `TypeVar`: `def f[T](x): return T` fails.
+- **A same-named outer binding shadows through instead.** If a module-level
+    `T` exists, `def f[T](x): return T` returns *that* value in Monty and the
+    `TypeVar` in CPython. This is the one case that gives a wrong answer rather
+    than an error.
+- Bounds and defaults (`def f[T: int, U = str]`) are parsed and discarded; the
+    expressions are never evaluated, so an error in one is never raised.
+- `__type_params__` is not exposed on functions, classes, or aliases; reading
+    it raises `AttributeError` where CPython returns a (possibly empty) tuple.
+
+## PEP 695 type aliases (`type X = ...`)
+
+A `type` statement binds a real `TypeAliasType` object, at module scope, in a
+function, and in a class body. `X.__name__`, `X.__value__`, `repr(X)` and
+`str(X)` all match CPython, and `__value__` is evaluated lazily on first read
+and then memoized, so an alias may mention itself
+(`type Wire = str | list[Wire]` is only an error if `__value__` is read and the
+operators involved are unsupported). Divergences:
+
+- `type(X).__name__` is `'typing.TypeAliasType'`, not CPython's bare
+    `'TypeAliasType'`. Monty names every non-builtin type by its
+    module-qualified path (the same choice documented for `deque` in
+    [collections.md](collections.md)); `repr(type(X))` and error messages match
+    CPython exactly.
+- `X.__type_params__` and `X.__module__` raise `AttributeError`.
+- Every attribute is read-only: `X.__name__ = ...` raises `AttributeError`, where CPython says `readonly attribute`.
+- `X[int]` (subscripting an alias) is not supported.
+
 ## Annotations
 
 Annotations follow CPython 3.14 (PEP 649): an annotated `def` or class body compiles its annotations into an
@@ -191,3 +227,23 @@ Divergences:
     objects round-trip: `types.GenericAlias` by identity, and Monty's
     `typing.Union` as the host's `types.UnionType`, which is `typing.Union`
     itself only from Python 3.14.
+
+## Literals
+
+`Literal['a', 'b']` builds a `typing._LiteralGenericAlias`, as in CPython 3.14: it flattens a nested `Literal`, drops a
+repeated `(type, value)` pair, compares as a set of them, and takes part in `|`. Divergences:
+
+- **Error messages name the type with its module.** `Literal[1] < Literal[2]` raises
+    `TypeError: '<' not supported between instances of 'typing._LiteralGenericAlias' and ...`, and an unknown
+    attribute `AttributeError: 'typing._LiteralGenericAlias' object has no attribute 'foo'`, where CPython prints
+    `'_LiteralGenericAlias'` and `AttributeError: foo`.
+- **No attributes beyond `__origin__`, `__args__`, `__parameters__`, `__name__` and `__qualname__`.** CPython also
+    gives the other attributes of `typing._GenericAlias`, such as `copy_with` and `__mro_entries__`.
+- **Not iterable.** `iter(Literal['a'])` raises `TypeError` where CPython yields `typing.Unpack[Literal['a']]`.
+- **A named tuple key is one value.** `Literal[Point(1, 2)]` holds the named tuple, where CPython unpacks it as a
+    tuple of values.
+- **Value reprs use Monty's type names**, as in a generic alias.
+- **A bare `Literal` is accepted in a union.** `Literal | None` builds `typing.Literal | None` where CPython raises
+    `TypeError: Plain typing.Literal is not valid as type argument`.
+- **A literal alias does not cross the host boundary.** One built in the sandbox reaches the host as its repr string,
+    as a generic alias does. Its type object round-trips as the host's `typing._LiteralGenericAlias`.
