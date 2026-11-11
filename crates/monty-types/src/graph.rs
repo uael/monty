@@ -117,6 +117,15 @@ pub enum MontyNode {
         #[serde(default)]
         is_async: bool,
     },
+    /// A value of the sandbox with no data form, such as a function, a
+    /// generator or a template, held by a session that holds handles until the
+    /// host releases `id`; handed back, it is the same object.
+    Handle {
+        /// The handle the session holds the value under.
+        id: MontyUuid,
+        /// The name of the value's type, as the interpreter's messages name it.
+        type_name: String,
+    },
     /// Output-only fallback: the `repr()` of a value with no other representation.
     Repr(String),
     /// Output-only: a reference back to a container that encloses this node,
@@ -272,6 +281,7 @@ impl MontyNode {
             Self::Exception { arg, .. } => name_len(arg),
             Self::FileHandle(fh) => fh.path.len(),
             Self::Function { name, docstring, .. } => name.len().saturating_add(name_len(docstring)),
+            Self::Handle { type_name, .. } => type_name.len(),
             Self::DateTime(dt) => name_len(&dt.timezone_name),
             Self::Time(t) => name_len(&t.timezone_name),
             Self::TimeZone(tz) => name_len(&tz.name),
@@ -364,6 +374,8 @@ impl PartialEq for MontyNode {
                     is_async: b_async,
                 },
             ) => a_name == b_name && a_doc == b_doc && a_async == b_async,
+            // A handle is the identity of the value it holds.
+            (Self::Handle { id: a, .. }, Self::Handle { id: b, .. }) => a == b,
             (Self::List(a), Self::List(b))
             | (Self::Tuple(a), Self::Tuple(b))
             | (Self::Set(a), Self::Set(b))
@@ -577,6 +589,7 @@ impl MontyGraph {
             MontyNode::Module { .. } => "module",
             MontyNode::BuiltinFunction(_) => "builtin_function_or_method",
             MontyNode::Function { .. } => "function",
+            MontyNode::Handle { type_name, .. } => type_name,
             MontyNode::Repr(_) => "repr",
             MontyNode::Cycle(_) => "cycle",
         }
