@@ -8,7 +8,11 @@ mod location_table;
 
 use std::ops::Not;
 
-use crate::{intern::StringId, parse::CodeRange, value::Value};
+use crate::{
+    intern::{FunctionId, StringId},
+    parse::CodeRange,
+    value::Value,
+};
 
 /// Compiled bytecode for a function or module.
 ///
@@ -24,6 +28,18 @@ pub struct Code {
     /// Immediate constants indexed by `LoadConst`; heap literals live in `Interns`.
     #[serde(rename = "C")]
     constants: Vec<Value>,
+
+    /// Session string IDs indexed by the `u16` name operands of this body.
+    ///
+    /// A session interns strings for its whole life, so its IDs outgrow `u16`;
+    /// this table bounds an operand by the names one body uses, as CPython's `co_names`.
+    names: Vec<StringId>,
+
+    /// Session function IDs indexed by the `u16` operands of `MakeFunction` and `MakeClosure` in this body.
+    ///
+    /// A session keeps every function it compiles, so its IDs outgrow `u16`; this table bounds an operand by the
+    /// functions one body defines.
+    functions: Vec<FunctionId>,
 
     /// Source location table for tracebacks, sorted by bytecode offset.
     ///
@@ -48,6 +64,18 @@ pub struct Code {
     #[serde(rename = "N")]
     local_names: Vec<StringId>,
 
+    /// Whether this body contains a `yield`, making calls to it build a
+    /// generator rather than running it.
+    ///
+    /// A property of the compiled code, the way CPython's `CO_GENERATOR` is:
+    /// [`CodeBuilder`](crate::bytecode::builder::CodeBuilder) raises it when it
+    /// emits [`Opcode::Yield`](crate::bytecode::op::Opcode::Yield), so it cannot
+    /// drift from the instructions it describes.
+    #[serde(default)]
+    is_generator: bool,
+    /// Whether the body awaits; see [`Code::is_coroutine`].
+    is_coroutine: bool,
+
     /// Whether the source ran under `from __future__ import annotations`: its
     /// definitions store PEP 563 strings, and `exec()` here inherits the flag.
     #[serde(rename = "U", default, skip_serializing_if = "Not::not")]
@@ -58,28 +86,61 @@ impl Code {
     /// Creates an empty code object for tests that only need VM context.
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
-        Self::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        Self::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        )
     }
 
     /// Creates a new Code object with all components.
     ///
     /// This is typically called by `CodeBuilder::build()` after compilation.
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         bytecode: Vec<u8>,
         constants: Vec<Value>,
+        names: Vec<StringId>,
+        functions: Vec<FunctionId>,
         location_table: Vec<LocationEntry>,
         exception_table: Vec<ExceptionEntry>,
         local_names: Vec<StringId>,
+        is_generator: bool,
+        is_coroutine: bool,
     ) -> Self {
         Self {
             bytecode,
             constants,
+            names,
+            functions,
             location_table,
             exception_table,
             local_names,
+            is_generator,
+            is_coroutine,
             future_annotations: false,
         }
+    }
+
+    /// Whether this body awaits, so a snippet compiled with
+    /// `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` hands back a coroutine rather than
+    /// running where it stands, as CPython's `CO_COROUTINE` decides.
+    #[must_use]
+    pub fn is_coroutine(&self) -> bool {
+        self.is_coroutine
+    }
+
+    /// Whether this body yields, so calling it builds a generator.
+    #[must_use]
+    pub fn is_generator(&self) -> bool {
+        self.is_generator
     }
 
     /// Marks the code as compiled under `from __future__ import annotations`.
@@ -106,6 +167,20 @@ impl Code {
     #[must_use]
     pub fn constant(&self, index: u16) -> &Value {
         &self.constants[usize::from(index)]
+    }
+
+    /// Returns the name a name operand indexes.
+    /// Panics for an index not produced by this code's compiler.
+    #[must_use]
+    pub fn name(&self, index: u16) -> StringId {
+        self.names[usize::from(index)]
+    }
+
+    /// Returns the function a `MakeFunction` or `MakeClosure` operand indexes.
+    /// Panics for an index not produced by this code's compiler.
+    #[must_use]
+    pub fn function(&self, index: u16) -> FunctionId {
+        self.functions[usize::from(index)]
     }
 
     /// Returns the local variable name for a given slot index.
@@ -164,9 +239,13 @@ impl Clone for Code {
         Self {
             bytecode: self.bytecode.clone(),
             constants: self.constants.iter().map(Value::copy_immediate).collect(),
+            names: self.names.clone(),
+            functions: self.functions.clone(),
             location_table: self.location_table.clone(),
             exception_table: self.exception_table.clone(),
             local_names: self.local_names.clone(),
+            is_generator: self.is_generator,
+            is_coroutine: self.is_coroutine,
             future_annotations: self.future_annotations,
         }
     }

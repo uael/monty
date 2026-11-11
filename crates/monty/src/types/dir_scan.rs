@@ -47,7 +47,7 @@ pub(crate) enum DirScan {
     /// The `ScandirIterator` that `os.scandir()` returns.
     Scandir(ScandirIterator),
     /// The iterator `os.walk()` and `Path.walk()` return.
-    Walk(WalkIterator),
+    Walk(Box<WalkIterator>),
 }
 
 impl DirScan {
@@ -834,7 +834,7 @@ impl ScanEffect {
                         spelled: setup.top,
                     }]
                 };
-                let walk = DirScan::Walk(WalkIterator {
+                let walk = DirScan::Walk(Box::new(WalkIterator {
                     tree,
                     path_flavor: setup.path_flavor,
                     topdown: setup.topdown,
@@ -844,7 +844,7 @@ impl ScanEffect {
                     pending: None,
                     root_error,
                     running: false,
-                });
+                }));
                 Ok(Value::Ref(vm.heap.allocate(HeapData::DirScan(Box::new(walk)))))
             }
             Self::Glob(setup) => {

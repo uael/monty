@@ -25,7 +25,8 @@ use crate::{
     intern::{FunctionId, StaticStrings},
     modules::{ModuleFunctions, collections::defaultdict::defaultdict_missing},
     types::{
-        BuiltinType, GenericAlias, LazyHeapSet, LongInt, Property, PyTrait, Type, Union, allocate_string,
+        BuiltinType, GenericAlias, LazyHeapSet, LiteralGenericAlias, LongInt, Property, PyTrait, Type, Union,
+        allocate_string,
         bytes::PyBytes,
         long_int::{PyInt, arithmetic::float_binary},
         numeric::{round_digits, round_float},
@@ -188,6 +189,16 @@ macro_rules! forward_py_value {
             Self::DecimalContext($value) => $body,
             Self::DecimalSignalDict($value) => $body,
             Self::DecimalContextManager($value) => $body,
+            Self::Code($value) => $body,
+            Self::Generator($value) => $body,
+            Self::TypeAliasType($value) => $body,
+            Self::ClassProperty($value) => $body,
+            Self::Template($value) => $body,
+            Self::Interpolation($value) => $body,
+            Self::EventLoop($value) => $body,
+            Self::ContextVar($value) => $body,
+            Self::ContextVarToken($value) => $body,
+            Self::LiteralGenericAlias($value) => $body,
             Self::Int($value) => $body,
             $($custom)*
         }
@@ -281,10 +292,6 @@ impl<'h> PyValue<'h> {
             Self::Cell(cell) => Ok(write!(f, "<cell: {} object>", cell.get(vm.heap).0.py_type_name(vm))?),
             Self::Exception(e) => Ok(e.get(vm.heap).py_repr_fmt(f)?),
             Self::Module(m) => Ok(f.write_str(&m.get(vm.heap).repr(vm.interns))?),
-            Self::Coroutine(coro) => {
-                let func = vm.interns.get_function(coro.get(vm.heap).func_id);
-                Ok(write!(f, "<coroutine object {}>", vm.interns.get_str(func.name.name_id))?)
-            }
             Self::GatherFuture(gather) => Ok(write!(f, "<gather({})>", gather.get(vm.heap).item_count())?),
             Self::ExternalFuture(fut) => Ok(write!(f, "<coroutine external_future({})>", fut.get(vm.heap).call_id.raw())?),
         })
@@ -439,6 +446,24 @@ impl<'h> PyTrait<'h> for PyValue<'h> {
         })
     }
 
+    fn py_delitem(&mut self, key: Value, vm: &mut VM<'h>) -> RunResult<()> {
+        forward_py_value!(self, |item| item.py_delitem(key, vm), {
+            _ => {
+                key.drop_with(vm);
+                Err(ExcType::type_error_no_item_deletion(&self.py_type_name(vm)))
+            }
+        })
+    }
+
+    fn py_del_attr(&mut self, name: &EitherStr, vm: &mut VM<'h>) -> RunResult<()> {
+        forward_py_value!(self, |item| item.py_del_attr(name, vm), {
+            _ => {
+                let type_name = self.py_type_name(vm);
+                Err(ExcType::attribute_error_no_setattr(&type_name, name.as_str(vm.interns)))
+            }
+        })
+    }
+
     fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
         forward_py_value!(self, |value| value.py_iter(vm),
             else Err(ExcType::type_error_not_iterable(&self.py_type_name(vm))))
@@ -465,7 +490,7 @@ impl<'h> PyTrait<'h> for PyValue<'h> {
             Self::Cell(_) => Type::Cell,
             Self::Exception(e) => e.py_type(vm),
             Self::Module(_) => Type::Module,
-            Self::Coroutine(_) | Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
+            Self::GatherFuture(_) | Self::ExternalFuture(_) => Type::Coroutine,
         })
     }
 
@@ -795,6 +820,7 @@ impl<'h> PyTrait<'h> for PyValue<'h> {
             Self::Builtin(Builtins::Function(BuiltinsFunctions::Type)) => Ok(GenericAlias::subscript(BuiltinType::Type, key.clone_with_heap(vm), vm)),
             Self::Builtin(Builtins::Type(BuiltinType::Union)) => Union::subscript(key.clone_with_heap(vm), vm),
             Self::Marker(Marker(StaticStrings::Optional)) => Union::optional(key.clone_with_heap(vm), vm),
+            Self::Marker(Marker(StaticStrings::Literal)) => LiteralGenericAlias::subscript(key.clone_with_heap(vm), vm),
             Self::Marker(form) if form.is_generic_form() => GenericAlias::subscript_special(*form, key.clone_with_heap(vm), vm),
             // CPython's wording per kind of `typing` object: `Any` and `TypeVar`
             // are classes, `Self` and friends special forms, the two bases generic.

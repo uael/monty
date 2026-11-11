@@ -103,3 +103,12 @@ DecimalContext 103
 DecimalSignalDict 104
 DecimalContextManager 105
 ForwardRef 106
+Code 107
+Generator 108
+Template 109
+Interpolation 110
+TypeAliasType 111
+ContextVar 112
+ContextVarToken 113
+EventLoop 114
+LiteralGenericAlias 115

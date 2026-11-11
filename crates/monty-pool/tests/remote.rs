@@ -1605,6 +1605,7 @@ async fn rejected_raw_load_keeps_the_suspension_count() {
                         message: Some("protocol violation: Load requires a session that has not started".to_owned()),
                         traceback: vec![].into(),
                         data: None,
+                        user_type: None,
                     }),
                 })),
                 max_suspensions: Some(1),
@@ -2426,6 +2427,7 @@ async fn refused_restore_keeps_the_session_id() {
                     message: Some("unknown session".to_owned()),
                     traceback: vec![].into(),
                     data: None,
+                    user_type: None,
                 }),
             }),
         );
@@ -4082,6 +4084,7 @@ async fn an_abort_in_the_first_turn_keeps_the_server_clock() {
                     message: Some("suspension limit 0 exceeded".to_owned()),
                     traceback: vec![].into(),
                     data: None,
+                    user_type: None,
                 }),
             }),
         );

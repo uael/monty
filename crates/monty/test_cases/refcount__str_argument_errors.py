@@ -26,4 +26,4 @@ for operation in [
         assert False, 'expected an unknown-method error'
 operation = None
 
-# ref-counts={'argument': 1, 'source': 1, 'math': 1, 'alias': 1}
+# ref-counts={'argument': 1, 'source': 1, 'math': 2, 'alias': 1}

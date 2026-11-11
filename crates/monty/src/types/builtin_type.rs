@@ -95,7 +95,7 @@ pub(crate) enum BuiltinType {
     DirEntry,
     #[strum(serialize = "posix.ScandirIterator")]
     ScandirIterator,
-    #[strum(serialize = "generator")]
+    #[strum(serialize = "os._walk_generator")]
     WalkGenerator,
     #[strum(serialize = "tuple_iterator")]
     TupleIterator,
@@ -210,6 +210,22 @@ pub(crate) enum BuiltinType {
     DecimalContextManager,
     #[strum(serialize = "annotationlib.ForwardRef")]
     ForwardRef,
+    Code,
+    Generator,
+    #[strum(serialize = "string.templatelib.Template")]
+    Template,
+    #[strum(serialize = "string.templatelib.Interpolation")]
+    Interpolation,
+    #[strum(serialize = "typing.TypeAliasType")]
+    TypeAliasType,
+    #[strum(serialize = "_contextvars.ContextVar")]
+    ContextVar,
+    #[strum(serialize = "_contextvars.Token")]
+    ContextVarToken,
+    #[strum(serialize = "EventLoop")]
+    EventLoop,
+    #[strum(serialize = "typing._LiteralGenericAlias")]
+    LiteralGenericAlias,
 }
 
 impl From<BuiltinType> for Type {
@@ -321,6 +337,15 @@ impl From<BuiltinType> for Type {
             BuiltinType::DecimalSignalDict => Self::DecimalSignalDict,
             BuiltinType::DecimalContextManager => Self::DecimalContextManager,
             BuiltinType::ForwardRef => Self::ForwardRef,
+            BuiltinType::Code => Self::Code,
+            BuiltinType::Generator => Self::Generator,
+            BuiltinType::Template => Self::Template,
+            BuiltinType::Interpolation => Self::Interpolation,
+            BuiltinType::TypeAliasType => Self::TypeAliasType,
+            BuiltinType::ContextVar => Self::ContextVar,
+            BuiltinType::ContextVarToken => Self::ContextVarToken,
+            BuiltinType::EventLoop => Self::EventLoop,
+            BuiltinType::LiteralGenericAlias => Self::LiteralGenericAlias,
         }
     }
 }
@@ -436,6 +461,15 @@ impl TryFrom<Type> for BuiltinType {
             Type::DecimalSignalDict => Self::DecimalSignalDict,
             Type::DecimalContextManager => Self::DecimalContextManager,
             Type::ForwardRef => Self::ForwardRef,
+            Type::Code => Self::Code,
+            Type::Generator => Self::Generator,
+            Type::Template => Self::Template,
+            Type::Interpolation => Self::Interpolation,
+            Type::TypeAliasType => Self::TypeAliasType,
+            Type::ContextVar => Self::ContextVar,
+            Type::ContextVarToken => Self::ContextVarToken,
+            Type::EventLoop => Self::EventLoop,
+            Type::LiteralGenericAlias => Self::LiteralGenericAlias,
             Type::Instance(_) => return Err("user-defined classes use heap type objects"),
         })
     }
