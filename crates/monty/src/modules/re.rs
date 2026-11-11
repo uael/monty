@@ -11,6 +11,7 @@
 //! - `re.fullmatch(pattern, string, flags=0)` → `re.Match` or `None`
 //! - `re.findall(pattern, string, flags=0)` → `list`
 //! - `re.sub(pattern, repl, string, count=0, flags=0)` → `str`
+//! - `re.subn(pattern, repl, string, count=0, flags=0)` → `tuple[str, int]`
 //! - `re.split(pattern, string, maxsplit=0, flags=0)` → `list`
 //! - `re.finditer(pattern, string, flags=0)` → `list` of `re.Match` (CPython: an iterator)
 //! - `re.escape(pattern)` → `str`
@@ -30,7 +31,7 @@
 //! - `re.ASCII` / `re.A` — ASCII-only matching for `\w`, `\d`, `\s` (value: 256)
 //! - `re.PatternError` / `re.error` — exception type for invalid patterns
 
-use std::rc::Rc;
+use std::{fmt, rc::Rc};
 
 use ahash::RandomState;
 
@@ -45,7 +46,7 @@ use crate::{
     modules::ModuleFunctions,
     types::{
         BoundedCompileError, BuiltinType, Module, RePattern, Type,
-        re_pattern::{extract_count, extract_maxsplit, translate_replacement},
+        re_pattern::{Scan, extract_count, extract_maxsplit, sub_callable, subbed, translate_replacement},
         str::allocate_string,
     },
     value::Value,
@@ -80,6 +81,8 @@ pub(crate) enum ReFunctions {
     Findall,
     /// `re.sub(pattern, repl, string, count=0, flags=0)` — substitute matches.
     Sub,
+    /// `re.subn(pattern, repl, string, count=0, flags=0)` — substitute matches and count them.
+    Subn,
     /// `re.split(pattern, string, maxsplit=0, flags=0)` — split string by pattern.
     Split,
     /// `re.finditer(pattern, string, flags=0)` — return a list of all matches.
@@ -122,6 +125,11 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
     module.set_attr(
         StaticStrings::Sub,
         Value::ModuleFunction(ModuleFunctions::Re(ReFunctions::Sub)),
+        vm,
+    );
+    module.set_attr(
+        StaticStrings::Subn,
+        Value::ModuleFunction(ModuleFunctions::Re(ReFunctions::Subn)),
         vm,
     );
     module.set_attr(
@@ -188,7 +196,8 @@ pub(super) fn call(vm: &mut VM<'_>, function: ReFunctions, args: ArgValues) -> R
         ReFunctions::Match => call_match(vm, args).map(CallResult::Value),
         ReFunctions::Fullmatch => call_fullmatch(vm, args).map(CallResult::Value),
         ReFunctions::Findall => call_findall(vm, args).map(CallResult::Value),
-        ReFunctions::Sub => call_sub(vm, args).map(CallResult::Value),
+        ReFunctions::Sub => call_sub(vm, args, false).map(CallResult::Value),
+        ReFunctions::Subn => call_sub(vm, args, true).map(CallResult::Value),
         ReFunctions::Split => call_split(vm, args).map(CallResult::Value),
         ReFunctions::Finditer => call_finditer(vm, args).map(CallResult::Value),
         ReFunctions::Escape => call_escape(vm, args).map(CallResult::Value),
@@ -262,14 +271,26 @@ fn call_findall(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 /// The pattern resolves *before* `count` is validated, so a bad pattern (or flags
 /// with a compiled pattern) wins over a bad count — as in CPython, where `_compile`
 /// runs before `Pattern.sub` parses its arguments.
-fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
-    let ReSubArgs {
-        pattern,
-        repl,
-        string,
-        count,
-        flags,
-    } = ReSubArgs::from_args(args, vm)?;
+fn call_sub(vm: &mut VM<'_>, args: ArgValues, counted: bool) -> RunResult<Value> {
+    let (pattern, repl, string, count, flags) = if counted {
+        let ReSubnArgs {
+            pattern,
+            repl,
+            string,
+            count,
+            flags,
+        } = ReSubnArgs::from_args(args, vm)?;
+        (pattern, repl, string, count, flags)
+    } else {
+        let ReSubArgs {
+            pattern,
+            repl,
+            string,
+            count,
+            flags,
+        } = ReSubArgs::from_args(args, vm)?;
+        (pattern, repl, string, count, flags)
+    };
     defer_drop!(string, vm);
     defer_drop!(repl, vm);
     // `count` must outlive `resolve_pattern`'s `?` (pattern errors win over a
@@ -280,12 +301,32 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 
     let count = extract_count(count.take(), vm)?;
 
+    if repl.try_to_str(vm).is_err() && repl.is_callable(vm) {
+        let Some(count) = count else {
+            let _ = subject_str(string, vm)?;
+            return Ok(subbed((string.clone_with_heap(vm.heap), 0), counted, vm.heap));
+        };
+        let text = subject_str(string, vm)?.to_owned();
+        let all_ascii = text.is_ascii();
+        let mut scan = Scan::default();
+        return sub_callable(
+            repl,
+            &text,
+            count,
+            |vm| {
+                resolved
+                    .get(vm.heap)
+                    .next_match(&mut scan, string, &text, all_ascii, vm.heap)
+            },
+            vm,
+        )
+        .map(|result| subbed(result, counted, vm.heap));
+    }
+
     // CPython parses the replacement template before its match loop, so a bad
     // replacement raises even when a negative count skips matching.
     let Some(repl) = repl.as_str(vm) else {
-        return Err(ExcType::type_error(
-            "callable replacement is not yet supported in re.sub()",
-        ));
+        return Err(ExcType::type_error_decoding_need_bytes(repl.py_type_name(vm)));
     };
 
     let Some(count) = count else {
@@ -297,12 +338,13 @@ fn call_sub(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         // re-allocate (the guard drops the extraction's reference, the
         // clone is the caller's).
         let _ = subject_str(string, vm)?;
-        return Ok(string.clone_with_heap(vm.heap));
+        return Ok(subbed((string.clone_with_heap(vm.heap), 0), counted, vm.heap));
     };
 
     resolved
         .get(vm.heap)
         .sub(repl, subject_str(string, vm)?, count, vm.heap)
+        .map(|result| subbed(result, counted, vm.heap))
 }
 
 /// `re.split(pattern, string, maxsplit=0, flags=0)` — split on pattern occurrences.
@@ -336,6 +378,21 @@ fn call_split(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
 #[derive(FromArgs)]
 #[from_args(name = "sub", style = def)]
 struct ReSubArgs {
+    #[from_args(static_string = "PatternAttr")]
+    pattern: Value,
+    repl: Value,
+    #[from_args(static_string = "StringAttr")]
+    string: Value,
+    #[from_args(default)]
+    count: Option<Value>,
+    #[from_args(default = Value::Int(0))]
+    flags: Value,
+}
+
+/// Argument shape for `re.subn(pattern, repl, string, count=0, flags=0)` — see `ReSubArgs`.
+#[derive(FromArgs)]
+#[from_args(name = "subn", style = def)]
+struct ReSubnArgs {
     #[from_args(static_string = "PatternAttr")]
     pattern: Value,
     repl: Value,
@@ -605,6 +662,12 @@ const CACHE_CAPACITY: usize = 256;
 /// recompiled per call at default limits, never retained.
 const CACHED_SIZE_LIMIT: usize = 64 * 1024;
 
+/// Entries of the tier of large patterns in [`RePatternCache`].
+const LARGE_CAPACITY: usize = 8;
+
+/// `delegate_size_limit` for compiles retained in the tier of large patterns.
+const LARGE_SIZE_LIMIT: usize = 2 * 1024 * 1024;
+
 /// Longest *source* pattern retained — the text-side counterpart of
 /// [`CACHED_SIZE_LIMIT`], and small because an entry holds the text once per
 /// `fancy_regex` engine it compiles. Source length says nothing about compiled size
@@ -614,15 +677,32 @@ const CACHED_PATTERN_LIMIT: usize = 4 * 1024;
 
 /// Per-run cache of compiled patterns for module-level `re.*` calls, keyed on
 /// `(pattern, flags)` — so `re.split(r'\s+', text)` in a loop compiles once. Mirrors
-/// CPython's `re._cache`; not snapshotted (rebuilt on demand). Direct-mapped with
-/// 5-slot linear probing and LRU-on-collision (jiter's `py_string_cache` design),
-/// bounding retained memory by [`CACHED_SIZE_LIMIT`] and [`CACHED_PATTERN_LIMIT`].
+/// CPython's `re._cache`; a snapshot carries it to the VM that resumes the run, and
+/// never serializes it. Direct-mapped with 5-slot linear probing and LRU-on-collision
+/// (jiter's `py_string_cache` design), bounding retained memory by
+/// [`CACHED_SIZE_LIMIT`] and [`CACHED_PATTERN_LIMIT`].
 ///
 /// The backing store is allocated lazily on first use: every VM builds a
 /// `RePatternCache` but few touch `re`, and zeroing it eagerly measurably regressed
 /// the setup-bound benchmarks (`add_two`, `func_call_*`).
+///
+/// A pattern that compiles past [`CACHED_SIZE_LIMIT`] but within [`LARGE_SIZE_LIMIT`],
+/// as one that matches `\w` does, is retained in a second tier of at most
+/// [`LARGE_CAPACITY`] entries, oldest out first, so a loop that uses one compiles it
+/// once, and the tier adds at most `LARGE_CAPACITY × LARGE_SIZE_LIMIT` to the bound.
 #[derive(Default)]
-pub(crate) struct RePatternCache(Option<(Box<[ReCacheEntry]>, RandomState)>);
+pub(crate) struct RePatternCache(Option<(Box<[ReCacheEntry]>, RandomState)>, Vec<Rc<RePattern>>);
+
+impl fmt::Debug for RePatternCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let held = self
+            .0
+            .as_ref()
+            .map_or(0, |(entries, _)| entries.iter().flatten().count())
+            + self.1.len();
+        f.debug_tuple("RePatternCache").field(&held).finish()
+    }
+}
 
 impl RePatternCache {
     /// Returns the compiled pattern for `(pattern, flags)`, compiling and caching on
@@ -664,14 +744,30 @@ impl RePatternCache {
             }
         }
 
+        if let Some(large) = self.1.iter().find(|one| one.is_compiled_from(pattern, flags)) {
+            return Ok(Rc::clone(large));
+        }
+
         // Miss: compile size-bounded so a retained entry can never pin a huge
-        // compiled regex. A valid pattern that compiles past the cap is
+        // compiled regex. A valid pattern that compiles past the cap is retained in
+        // the tier of large patterns when it fits there, and is otherwise
         // recompiled at default limits and returned uncached — it still works,
         // just recompiled per call.
         let compiled = match RePattern::compile_bounded(pattern.to_owned(), flags, CACHED_SIZE_LIMIT) {
             Ok(compiled) => compiled,
             Err(BoundedCompileError::TooBig) => {
-                return Ok(Rc::new(RePattern::compile(pattern.to_owned(), flags)?));
+                return match RePattern::compile_bounded(pattern.to_owned(), flags, LARGE_SIZE_LIMIT) {
+                    Ok(compiled) => {
+                        let compiled = Rc::new(compiled);
+                        if self.1.len() == LARGE_CAPACITY {
+                            self.1.remove(0);
+                        }
+                        self.1.push(Rc::clone(&compiled));
+                        Ok(compiled)
+                    }
+                    Err(BoundedCompileError::TooBig) => Ok(Rc::new(RePattern::compile(pattern.to_owned(), flags)?)),
+                    Err(BoundedCompileError::Invalid(err)) => Err(err),
+                };
             }
             Err(BoundedCompileError::Invalid(err)) => return Err(err),
         };
@@ -838,17 +934,45 @@ mod tests {
     }
 
     /// A counted repeat that expands far past [`CACHED_SIZE_LIMIT`] in the
-    /// delegated regex compiler while still compiling fine at default limits.
+    /// delegated regex compiler while still compiling within [`LARGE_SIZE_LIMIT`].
     const OVERSIZE_PATTERN: &str = "a{5000}";
 
+    /// A counted repeat that expands past [`LARGE_SIZE_LIMIT`] while still
+    /// compiling fine at default limits.
+    const HUGE_PATTERN: &str = "a{200000}";
+
     #[test]
-    fn oversize_pattern_compiles_but_is_not_retained() {
+    fn oversize_pattern_is_retained_in_the_large_tier() {
         let mut cache = RePatternCache::default();
         let first = cache.get_or_compile(OVERSIZE_PATTERN, 0).unwrap();
         let second = cache.get_or_compile(OVERSIZE_PATTERN, 0).unwrap();
+        // The second call is a hit of the large tier, and the small tier holds nothing.
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(occupied(&cache), 0);
+        assert_eq!(cache.1.len(), 1);
+    }
+
+    #[test]
+    fn huge_pattern_compiles_but_is_not_retained() {
+        let mut cache = RePatternCache::default();
+        let first = cache.get_or_compile(HUGE_PATTERN, 0).unwrap();
+        let second = cache.get_or_compile(HUGE_PATTERN, 0).unwrap();
         // Both calls succeed but nothing is retained: each call recompiles.
         assert!(!Rc::ptr_eq(&first, &second));
         assert_eq!(occupied(&cache), 0);
+        assert_eq!(cache.1.len(), 0);
+    }
+
+    #[test]
+    fn large_tier_drops_its_oldest_entry() {
+        let mut cache = RePatternCache::default();
+        let oldest = cache.get_or_compile("a{4000}", 0).unwrap();
+        for i in 0..LARGE_CAPACITY {
+            cache.get_or_compile(&format!("a{{{}}}", 4001 + i), 0).unwrap();
+        }
+        // The tier stays at its capacity, and the first pattern left it.
+        assert_eq!(cache.1.len(), LARGE_CAPACITY);
+        assert!(!Rc::ptr_eq(&oldest, &cache.get_or_compile("a{4000}", 0).unwrap()));
     }
 
     #[test]

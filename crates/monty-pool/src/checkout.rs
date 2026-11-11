@@ -671,8 +671,9 @@ impl SessionBudget {
 
     /// Returns the tighter of the two duration backstops: what each configured
     /// budget has left, plus that budget's grace. The turn budget has all of
-    /// its limit left, since the worker resets that clock on the request being
-    /// sent.
+    /// its limit left twice over: the worker resets that clock on the request
+    /// being sent, and once more for the handlers of its first excess, which
+    /// the code may catch.
     ///
     /// The worker normally raises `TimeoutError` inside the grace; this catches
     /// one that stops checking its clock. A `None` grace means no backstop —
@@ -680,7 +681,11 @@ impl SessionBudget {
     fn backstop_deadline(&self, graces: DurationGraces) -> Option<Duration> {
         [
             remaining_deadline(self.feed_budget, self.reported_feed_execution, graces.feed),
-            remaining_deadline(self.turn_budget, Duration::ZERO, graces.turn),
+            remaining_deadline(
+                self.turn_budget.map(|budget| budget.saturating_mul(2)),
+                Duration::ZERO,
+                graces.turn,
+            ),
         ]
         .into_iter()
         .flatten()

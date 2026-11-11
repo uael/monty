@@ -118,7 +118,8 @@ pub struct PoolConfig {
     /// `None` disables this backstop. `request_timeout` remains independent.
     pub feed_duration_limit_grace: Option<Duration>,
     /// Extra allowance for `ResourceLimits::max_turn_duration`, in the pool's clock.
-    /// Each feed or resume starts a new turn allowance. `None` disables this backstop.
+    /// Each feed or resume starts a new turn allowance of twice its limit plus this, since the handlers of its first
+    /// excess, which the code may catch, get a restarted clock. `None` disables this backstop.
     pub turn_duration_limit_grace: Option<Duration>,
     /// Recycle (kill and respawn) a worker after this many checkouts, bounding
     /// how long a slow leak or a compromised worker survives. Defaults to
