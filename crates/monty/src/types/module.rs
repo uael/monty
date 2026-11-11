@@ -9,7 +9,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{DropGuard, DropWithContext, HeapData, HeapId, HeapItem, HeapRead, HeapReadOutput},
     intern::{Interns, StaticStrings, StringId},
-    types::Dict,
+    types::{Dict, str::allocate_string},
     value::{EitherStr, Value},
 };
 
@@ -139,6 +139,20 @@ impl Module {
         self.attrs
             .set_without_growth_check(key, value, vm)
             .expect("module attribute keys are interned, so hashing cannot fail");
+    }
+
+    /// Sets an attribute whose name is not a static string.
+    ///
+    /// The intern table is frozen once a program is prepared, so a module built
+    /// from a list of names known only at run time (the `builtins` module, off
+    /// the three builtin enums) allocates each key instead.
+    pub fn set_named(&mut self, name: &str, value: Value, vm: &mut VM<'_>) {
+        let key = allocate_string(name, vm.heap);
+        // Module construction is infallible, as in `set_attr`, and an allocated
+        // string always hashes.
+        self.attrs
+            .set_without_growth_check(key, value, vm)
+            .expect("module attribute keys are strings, so hashing cannot fail");
     }
 
     /// Calls `on_child` for every heap reference the module holds, for the cycle collector.

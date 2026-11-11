@@ -1,4 +1,4 @@
-import _sitebuiltins
+import _ast
 import sys
 import types
 from _collections_abc import dict_items, dict_keys, dict_values
@@ -22,6 +22,7 @@ from typing import (
     SupportsComplex,
     SupportsFloat,
     SupportsIndex,
+    TypeGuard,
     TypeVar,
     final,
     overload,
@@ -60,6 +61,7 @@ from typing_extensions import (
     ParamSpec,
     Self,
     TypeAlias,
+    TypeIs,
     TypeVarTuple,
     deprecated,
     disjoint_base,
@@ -1013,12 +1015,7 @@ class frozenset(AbstractSet[_T_co]):
     def __hash__(self) -> int: ...
     def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
 
-@disjoint_base
-class enumerate(Generic[_T]):
-    def __new__(cls, iterable: Iterable[_T], start: int = 0) -> Self: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> tuple[int, _T]: ...
-    def __class_getitem__(cls, item: Any, /) -> GenericAlias: ...
+def enumerate(iterable: Iterable[_T], start: int = 0) -> list[tuple[int, _T]]: ...
 
 @final
 class range(Sequence[int]):
@@ -1075,6 +1072,7 @@ def abs(x: SupportsAbs[_T], /) -> _T: ...
 def all(iterable: Iterable[object], /) -> bool: ...
 def any(iterable: Iterable[object], /) -> bool: ...
 def bin(number: SupportsIndex, /) -> str: ...
+def callable(obj: object, /) -> TypeIs[Callable[..., object]]: ...
 def chr(i: SupportsIndex, /) -> str: ...
 
 if sys.version_info >= (3, 10):
@@ -1082,9 +1080,49 @@ if sys.version_info >= (3, 10):
     class _SupportsSynchronousAnext(Protocol[_AwaitableT_co]):
         def __anext__(self) -> _AwaitableT_co: ...
 
-copyright: _sitebuiltins._Printer
-credits: _sitebuiltins._Printer
-
+@overload
+def compile(
+    source: str | ReadableBuffer | _ast.Module | _ast.Expression | _ast.Interactive,
+    filename: str | bytes | PathLike[Any],
+    mode: str,
+    flags: Literal[0],
+    dont_inherit: bool = False,
+    optimize: int = -1,
+    *,
+    _feature_version: int = -1,
+) -> CodeType: ...
+@overload
+def compile(
+    source: str | ReadableBuffer | _ast.Module | _ast.Expression | _ast.Interactive,
+    filename: str | bytes | PathLike[Any],
+    mode: str,
+    *,
+    dont_inherit: bool = False,
+    optimize: int = -1,
+    _feature_version: int = -1,
+) -> CodeType: ...
+@overload
+def compile(
+    source: str | ReadableBuffer | _ast.Module | _ast.Expression | _ast.Interactive,
+    filename: str | bytes | PathLike[Any],
+    mode: str,
+    flags: Literal[1024],
+    dont_inherit: bool = False,
+    optimize: int = -1,
+    *,
+    _feature_version: int = -1,
+) -> _ast.AST: ...
+@overload
+def compile(
+    source: str | ReadableBuffer | _ast.Module | _ast.Expression | _ast.Interactive,
+    filename: str | bytes | PathLike[Any],
+    mode: str,
+    flags: int,
+    dont_inherit: bool = False,
+    optimize: int = -1,
+    *,
+    _feature_version: int = -1,
+) -> Any: ...
 @overload
 def divmod(x: SupportsDivMod[_T_contra, _T_co], y: _T_contra, /) -> _T_co: ...
 @overload
@@ -1131,12 +1169,30 @@ else:
         /,
     ) -> None: ...
 
-exit: _sitebuiltins.Quitter
-
+@overload
+def filter(function: None, iterable: Iterable[_T | None], /) -> list[_T]: ...
+@overload
+def filter(function: Callable[[_S], TypeGuard[_T]], iterable: Iterable[_S], /) -> list[_T]: ...
+@overload
+def filter(function: Callable[[_S], TypeIs[_T]], iterable: Iterable[_S], /) -> list[_T]: ...
+@overload
+def filter(function: Callable[[_T], Any], iterable: Iterable[_T], /) -> list[_T]: ...
+def format(value: object, format_spec: str = '', /) -> str: ...
+@overload
+def getattr(o: object, name: str, /) -> Any: ...
+@overload
+def getattr(o: object, name: str, default: None, /) -> Any | None: ...
+@overload
+def getattr(o: object, name: str, default: bool, /) -> Any | bool: ...
+@overload
+def getattr(o: object, name: str, default: list[Any], /) -> Any | list[Any]: ...
+@overload
+def getattr(o: object, name: str, default: dict[Any, Any], /) -> Any | dict[Any, Any]: ...
+@overload
+def getattr(o: object, name: str, default: _T, /) -> Any | _T: ...
+def globals() -> dict[str, Any]: ...
+def hasattr(obj: object, name: str, /) -> bool: ...
 def hash(obj: object, /) -> int: ...
-
-help: _sitebuiltins._Helper
-
 def hex(number: SupportsIndex, /) -> str: ...
 def id(obj: object, /) -> int: ...
 
@@ -1159,11 +1215,104 @@ else:
     _ClassInfo: TypeAlias = type | tuple[_ClassInfo, ...]
 
 def isinstance(obj: object, class_or_tuple: _ClassInfo, /) -> bool: ...
+def issubclass(cls: type, class_or_tuple: _ClassInfo, /) -> bool: ...
 def len(obj: Sized, /) -> int: ...
-
-license: _sitebuiltins._Printer
-
 def locals() -> dict[str, Any]: ...
+
+if sys.version_info >= (3, 14):
+    @overload
+    def map(func: Callable[[_T1], _S], iterable: Iterable[_T1], /, *, strict: bool = False) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], /, *, strict: bool = False
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        iter5: Iterable[_T5],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[..., _S],
+        iterable: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+        strict: bool = False,
+    ) -> list[_S]: ...
+else:
+    @overload
+    def map(func: Callable[[_T1], _S], iterable: Iterable[_T1], /) -> list[_S]: ...
+    @overload
+    def map(func: Callable[[_T1, _T2], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], /) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3], _S], iterable: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        /,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[[_T1, _T2, _T3, _T4, _T5], _S],
+        iterable: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        iter5: Iterable[_T5],
+        /,
+    ) -> list[_S]: ...
+    @overload
+    def map(
+        func: Callable[..., _S],
+        iterable: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+    ) -> list[_S]: ...
+
 @overload
 def max(
     arg1: SupportsRichComparisonT, arg2: SupportsRichComparisonT, /, *_args: SupportsRichComparisonT, key: None = None
@@ -1350,19 +1499,10 @@ def pow(base: _SupportsPow3[_E_contra, _M_contra, _T_co], exp: _E_contra, mod: _
 def pow(base: _SupportsSomeKindOfPow, exp: float, mod: None = None) -> Any: ...
 @overload
 def pow(base: _SupportsSomeKindOfPow, exp: complex, mod: None = None) -> complex: ...
-
-quit: _sitebuiltins.Quitter
-
-@disjoint_base
-class reversed(Generic[_T]):
-    @overload
-    def __new__(cls, sequence: Reversible[_T], /) -> Iterator[_T]: ...
-    @overload
-    def __new__(cls, sequence: SupportsLenAndGetItem[_T], /) -> Iterator[_T]: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> _T: ...
-    def __length_hint__(self) -> int: ...
-
+@overload
+def reversed(sequence: Reversible[_T], /) -> list[_T]: ...
+@overload
+def reversed(sequence: SupportsLenAndGetItem[_T], /) -> list[_T]: ...
 def repr(obj: object, /) -> str: ...
 
 @type_check_only
@@ -1377,6 +1517,7 @@ class _SupportsRound2(Protocol[_T_co]):
 def round(number: _SupportsRound1[_T], ndigits: None = None) -> _T: ...
 @overload
 def round(number: _SupportsRound2[_T], ndigits: SupportsIndex) -> _T: ...
+def setattr(obj: object, name: str, value: Any, /) -> None: ...
 @overload
 def sorted(
     iterable: Iterable[SupportsRichComparisonT], /, *, key: None = None, reverse: bool = False
@@ -1400,103 +1541,87 @@ def sum(iterable: Iterable[bool | _LiteralInteger], /, start: int = 0) -> int: .
 def sum(iterable: Iterable[_SupportsSumNoDefaultT], /) -> _SupportsSumNoDefaultT | Literal[0]: ...
 @overload
 def sum(iterable: Iterable[_AddableT1], /, start: _AddableT2) -> _AddableT1 | _AddableT2: ...
+@overload
+def vars(object: type, /) -> types.MappingProxyType[str, Any]: ...
+@overload
+def vars(object: Any = ..., /) -> dict[str, Any]: ...
 
-@disjoint_base
-class zip(Generic[_T_co]):
-    if sys.version_info >= (3, 10):
-        @overload
-        def __new__(cls, *, strict: bool = False) -> zip[Any]: ...
-        @overload
-        def __new__(cls, iter1: Iterable[_T1], /, *, strict: bool = False) -> zip[tuple[_T1]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], /, *, strict: bool = False
-        ) -> zip[tuple[_T1, _T2]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /, *, strict: bool = False
-        ) -> zip[tuple[_T1, _T2, _T3]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            /,
-            *,
-            strict: bool = False,
-        ) -> zip[tuple[_T1, _T2, _T3, _T4]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            iter5: Iterable[_T5],
-            /,
-            *,
-            strict: bool = False,
-        ) -> zip[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[Any],
-            iter2: Iterable[Any],
-            iter3: Iterable[Any],
-            iter4: Iterable[Any],
-            iter5: Iterable[Any],
-            iter6: Iterable[Any],
-            /,
-            *iterables: Iterable[Any],
-            strict: bool = False,
-        ) -> zip[tuple[Any, ...]]: ...
-    else:
-        @overload
-        def __new__(cls) -> zip[Any]: ...
-        @overload
-        def __new__(cls, iter1: Iterable[_T1], /) -> zip[tuple[_T1]]: ...
-        @overload
-        def __new__(cls, iter1: Iterable[_T1], iter2: Iterable[_T2], /) -> zip[tuple[_T1, _T2]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /
-        ) -> zip[tuple[_T1, _T2, _T3]]: ...
-        @overload
-        def __new__(
-            cls, iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], iter4: Iterable[_T4], /
-        ) -> zip[tuple[_T1, _T2, _T3, _T4]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[_T1],
-            iter2: Iterable[_T2],
-            iter3: Iterable[_T3],
-            iter4: Iterable[_T4],
-            iter5: Iterable[_T5],
-            /,
-        ) -> zip[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
-        @overload
-        def __new__(
-            cls,
-            iter1: Iterable[Any],
-            iter2: Iterable[Any],
-            iter3: Iterable[Any],
-            iter4: Iterable[Any],
-            iter5: Iterable[Any],
-            iter6: Iterable[Any],
-            /,
-            *iterables: Iterable[Any],
-        ) -> zip[tuple[Any, ...]]: ...
-
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> _T_co: ...
+if sys.version_info >= (3, 10):
+    @overload
+    def zip(*, strict: bool = False) -> list[Any]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], /, *, strict: bool = False) -> list[tuple[_T1]]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], iter2: Iterable[_T2], /, *, strict: bool = False) -> list[tuple[_T1, _T2]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /, *, strict: bool = False
+    ) -> list[tuple[_T1, _T2, _T3]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[tuple[_T1, _T2, _T3, _T4]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1],
+        iter2: Iterable[_T2],
+        iter3: Iterable[_T3],
+        iter4: Iterable[_T4],
+        iter5: Iterable[_T5],
+        /,
+        *,
+        strict: bool = False,
+    ) -> list[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+        strict: bool = False,
+    ) -> list[tuple[Any, ...]]: ...
+else:
+    @overload
+    def zip() -> list[Any]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], /) -> list[tuple[_T1]]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], iter2: Iterable[_T2], /) -> list[tuple[_T1, _T2]]: ...
+    @overload
+    def zip(iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], /) -> list[tuple[_T1, _T2, _T3]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], iter4: Iterable[_T4], /
+    ) -> list[tuple[_T1, _T2, _T3, _T4]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[_T1], iter2: Iterable[_T2], iter3: Iterable[_T3], iter4: Iterable[_T4], iter5: Iterable[_T5], /
+    ) -> list[tuple[_T1, _T2, _T3, _T4, _T5]]: ...
+    @overload
+    def zip(
+        iter1: Iterable[Any],
+        iter2: Iterable[Any],
+        iter3: Iterable[Any],
+        iter4: Iterable[Any],
+        iter5: Iterable[Any],
+        iter6: Iterable[Any],
+        /,
+        *iterables: Iterable[Any],
+    ) -> list[tuple[Any, ...]]: ...
 
 if sys.version_info >= (3, 10):
     from types import EllipsisType, NotImplementedType
 
-    ellipsis = EllipsisType
     Ellipsis: EllipsisType
     NotImplemented: NotImplementedType
 else:
@@ -1527,6 +1652,7 @@ class BaseException:
 
         def add_note(self, note: str, /) -> None: ...
 
+class GeneratorExit(BaseException): ...
 class KeyboardInterrupt(BaseException): ...
 
 @disjoint_base
@@ -1548,11 +1674,6 @@ class OSError(Exception):
     if sys.platform == 'win32':
         winerror: int
 
-EnvironmentError = OSError
-IOError = OSError
-if sys.platform == 'win32':
-    WindowsError = OSError
-
 class ArithmeticError(Exception): ...
 class AssertionError(Exception): ...
 
@@ -1565,6 +1686,15 @@ if sys.version_info >= (3, 10):
 
 else:
     class AttributeError(Exception): ...
+
+@disjoint_base
+class ImportError(Exception):
+    def __init__(self, *args: object, name: str | None = None, path: str | None = None) -> None: ...
+    name: str | None
+    path: str | None
+    msg: str
+    if sys.version_info >= (3, 12):
+        name_from: str | None
 
 class LookupError(Exception): ...
 class MemoryError(Exception): ...
@@ -1608,8 +1738,10 @@ class TypeError(Exception): ...
 class ValueError(Exception): ...
 class OverflowError(ArithmeticError): ...
 class ZeroDivisionError(ArithmeticError): ...
+class ModuleNotFoundError(ImportError): ...
 class IndexError(LookupError): ...
 class KeyError(LookupError): ...
+class UnboundLocalError(NameError): ...
 class FileExistsError(OSError): ...
 class FileNotFoundError(OSError): ...
 class IsADirectoryError(OSError): ...
@@ -1618,6 +1750,26 @@ class PermissionError(OSError): ...
 class TimeoutError(OSError): ...
 class NotImplementedError(RuntimeError): ...
 class RecursionError(RuntimeError): ...
+
+@disjoint_base
+class UnicodeDecodeError(ValueError):
+    encoding: str
+    object: bytes
+    start: int
+    end: int
+    reason: str
+
+    def __init__(self, encoding: str, object: ReadableBuffer, start: int, end: int, reason: str, /) -> None: ...
+
+@disjoint_base
+class UnicodeEncodeError(ValueError):
+    encoding: str
+    object: str
+    start: int
+    end: int
+    reason: str
+
+    def __init__(self, encoding: str, object: str, start: int, end: int, reason: str, /) -> None: ...
 
 if sys.version_info >= (3, 11):
     _BaseExceptionT_co = TypeVar('_BaseExceptionT_co', bound=BaseException, covariant=True, default=BaseException)

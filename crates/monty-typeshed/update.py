@@ -16,19 +16,32 @@ import subprocess
 from pathlib import Path
 
 # Whitelisted builtin functions (from crates/monty/src/builtins/)
+#
+# Both sets must name every builtin the interpreter binds and nothing else: a
+# name the interpreter binds and the stub lacks fails `monty -t` on code that
+# runs, and a name the stub binds and the interpreter lacks passes it and then
+# raises `NameError`. `crates/monty-runtime/tests/typeshed_builtins.rs` holds
+# the vendored stub to the interpreter both ways.
 ALLOWED_FUNCTIONS = {
     'abs',
     'all',
     'any',
     'bin',
+    'callable',
     'chr',
+    'compile',
     'divmod',
     'eval',
     'exec',
+    'format',
+    'getattr',
+    'globals',
+    'hasattr',
     'hash',
     'hex',
     'id',
     'isinstance',
+    'issubclass',
     'iter',
     'len',
     'locals',
@@ -42,8 +55,10 @@ ALLOWED_FUNCTIONS = {
     'print',
     'repr',
     'round',
+    'setattr',
     'sorted',
     'sum',
+    'vars',
 }
 
 # Whitelisted builtin classes (from crates/monty/src/types/ and exception_private.rs)
@@ -66,10 +81,14 @@ ALLOWED_CLASSES = {
     'set',
     'frozenset',
     'range',
-    # Iterator types (these are classes, not functions)
+    # Monty runs these as functions that give a list; upstream types them as
+    # classes whose instances are the iterators the calls give, which `listed`
+    # writes as functions
     'enumerate',
     'reversed',
     'zip',
+    'filter',
+    'map',
     # Slicing
     'slice',
     # property is used by pathlib.Path
@@ -92,7 +111,10 @@ ALLOWED_CLASSES = {
     'AssertionError',
     'MemoryError',
     'NameError',
+    'UnboundLocalError',
     'SyntaxError',
+    'ImportError',
+    'ModuleNotFoundError',
     'OSError',
     'FileExistsError',
     'FileNotFoundError',
@@ -102,7 +124,19 @@ ALLOWED_CLASSES = {
     'TimeoutError',
     'TypeError',
     'ValueError',
+    'UnicodeDecodeError',
+    'UnicodeEncodeError',
     'StopIteration',
+    'GeneratorExit',
+}
+
+# Whitelisted module-level names that are neither a function nor a class.
+# Every other public assignment is dropped: the names `site` adds (`exit`,
+# `help`, ...) and the `OSError` aliases (`IOError`, ...) are not builtins of
+# the interpreter.
+ALLOWED_NAMES = {
+    'Ellipsis',
+    'NotImplemented',
 }
 
 # Files to copy without filtering
@@ -178,6 +212,7 @@ binascii: 3.0-
 bisect: 3.0-
 builtins: 3.0-
 collections: 3.0-
+contextvars: 3.7-
 copy: 3.0-
 csv: 3.0-
 dataclasses: 3.7-
@@ -198,6 +233,8 @@ pathlib.types: 3.14-
 posixpath: 3.0-
 random: 3.0-
 re: 3.0-
+string: 3.14-  # a namespace for templatelib: the package itself is not importable at runtime
+string.templatelib: 3.14-
 sys: 3.0-
 time: 3.0-
 tomllib: 3.11-
@@ -286,7 +323,8 @@ def filter_statements(nodes: list[ast.stmt]) -> list[ast.stmt]:
 
     Keeps:
     - Imports
-    - Type variable assignments (e.g., _T = TypeVar('_T'))
+    - Private assignments, such as type variables (e.g., _T = TypeVar('_T'))
+    - Allowed public assignments
     - Allowed function definitions
     - Allowed class definitions
 
@@ -309,8 +347,101 @@ def filter_statements(nodes: list[ast.stmt]) -> list[ast.stmt]:
             filtered = filter_if_block(node)
             if filtered is not None:
                 result.append(filtered)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if all(name.startswith('_') or name in ALLOWED_NAMES for name in assigned(node)):
+                result.append(node)
         else:
-            # Keep imports, type aliases, assignments, etc.
+            # Keep imports, type aliases, etc.
+            result.append(node)
+    return result
+
+
+def assigned(node: ast.Assign | ast.AnnAssign) -> list[str]:
+    """The names an assignment binds."""
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return [target.id for target in targets if isinstance(target, ast.Name)]
+
+
+def rebase(nodes: list[ast.stmt], bases: dict[str, list[str]]) -> None:
+    """Give each class the nearest ancestor the stub keeps in place of a base it drops.
+
+    `UnicodeDecodeError` derives from `UnicodeError` upstream, which the
+    interpreter does not bind, so the stub derives it from `ValueError`, as the
+    interpreter does.
+    """
+    for node in nodes:
+        if isinstance(node, ast.If):
+            rebase(node.body, bases)
+            rebase(node.orelse, bases)
+        elif isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    while base.id in bases and base.id not in ALLOWED_CLASSES and not base.id.startswith('_'):
+                        base.id = bases[base.id][0]
+
+
+def hierarchy(nodes: list[ast.stmt]) -> dict[str, list[str]]:
+    """The names of the bases of every class upstream defines, by the name of the class."""
+    found: dict[str, list[str]] = {}
+    for node in nodes:
+        if isinstance(node, ast.If):
+            found |= hierarchy(node.body) | hierarchy(node.orelse)
+        elif isinstance(node, ast.ClassDef):
+            found[node.name] = [base.id for base in node.bases if isinstance(base, ast.Name)]
+    return found
+
+
+# Monty runs these as functions that give a list, where CPython gives a lazy iterator: `next(filter(...))` raises
+# `TypeError` in Monty. `listed` writes each class as the overloads of its `__new__` that give that list, so the
+# checker refuses what the interpreter refuses.
+LISTED = {'enumerate', 'filter', 'map', 'reversed', 'zip'}
+
+
+def listed(nodes: list[ast.stmt]) -> list[ast.stmt]:
+    """Write each class of `LISTED` as a function whose overloads give a list of the items of its iterator."""
+    result: list[ast.stmt] = []
+    for node in nodes:
+        if isinstance(node, ast.If):
+            node.body = listed(node.body) or [ast.Pass()]
+            node.orelse = listed(node.orelse)
+            result.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name in LISTED:
+            item = next(
+                part.returns
+                for part in node.body
+                if isinstance(part, ast.FunctionDef) and part.name == '__next__' and part.returns is not None
+            )
+            result += constructors(node.body, node.name, item)
+        else:
+            result.append(node)
+    return result
+
+
+def constructors(nodes: list[ast.stmt], name: str, item: ast.expr) -> list[ast.stmt]:
+    """The `__new__` overloads of a class body as functions of the module named `name`, each giving a list."""
+    result: list[ast.stmt] = []
+    for node in nodes:
+        if isinstance(node, ast.If):
+            body = constructors(node.body, name, item)
+            orelse = constructors(node.orelse, name, item)
+            if body or orelse:
+                result.append(ast.copy_location(ast.If(test=node.test, body=body or [ast.Pass()], orelse=orelse), node))
+        elif isinstance(node, ast.FunctionDef) and node.name == '__new__':
+            node.name = name
+            if node.args.posonlyargs:
+                node.args.posonlyargs = node.args.posonlyargs[1:]
+            else:
+                node.args.args = node.args.args[1:]
+            given = node.returns
+            if (
+                isinstance(given, ast.Subscript)
+                and isinstance(given.value, ast.Name)
+                and given.value.id in (name, 'Iterator')
+            ):
+                given = given.slice
+            else:
+                given = item
+            node.returns = ast.Subscript(value=ast.Name(id='list', ctx=ast.Load()), slice=given, ctx=ast.Load())
             result.append(node)
     return result
 
@@ -356,7 +487,10 @@ def filter_builtins(source: str) -> str:
         Filtered source code.
     """
     tree = ast.parse(source)
+    bases = hierarchy(tree.body)
     tree.body = filter_statements(tree.body)
+    rebase(tree.body, bases)
+    tree.body = listed(tree.body)
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
 

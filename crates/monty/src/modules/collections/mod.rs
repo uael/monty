@@ -33,6 +33,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult},
     heap::{DropWithContext, HeapData, HeapId, HeapReadOutput},
     intern::StaticStrings,
+    modules::collections_abc,
     types::{
         BuiltinType, Dict, Module, NamedTupleClass, PyTrait,
         iter::collect_owned_iterable,
@@ -68,6 +69,11 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         Value::Builtin(Builtins::Type(BuiltinType::Counter)),
         vm,
     );
+
+    // The submodule is an attribute, as it is in CPython, so
+    // `from collections import abc` and `collections.abc.Callable` both work.
+    let abc = collections_abc::create_module(vm);
+    module.set_attr(StaticStrings::Abc, Value::Ref(abc), vm);
 
     vm.heap.allocate(HeapData::Module(Box::new(module)))
 }

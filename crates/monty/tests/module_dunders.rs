@@ -3,7 +3,8 @@
 //! `__loader__`).
 //!
 //! Monty exposes these with fixed values for CPython compatibility but, having
-//! no module object or `globals()` dict, treats them as read-only. The
+//! no module object and module globals in slots rather than a namespace dict,
+//! treats them as read-only. The
 //! behaviours that match CPython's `__main__` script run (`__name__`,
 //! `__debug__`) are covered by the dual-run `test_cases/module__dunders.py`.
 //!
