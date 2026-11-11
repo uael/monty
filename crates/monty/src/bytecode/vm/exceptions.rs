@@ -2,8 +2,6 @@
 
 use std::fmt::{self, Write};
 
-use monty_types::ResourceError;
-
 use super::VM;
 use crate::{
     builtins::Builtins,
@@ -215,19 +213,24 @@ impl VM<'_> {
                 }
             },
         };
-        let Value::Ref(raised_id) = &raised else {
+        let Value::Ref(raised_id) = raised else {
             unreachable!("exceptions are heap values")
         };
-        self.set_exception_cause(*raised_id, cause);
+        if let Err(refused) = self.set_exception_cause(raised_id, cause) {
+            raised.drop_with(self);
+            return self.handle_exception_with_value(refused, None);
+        }
         self.handle_exception_with_value(error, Some(raised))
     }
 
-    /// The exception object `value` denotes: itself for an exception, a fresh
-    /// instance for an exception class. Anything else comes back as `Err` for the
-    /// caller to release and report.
+    /// The exception object `value` denotes: itself for an exception and for an
+    /// instance of a sandbox exception class, a fresh instance for a builtin
+    /// exception class. Anything else comes back as `Err` for the caller to
+    /// release and report.
     fn exception_object(&mut self, value: Value) -> Result<Value, Value> {
         match value {
             Value::Ref(id) if matches!(self.heap.get(id), HeapData::Exception(_)) => Ok(value),
+            Value::Ref(_) if instance_builtin_exc(&value, self).is_some() => Ok(value),
             Value::Builtin(Builtins::ExcType(exc_type)) => Ok(self.allocate_exception(exc_type)),
             other => Err(other),
         }
@@ -243,12 +246,32 @@ impl VM<'_> {
 
     /// Stores `cause` (an owned reference) as `__cause__` of the exception `id`,
     /// releasing any previous cause, and sets `__suppress_context__`.
-    fn set_exception_cause(&mut self, id: HeapId, cause: Option<HeapId>) {
+    ///
+    /// An instance of a sandbox exception class keeps its chain as attributes of
+    /// its own, which is where CPython keeps the chain of every exception.
+    fn set_exception_cause(&mut self, id: HeapId, cause: Option<HeapId>) -> RunResult<()> {
         let previous = match self.heap.read(id) {
-            HeapReadOutput::Exception(exc) => exc.get_mut(self.heap).set_cause(cause),
-            _ => unreachable!("set_exception_cause is only called on exceptions"),
+            HeapReadOutput::Exception(exc) => Some(exc.get_mut(self.heap).set_cause(cause)),
+            _ => None,
         };
-        previous.map(Value::Ref).drop_with(self);
+        if let Some(previous) = previous {
+            previous.map(Value::Ref).drop_with(self);
+            return Ok(());
+        }
+        self.set_chain_attr(id, StaticStrings::DunderCause, cause.map_or(Value::None, Value::Ref))?;
+        self.set_chain_attr(id, StaticStrings::DunderSuppressContext, Value::Bool(true))
+    }
+
+    /// Binds `value` (owned) to the attribute `name` of an instance of a sandbox
+    /// exception class, releasing what the name held.
+    fn set_chain_attr(&mut self, id: HeapId, name: StaticStrings, value: Value) -> RunResult<()> {
+        let name = Value::InternString(self.interns.intern_static(name));
+        let HeapReadOutput::Instance(instance) = self.heap.read(id) else {
+            unreachable!("a raised object is an exception or an instance of a sandbox exception class")
+        };
+        let replaced = instance.set_attr_unchecked(name, value, self)?;
+        replaced.drop_with(self);
+        Ok(())
     }
 
     /// Records the exception being handled as `__context__` of the newly raised
@@ -256,7 +279,7 @@ impl VM<'_> {
     /// exception itself gets none, and a link that would make the chain circular is
     /// cut first. An internal (frozen) handler's exception is skipped, since the
     /// equivalent CPython code is C and leaves the user's handled exception in place.
-    fn attach_context(&mut self, raised: &Value) -> Result<(), ResourceError> {
+    fn attach_context(&mut self, raised: &Value) -> RunResult<()> {
         let handled = self.exception_stack.iter().rev().find_map(|caught| match caught {
             CaughtException::Value(Value::Ref(id)) => Some(*id),
             _ => None,
@@ -278,33 +301,47 @@ impl VM<'_> {
                 break;
             };
             if next == *raised_id {
-                self.set_exception_context(cursor, None);
+                self.set_exception_context(cursor, None)?;
                 break;
             }
             self.heap.tracker.check_time_every(step)?;
             cursor = next;
         }
         self.heap.inc_ref(handled_id);
-        self.set_exception_context(*raised_id, Some(handled_id));
-        Ok(())
+        self.set_exception_context(*raised_id, Some(handled_id))
     }
 
     /// The `__context__` of the exception `id`, borrowed.
     fn exception_context(&self, id: HeapId) -> Option<HeapId> {
         match self.heap.get(id) {
             HeapData::Exception(exc) => exc.context(),
+            HeapData::Instance(instance) => {
+                let name: &'static str = StaticStrings::DunderContext.into();
+                match instance.attrs().get_by_str(name, self.heap, self.interns) {
+                    Some(Value::Ref(context)) => Some(*context),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
 
     /// Stores `context` (an owned reference) as `__context__` of the exception
     /// `id`, releasing any previous context.
-    fn set_exception_context(&mut self, id: HeapId, context: Option<HeapId>) {
+    fn set_exception_context(&mut self, id: HeapId, context: Option<HeapId>) -> RunResult<()> {
         let previous = match self.heap.read(id) {
-            HeapReadOutput::Exception(exc) => exc.get_mut(self.heap).set_context(context),
-            _ => unreachable!("set_exception_context is only called on exceptions"),
+            HeapReadOutput::Exception(exc) => Some(exc.get_mut(self.heap).set_context(context)),
+            _ => None,
         };
-        previous.map(Value::Ref).drop_with(self);
+        if let Some(previous) = previous {
+            previous.map(Value::Ref).drop_with(self);
+            return Ok(());
+        }
+        self.set_chain_attr(
+            id,
+            StaticStrings::DunderContext,
+            context.map_or(Value::None, Value::Ref),
+        )
     }
 
     /// Re-raises the active exception without replacing a user traceback with an internal handler.
@@ -505,7 +542,7 @@ impl VM<'_> {
         };
         if let Err(error) = self.attach_context(&exc_value) {
             exc_value.drop_with(self);
-            return ExceptionHandlingResult::Unhandled(self.unwind_for_traceback(error.into()));
+            return ExceptionHandlingResult::Unhandled(self.unwind_for_traceback(error));
         }
 
         // Use DropGuard because exc_value is conditionally consumed (pushed onto

@@ -728,6 +728,14 @@ pub(crate) fn instance_getattr(self_id: HeapId, attr: &EitherStr, vm: &mut VM<'_
         Ok(CallResult::Value(value))
     } else {
         let class_id = instance_class(self_id, vm);
+        // An exception that no `raise` chained has no cause and no context, as in CPython.
+        if class_builtin_exc(class_id, vm).is_some() {
+            match attr_str {
+                "__cause__" | "__context__" => return Ok(CallResult::Value(Value::None)),
+                "__suppress_context__" => return Ok(CallResult::Value(Value::Bool(false))),
+                _ => {}
+            }
+        }
         Err(ExcType::attribute_error(
             class_name(class_id, vm.heap, vm.interns),
             attr_str,

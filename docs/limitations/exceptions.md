@@ -105,9 +105,10 @@ Divergences:
     records is rendered from `args`, as `BaseException.__str__` does, because a
     raise cannot run sandbox code while it is unwinding. `str(exc)` inside the
     sandbox still dispatches `__str__`.
-- **`__cause__`, `__context__` and `__suppress_context__` do not exist**, on a
-    sandbox exception class as on a builtin one, so `raise X from Y` records
-    nothing.
+- **`__cause__`, `__context__` and `__suppress_context__` are attributes of the
+    instance.** `raise X from Y` and a raise in a handler record them as on a
+    builtin exception, and an assignment to one of them is an ordinary
+    attribute write, where a builtin exception refuses it.
 - **`__traceback__` is absent**, so an exception cannot be re-raised with a
     traceback it carries.
 - **`BaseException.__init__` is not callable.** A class that writes its own
