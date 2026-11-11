@@ -10,7 +10,7 @@ use crate::{
     heap::{DropGuard, HeapReadOutput},
     os_dispatch::PostConversionEffect,
     py_value::PyValue,
-    types::PyTrait,
+    types::{PyTrait, generator::Reader},
     value::Value,
 };
 
@@ -45,10 +45,20 @@ struct NextArgs {
 /// - `next(iterator, default)` - Returns the next item from the iterator, or
 ///   `default` if the iterator is exhausted.
 ///
+/// A generator is read on the VM's own loop, as its `__next__()` reads it, so a
+/// call to the host in its body suspends the run as it would anywhere.
 /// A file nobody has read yet first loads its buffer from the host: the call
 /// yields the read with a `FileNext` effect, which answers it on resume.
 pub fn builtin_next(vm: &mut VM<'_>, args: ArgValues) -> RunResult<CallResult> {
     let NextArgs { iterator, default } = NextArgs::from_args(args, vm)?;
+    if let Some(gen_id) = vm.unfinished_generator(&iterator) {
+        let has_default = default.is_some();
+        if let Some(default) = default {
+            vm.push(default);
+        }
+        vm.push(iterator);
+        return vm.read_generator(gen_id, Reader::Next(has_default));
+    }
     defer_drop!(iterator, vm);
     match iterator.read_heap(vm) {
         Some(HeapReadOutput::Instance(instance)) => {

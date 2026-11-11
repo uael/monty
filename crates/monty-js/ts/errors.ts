@@ -407,7 +407,7 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   'NotImplementedError',
   'RecursionError',
   'AttributeError',
-  'FrozenInstanceError',
+  'dataclasses.FrozenInstanceError',
   'NameError',
   'UnboundLocalError',
   'ValueError',
@@ -448,6 +448,8 @@ export const PYTHON_EXC_NAMES: ReadonlySet<string> = new Set([
   'decimal.Overflow',
   'decimal.Underflow',
   'decimal.FloatOperation',
+  'GeneratorExit',
+  'asyncio.exceptions.CancelledError',
 ])
 
 /**
