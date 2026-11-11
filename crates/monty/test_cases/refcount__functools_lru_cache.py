@@ -5,7 +5,8 @@
 # `key` ends at 3: its binding, the tuple key the cache stores, and the result
 # tuple `held` — which is itself at 2, being both a binding and the cache's
 # stored value. `cyclic` ends at 2: its binding and the value cached inside the
-# wrapper the list itself holds.
+# wrapper the list itself holds. `functools` ends at 2: its binding and the entry
+# of `sys.modules`.
 import functools
 
 
@@ -82,4 +83,4 @@ colliding(Reentrant(2))
 assert reentered == [True], 'expected the insertion to be re-entered'
 
 len(held)
-# ref-counts={'functools': 1, 'wrapped': 3, 'cached': 1, 'key': 3, 'held': 2, 'small': 1, 'evicted': 1, 'cyclic': 2, 'shared': 3, 'colliding': 1, 'calls': 1, 'reentered': 1, 'Reentrant': 3}
+# ref-counts={'functools': 2, 'wrapped': 3, 'cached': 1, 'key': 3, 'held': 2, 'small': 1, 'evicted': 1, 'cyclic': 2, 'shared': 3, 'colliding': 1, 'calls': 1, 'reentered': 1, 'Reentrant': 3}
