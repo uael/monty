@@ -1,6 +1,6 @@
-# An explicit namespace dict is held by every function defined under it (a
-# plain def, one with defaults, and a method) and released with them; a value
-# the snippet binds is held by the dict entry.
+# An explicit namespace dict is held by every function and class defined
+# under it (a plain def, one with defaults, a method, and the class) and
+# released with them; a value the snippet binds is held by the dict entry.
 ns = {}
 exec('def f():\n    return 1\ndef g(x=1):\n    return x\nclass C:\n    def m(self):\n        return 2', ns)
 obj = [1]
@@ -14,4 +14,4 @@ cyc = {}
 exec('def f():\n    return 1', cyc)
 cyc = None
 gc.collect()
-# ref-counts={'ns': 4, 'obj': 2, 'gc': 1}
+# ref-counts={'ns': 5, 'obj': 2, 'gc': 2}

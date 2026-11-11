@@ -5,7 +5,7 @@ external calls. The sandbox schedules its own tasks; host event loops execute ex
 
 ## Module surface
 
-The `asyncio` module exposes exactly three functions:
+The `asyncio` module exposes three functions and one exception class:
 
 - `asyncio.run(coro)` — runs a coroutine to completion. Returns the value
     the coroutine `return`s, or re-raises an exception from it.
@@ -19,15 +19,34 @@ The `asyncio` module exposes exactly three functions:
 - `asyncio.sleep(delay, result=None)` — waits as the session's `sleep` setting
     says, then produces `result`. See
     [below](#asynciosleep-waits-at-the-call-not-at-the-await).
+- `asyncio.get_running_loop()` — proof that a loop is running, which here it
+    always is, so it never raises the `RuntimeError` CPython raises outside
+    one, not even at module level. What comes back answers `is_running()`
+    (always `True`) and `is_closed()` (always `False`) and **nothing else**:
+    `create_future`, `call_soon`, `run_until_complete` and the rest of the loop
+    API raise `AttributeError`. Each call makes a new object, so
+    `get_running_loop() is get_running_loop()` is `False` where CPython hands
+    back the one running loop.
+- `asyncio.current_task()` — always `None`. CPython answers `None` outside a
+    task and a `Task` inside one; Monty schedules coroutines without giving a
+    program an object for one, so a program that tells its runs apart by
+    `id(current_task())` sees one identity for all of them.
+- `asyncio.CancelledError` — raisable and catchable, but **nothing in Monty
+    raises it**: no await is ever cancelled. A sibling of a failing `gather()`
+    keeps running rather than having this raised at its `await`
+    ([below](#siblings-left-running-by-a-failed-gather-only-advance-while-something-else-suspends)).
+    It reprs as `asyncio.exceptions.CancelledError('...')` where CPython gives
+    `CancelledError('...')`, like the other qualified exception classes (see
+    [exceptions.md](exceptions.md)).
 
 Not implemented (raise `AttributeError`):
 
 `create_task`, `wait`, `wait_for`, `shield`, `to_thread`,
-`new_event_loop`, `get_event_loop`, `get_running_loop`, `Queue`, `Lock`,
+`new_event_loop`, `get_event_loop`, `Queue`, `Lock`,
 `Semaphore`, `Event`, `Future`, `Task`, `TaskGroup`, `timeout`,
 `timeout_at`, `Timeout`, `as_completed`, `iscoroutine`, `ensure_future`,
-the whole `asyncio.subprocess` / `asyncio.streams` / `asyncio.protocols`
-surface.
+`InvalidStateError`, the whole `asyncio.subprocess` / `asyncio.streams` /
+`asyncio.protocols` surface.
 
 `asyncio.timeout()` / `asyncio.timeout_at()` would be unreachable in any
 case: they are async context managers, and `async with` is rejected at parse
@@ -38,16 +57,27 @@ time (see [language.md](language.md)).
 - `async def` functions and `await` work; coroutines can call each other.
 - **Coroutines are single-shot.** Awaiting the same coroutine object twice
     raises `RuntimeError`. Store the *result*, not the coroutine, if you need
-    it again.
+    it again. `send()`, `throw()` and `close()` drive one by hand, as they
+    drive a generator (see [generators.md](generators.md)); one that has
+    already run refuses all three but `close()` with the same `RuntimeError`.
+- **`cr_frame`, `cr_running`, `cr_code`, `cr_await`** and the rest of the
+    introspection attributes are absent, and so is `__await__` on a coroutine.
+    Reading `send`, `throw` or `close` rather than calling it raises
+    `AttributeError`, as it does on a generator.
+- **A coroutine that is never awaited says nothing.** CPython warns
+    `RuntimeWarning: coroutine 'f' was never awaited` when it is collected;
+    Monty has no warnings.
 - `await` on a non-awaitable raises `TypeError`.
 - `async for` and `async with` are **rejected at parse time** (see
     [language.md](language.md)). Async iteration and async context-manager
     protocols do not exist.
 - Async comprehensions (`[x async for x in ...]`) are rejected at parse
     time.
-- There is no `__await__` protocol. Awaitables are only the things Monty
-    knows internally: coroutines from `async def`, gather futures, and external
-    function call futures returned by host bindings.
+- **`asyncio.run()` takes only what drives its own wait**: a coroutine, a
+    gather future or an external function call future. An object with
+    `__await__` is refused with
+    `TypeError: '{type}' object can't be awaited`, where CPython awaits it.
+    An ordinary `await` accepts it.
 
 ## `asyncio.sleep()` waits at the call, not at the `await`
 

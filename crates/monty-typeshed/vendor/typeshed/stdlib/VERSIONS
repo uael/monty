@@ -14,6 +14,7 @@ binascii: 3.0-
 bisect: 3.0-
 builtins: 3.0-
 collections: 3.0-
+contextvars: 3.7-
 copy: 3.0-
 csv: 3.0-
 dataclasses: 3.7-
@@ -34,6 +35,8 @@ pathlib.types: 3.14-
 posixpath: 3.0-
 random: 3.0-
 re: 3.0-
+string: 3.14-  # a namespace for templatelib: the package itself is not importable at runtime
+string.templatelib: 3.14-
 sys: 3.0-
 time: 3.0-
 tomllib: 3.11-
