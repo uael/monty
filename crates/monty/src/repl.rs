@@ -13,8 +13,8 @@ use std::{mem, sync::Arc};
 
 use ahash::AHashMap;
 use monty_types::{
-    CallArgs, ExcType, MontyException, MontyObject, MontyUuid, NamedValues, OsFunctionCall, OsPolicy, PrintWriter,
-    ResourceTracker, SOURCE_SCAN_THRESHOLD, SourceRange,
+    CallArgs, ExcType, InvalidInputError, MontyException, MontyObject, MontyUuid, NamedValues, OsFunctionCall,
+    OsPolicy, PrintWriter, ResourceTracker, SOURCE_SCAN_THRESHOLD, SourceRange,
     unstable::{self, MontyGraph, NodeId},
 };
 use ruff_python_ast::token::TokenKind;
@@ -24,9 +24,10 @@ use crate::{
     args::{ArgValues, KwargsValues},
     bytecode::{FrameExit, ModuleCache, VM, VMSnapshot},
     defer_drop,
-    exception_private::{ExcTypeExt, RunError},
+    exception_private::{ExcTypeExt, RunError, RunResult},
     heap::{DropWithContext, Heap, HeapData, HeapReader},
     intern::Interns,
+    modules::table::ModuleTable,
     name_map::NameMap,
     object_bridge::{MontyGraphExt, MontyObjectExt},
     parse::source_nesting_exception,
@@ -89,6 +90,13 @@ pub struct MontyRepl {
     /// The session's `random` state, carried between snippets like the
     /// globals so a `random.seed()` in one feed governs the draws of the next.
     random: SessionRandom,
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Session state like the globals: a module built for one snippet is the
+    /// same object the next one imports. Same ownership hand-off as
+    /// `global_names`.
+    #[serde(default)]
+    sys_modules: ModuleTable,
     /// Modules imported from files, carried between snippets like the globals
     /// so each file runs once per session.
     #[serde(default)]
@@ -132,6 +140,7 @@ impl MontyRepl {
             os_policy: Arc::new(OsPolicy::default()),
             cwd: Arc::from(DEFAULT_CWD),
             random: SessionRandom::default(),
+            sys_modules: ModuleTable::default(),
             modules: ModuleCache::default(),
             future_annotations: false,
             heap,
@@ -167,6 +176,29 @@ impl MontyRepl {
     pub fn with_os_policy(mut self, os_policy: OsPolicy) -> Self {
         self.set_os_policy(os_policy);
         self
+    }
+
+    /// Holds each value of the sandbox with no data form, such as a function,
+    /// a generator or a template, and each class, that crosses to the host
+    /// under a handle, until the host releases it with
+    /// [`release`](Self::release): such a value crosses as a
+    /// [`MontyObject::handle`], a class as its type object, and either one
+    /// handed back is the same object again, which the host may call with
+    /// [`ReplFunctionCall::call_first`]. An instance of a class of the session
+    /// whose object is gone is made again from its class and its attrs, with
+    /// no `__init__` run, when the host hands it in, so the host may hold one
+    /// by its fields. A session without handles gives a value with no data
+    /// form as its `repr()`, and refuses an instance whose object is gone.
+    #[must_use]
+    pub fn with_handles(mut self) -> Self {
+        self.heap.hold_handles();
+        self
+    }
+
+    /// The host holds the handle `id` no more, so the session lets go of the
+    /// value it held under it. Whether it held one.
+    pub fn release(&mut self, id: &MontyUuid) -> bool {
+        self.heap.release(id)
     }
 
     /// Replaces the session's OS-call policies in place, for a host restoring
@@ -281,6 +313,7 @@ impl MontyRepl {
             &input_script_name,
             &mut this.global_names,
             &mut this.interns,
+            &mut this.sys_modules,
             &input_names,
             this.options,
             session,
@@ -339,7 +372,7 @@ impl MontyRepl {
                 Ok((converted, vm_state))
             },
         ) {
-            Ok((converted, vm_state)) => build_repl_progress(converted, vm_state, executor, this),
+            Ok((converted, vm_state)) => build_repl_progress(converted, vm_state, executor, this, Vec::new()),
             Err(error) => {
                 this.commit_executor(executor);
                 Err(Box::new(ReplStartError { repl: this, error }))
@@ -391,6 +424,7 @@ impl MontyRepl {
             &input_script_name,
             &mut self.global_names,
             &mut self.interns,
+            &mut self.sys_modules,
             &input_names,
             self.options,
             session,
@@ -497,6 +531,7 @@ impl MontyRepl {
             &input_script_name,
             self.global_names.clone(),
             &mut self.interns,
+            &mut self.sys_modules,
             self.options,
             ReplSession {
                 script_name: &self.script_name,
@@ -587,6 +622,7 @@ impl MontyRepl {
         );
         self.global_names = executor.tables.global_names;
         self.interns = executor.tables.interns;
+        self.sys_modules = executor.tables.sys_modules;
         result
     }
 
@@ -630,9 +666,14 @@ impl MontyRepl {
     /// tables while globals still hold `FunctionId`/`StringId` values from
     /// the snippet.
     fn commit_executor(&mut self, executor: Executor) {
-        let SessionTables { global_names, interns } = executor.tables;
+        let SessionTables {
+            global_names,
+            interns,
+            sys_modules,
+        } = executor.tables;
         self.global_names = global_names;
         self.interns = interns;
+        self.sys_modules = sys_modules;
     }
 
     /// Grows the globals vector to at least `size` slots.
@@ -683,6 +724,7 @@ impl<'a> CheckedSource<'a> {
 impl Drop for MontyRepl {
     fn drop(&mut self) {
         self.globals.drain(..).drop_with(&mut self.heap);
+        self.heap.release_all();
     }
 }
 
@@ -713,6 +755,14 @@ pub enum ReplProgress {
         /// Final result produced by the snippet.
         value: MontyObject,
     },
+    /// The call the host made with [`ReplFunctionCall::call_first`] returned
+    /// or raised, and the call it came before is still the host's to answer.
+    Returned {
+        /// What the call returned, or what it raised.
+        result: Result<MontyObject, MontyException>,
+        /// The call the host has still to answer, as it stood.
+        call: ReplFunctionCall,
+    },
 }
 
 /// Error returned when a REPL snippet raises a Python exception during [`feed_start`](MontyRepl::feed_start) or a `resume()`.
@@ -735,6 +785,10 @@ impl ReplProgress {
     pub(crate) fn heap_and_interns(&mut self) -> (&mut Heap, &mut Interns) {
         match self {
             Self::FunctionCall(ReplFunctionCall { snapshot, .. })
+            | Self::Returned {
+                call: ReplFunctionCall { snapshot, .. },
+                ..
+            }
             | Self::OsCall(ReplOsCall { snapshot, .. })
             | Self::NameLookup(ReplNameLookup { snapshot, .. }) => {
                 (&mut snapshot.repl.heap, &mut snapshot.executor.tables.interns)
@@ -797,6 +851,7 @@ impl ReplProgress {
             Self::ResolveFutures(state) => state.into_repl(),
             Self::NameLookup(lookup) => lookup.into_repl(),
             Self::Complete { repl, .. } => repl,
+            Self::Returned { call, .. } => call.into_repl(),
         }
     }
 
@@ -812,6 +867,7 @@ impl ReplProgress {
             Self::ResolveFutures(state) => state.repl.tracker(),
             Self::NameLookup(lookup) => lookup.snapshot.repl.tracker(),
             Self::Complete { repl, .. } => repl.tracker(),
+            Self::Returned { call, .. } => call.snapshot.repl.tracker(),
         }
     }
 
@@ -820,6 +876,7 @@ impl ReplProgress {
         match self {
             Self::FunctionCall(call) => call.snapshot.repl.tracker_mut(),
             Self::OsCall(call) => call.snapshot.repl.tracker_mut(),
+            Self::Returned { call, .. } => call.snapshot.repl.tracker_mut(),
             Self::ResolveFutures(state) => state.repl.tracker_mut(),
             Self::NameLookup(lookup) => lookup.snapshot.repl.tracker_mut(),
             Self::Complete { repl, .. } => repl.tracker_mut(),
@@ -834,7 +891,7 @@ impl ReplProgress {
     pub fn set_os_policy(&mut self, os_policy: OsPolicy) {
         let os_policy = Arc::new(os_policy);
         match self {
-            Self::FunctionCall(call) => call.snapshot.set_os_policy(os_policy),
+            Self::FunctionCall(call) | Self::Returned { call, .. } => call.snapshot.set_os_policy(os_policy),
             Self::OsCall(call) => call.snapshot.set_os_policy(os_policy),
             Self::ResolveFutures(state) => state.set_os_policy(os_policy),
             Self::NameLookup(lookup) => lookup.snapshot.set_os_policy(os_policy),
@@ -936,6 +993,89 @@ impl ReplFunctionCall {
     pub fn abort(self, exc: MontyException, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
         self.snapshot.abort(exc, print)
     }
+
+    /// Resumes by raising `exception`, an exception object of the sandbox, at
+    /// the call, as a `raise` statement there would: an instance of a class
+    /// of the session keeps its class, where [`resume`](Self::resume) with a
+    /// [`MontyException`] raises a builtin one. A value that is no exception
+    /// raises `TypeError` there.
+    pub fn raise(self, exception: MontyObject, print: PrintWriter<'_>) -> Result<ReplProgress, Box<ReplStartError>> {
+        self.snapshot.step(Turn::New, print, |vm| match exception.to_value(vm) {
+            Ok(exception) => vm.raise_from_host(exception),
+            Err(error) => vm.resume_with_exception(invalid_input(error, "exception")),
+        })
+    }
+
+    /// The host holds the handle `id` no more; see [`MontyRepl::release`].
+    pub fn release(&mut self, id: &MontyUuid) -> bool {
+        self.snapshot.repl.release(id)
+    }
+
+    /// Calls `callable`, a callable of the sandbox, with `args` before this
+    /// call is answered, so the host can run python while it answers.
+    ///
+    /// The call runs on top of the suspended frames, and its progress comes
+    /// back as any progress does: each call it makes to the host is answered
+    /// first, and a call to the host may itself `call_first`, to any depth.
+    /// When it returns or raises, [`ReplProgress::Returned`] gives what it came
+    /// to and this call, still the host's to answer. A raise ends only the
+    /// call the host made; an uncatchable one ends the snippet.
+    ///
+    /// The call is synchronous: awaiting a future in it raises `RuntimeError`,
+    /// since no other task may run until this call is answered.
+    pub fn call_first(
+        self,
+        callable: MontyObject,
+        args: CallArgs,
+        print: PrintWriter<'_>,
+    ) -> Result<ReplProgress, Box<ReplStartError>> {
+        let Self {
+            function_name,
+            args: call_args,
+            call_id,
+            object_id,
+            allow_eager_await,
+            is_async,
+            position,
+            mut snapshot,
+        } = self;
+        snapshot.waiting.push(Waiting {
+            function_name,
+            args: call_args,
+            call_id,
+            object_id,
+            allow_eager_await,
+            is_async,
+            position,
+        });
+        snapshot.step(Turn::New, print, |vm| {
+            let callable = match callable.to_value(vm) {
+                Ok(callable) => callable,
+                Err(error) => return Err(invalid_input(error, "callable")),
+            };
+            match convert_args(args, vm) {
+                Ok(args) => vm.call_from_host(callable, args),
+                Err(error) => {
+                    callable.drop_with(vm);
+                    Err(error.into())
+                }
+            }
+        })
+    }
+}
+
+/// A call the host has not answered because it made a call of its own first;
+/// see [`ReplFunctionCall::call_first`].
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Waiting {
+    function_name: String,
+    args: CallArgs,
+    call_id: u32,
+    object_id: Option<MontyUuid>,
+    allow_eager_await: bool,
+    #[serde(default)]
+    is_async: bool,
+    position: SourceRange,
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,50 +1210,12 @@ impl ReplNameLookup {
         let Self {
             name, scope, snapshot, ..
         } = self;
-
-        let ReplSnapshot {
-            mut repl,
-            mut executor,
-            vm_state,
-        } = snapshot;
-
-        repl.heap.tracker.on_turn_start();
-        let (converted, vm_state) = HeapReader::with(
-            &mut repl.heap,
-            &mut (&mut executor, print),
-            |reader, (executor, print)| {
-                // Restore the VM first, then convert inside its lifetime
-                let mut vm = VM::restore(
-                    vm_state,
-                    &mut executor.tables,
-                    &executor.program,
-                    reader,
-                    print.reborrow(),
-                );
-
-                // Resolve the name lookup result with the VM alive
-                let answer = LookupAnswer::new(result, &mut vm);
-                let effect = vm.pending_lookup_effect.take();
-                let vm_result = resume_lookup(&mut vm, answer, effect, &scope, &name);
-
-                // Convert while VM alive, then snapshot or reclaim globals
-                let converted = convert_frame_exit(vm_result, &mut vm);
-                let vm_state = if converted.needs_snapshot() {
-                    Some(vm.snapshot())
-                } else {
-                    reclaim_vm_state(
-                        &mut repl.globals,
-                        &mut repl.cwd,
-                        &mut repl.random,
-                        &mut repl.modules,
-                        &mut vm,
-                    );
-                    None
-                };
-                (converted, vm_state)
-            },
-        );
-        build_repl_progress(converted, vm_state, executor, repl)
+        snapshot.step(Turn::New, print, |vm| {
+            // Resolve the name lookup result with the VM alive
+            let answer = LookupAnswer::new(result, vm);
+            let effect = vm.pending_lookup_effect.take();
+            resume_lookup(vm, answer, effect, &scope, &name)
+        })
     }
 }
 
@@ -1265,7 +1367,7 @@ impl ReplResolveFutures {
                 Ok((converted, vm_state))
             },
         ) {
-            Ok((converted, vm_state)) => build_repl_progress(converted, vm_state, executor, repl),
+            Ok((converted, vm_state)) => build_repl_progress(converted, vm_state, executor, repl, Vec::new()),
             Err(error) => {
                 repl.commit_executor(executor);
                 Err(Box::new(ReplStartError { repl, error }))
@@ -1278,11 +1380,15 @@ impl ReplResolveFutures {
 // ReplContinuationMode — public utility for interactive input collection
 // ---------------------------------------------------------------------------
 
-/// Parse-derived continuation state for interactive REPL input collection.
+/// Parse-derived continuation state for interactive REPL input collection: one
+/// answer for a source, as `codeop` gives for CPython, whether it is complete,
+/// incomplete, or invalid.
 ///
 /// `monty-runtime` uses this to decide whether to execute the buffered snippet
 /// immediately, keep collecting continuation lines, or require a terminating
-/// blank line for block statements (`if:`, `def:`, etc.).
+/// blank line for block statements (`if:`, `def:`, etc.). A host that streams
+/// source, as the text a model writes, uses it to run a prefix only once it is
+/// complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplContinuationMode {
     /// The current snippet is syntactically complete and can run now.
@@ -1292,6 +1398,9 @@ pub enum ReplContinuationMode {
     /// The snippet opened an indented block and should wait for a trailing blank
     /// line before execution, matching CPython interactive behavior.
     IncompleteBlock,
+    /// The snippet holds a syntax error that no continuation line can mend, so
+    /// feeding it raises `SyntaxError` at once.
+    Invalid,
 }
 
 /// Detects whether REPL source is complete or needs more input.
@@ -1301,13 +1410,14 @@ pub enum ReplContinuationMode {
 /// - Decorators continue until their class or function definition arrives.
 /// - Clause headers (`if:`, `def:`, etc.) require an indented body and then a
 ///   terminating blank line before execution.
-/// - All other parse outcomes are treated as complete (either valid code or a
-///   syntax error that should be shown immediately).
+/// - Source that parses is complete.
+/// - Any other syntax error is invalid: no later line mends it, and feeding the
+///   source shows it at once.
 #[must_use]
 pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
-    // Complete because feeding it raises the SyntaxError; parsing it here would grow the stack unguarded.
+    // Invalid because feeding it raises the SyntaxError; parsing it here would grow the stack unguarded.
     if !source_within_nesting_bound(source, SOURCE_SCAN_THRESHOLD) {
-        return ReplContinuationMode::Complete;
+        return ReplContinuationMode::Invalid;
     }
     let Err(error) = parse_module(source) else {
         return ReplContinuationMode::Complete;
@@ -1326,7 +1436,7 @@ pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
             {
                 ReplContinuationMode::IncompleteImplicit
             } else {
-                ReplContinuationMode::Complete
+                ReplContinuationMode::Invalid
             }
         }
         ParseErrorType::Lexical(
@@ -1345,7 +1455,7 @@ pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
         ParseErrorType::Lexical(LexicalErrorType::UnclosedStringError) if starts_with_triple_quote(error_source) => {
             ReplContinuationMode::IncompleteImplicit
         }
-        _ => ReplContinuationMode::Complete,
+        _ => ReplContinuationMode::Invalid,
     }
 }
 
@@ -1409,7 +1519,7 @@ fn abort_restored(
             converted
         },
     );
-    build_repl_progress(converted, None, executor, repl)
+    build_repl_progress(converted, None, executor, repl, Vec::new())
 }
 
 /// REPL execution state that can resume after suspension.
@@ -1423,6 +1533,9 @@ pub(crate) struct ReplSnapshot {
     executor: Executor,
     /// VM stack/frame state at suspension.
     vm_state: VMSnapshot,
+    /// The calls the host has not answered because it made a call of its own
+    /// first, the latest last; each call it made has a frame on the VM stack.
+    waiting: Vec<Waiting>,
 }
 
 impl ReplSnapshot {
@@ -1438,6 +1551,7 @@ impl ReplSnapshot {
             repl,
             executor,
             vm_state,
+            ..
         } = self;
         abort_restored(repl, executor, vm_state, exc, print)
     }
@@ -1454,6 +1568,7 @@ impl ReplSnapshot {
             mut repl,
             executor,
             vm_state,
+            ..
         } = self;
         let state = vm_state.abandon(&mut repl.heap);
         repl.globals = state.globals;
@@ -1482,16 +1597,32 @@ impl ReplSnapshot {
         turn: Turn,
         print: PrintWriter<'_>,
     ) -> Result<ReplProgress, Box<ReplStartError>> {
+        self.step(turn, print, |vm| resume_with_result(vm, ext_result, eager_call_id))
+    }
+
+    /// Restores the VM, runs it on with `run`, and gives what it came to.
+    ///
+    /// While a call the host made first is running, its return or its raise
+    /// is [`ReplProgress::Returned`], and leaves the VM at the call it came
+    /// before, which is snapshotted again.
+    fn step(
+        self,
+        turn: Turn,
+        print: PrintWriter<'_>,
+        run: impl FnOnce(&mut VM<'_>) -> RunResult<FrameExit>,
+    ) -> Result<ReplProgress, Box<ReplStartError>> {
         let Self {
             mut repl,
             mut executor,
             vm_state,
+            mut waiting,
         } = self;
+        let returns = !waiting.is_empty();
 
         if turn == Turn::New {
             repl.heap.tracker.on_turn_start();
         }
-        let (converted, vm_state) = HeapReader::with(
+        let (stepped, vm_state) = HeapReader::with(
             &mut repl.heap,
             &mut (&mut executor, print),
             |reader, (executor, print)| {
@@ -1503,11 +1634,17 @@ impl ReplSnapshot {
                     print.reborrow(),
                 );
 
-                let vm_result = resume_with_result(&mut vm, ext_result, eager_call_id);
+                let vm_result = run(&mut vm);
 
-                // Convert while VM alive, then snapshot or reclaim globals
-                let converted = convert_frame_exit(vm_result, &mut vm);
-                let vm_state = if converted.needs_snapshot() {
+                // Convert while VM alive, then snapshot or reclaim globals.
+                // With a call of the host running, a return is that call's, and
+                // so is a catchable raise, whose unwinding its frame stopped.
+                let stepped = match convert_frame_exit(vm_result, &mut vm) {
+                    ConvertedExit::Complete(value) if returns => Stepped::Returned(Ok(value)),
+                    ConvertedExit::Error(error @ RunError::Exc(_)) if returns => Stepped::Returned(Err(error)),
+                    converted => Stepped::Exit(converted),
+                };
+                let vm_state = if stepped.needs_snapshot() {
                     Some(vm.snapshot())
                 } else {
                     reclaim_vm_state(
@@ -1519,10 +1656,63 @@ impl ReplSnapshot {
                     );
                     None
                 };
-                (converted, vm_state)
+                (stepped, vm_state)
             },
         );
-        build_repl_progress(converted, vm_state, executor, repl)
+        match stepped {
+            Stepped::Exit(converted) => build_repl_progress(converted, vm_state, executor, repl, waiting),
+            Stepped::Returned(result) => {
+                let result = result.map_err(|error| {
+                    error.into_python_exception(&executor.tables.interns, |fname| {
+                        repl.sources.get(fname).map(|source| &**source)
+                    })
+                });
+                let Waiting {
+                    function_name,
+                    args,
+                    call_id,
+                    object_id,
+                    allow_eager_await,
+                    is_async,
+                    position,
+                } = waiting
+                    .pop()
+                    .expect("a call of the host returns to the call it came before");
+                let call = ReplFunctionCall {
+                    function_name,
+                    args,
+                    call_id,
+                    object_id,
+                    allow_eager_await,
+                    is_async,
+                    position,
+                    snapshot: Self {
+                        repl,
+                        executor,
+                        vm_state: vm_state.expect("a returned call leaves its snapshot"),
+                        waiting,
+                    },
+                };
+                Ok(ReplProgress::Returned { result, call })
+            }
+        }
+    }
+}
+
+/// What a step of a suspended snippet came to: an exit of the VM, or the end
+/// of a call the host made first; see [`ReplFunctionCall::call_first`].
+enum Stepped {
+    Exit(ConvertedExit),
+    Returned(Result<MontyObject, RunError>),
+}
+
+impl Stepped {
+    /// Whether the VM is left suspended, to snapshot.
+    fn needs_snapshot(&self) -> bool {
+        match self {
+            Self::Exit(converted) => converted.needs_snapshot(),
+            Self::Returned(_) => true,
+        }
     }
 }
 
@@ -1584,6 +1774,7 @@ fn build_repl_progress(
     vm_state: Option<VMSnapshot>,
     executor: Executor,
     mut repl: MontyRepl,
+    waiting: Vec<Waiting>,
 ) -> Result<ReplProgress, Box<ReplStartError>> {
     macro_rules! new_repl_snapshot {
         () => {
@@ -1591,6 +1782,7 @@ fn build_repl_progress(
                 repl,
                 executor,
                 vm_state: vm_state.expect("snapshot should exist"),
+                waiting,
             }
         };
     }
@@ -1633,13 +1825,17 @@ fn build_repl_progress(
         ConvertedExit::ResolveFutures {
             pending_call_ids,
             position,
-        } => Ok(ReplProgress::ResolveFutures(ReplResolveFutures {
-            repl,
-            executor,
-            vm_state: vm_state.expect("snapshot should exist for ResolveFutures"),
-            pending_call_ids,
-            position,
-        })),
+        } => {
+            // A call of the host cannot await, so no task blocks under one.
+            assert!(waiting.is_empty(), "tasks blocked under a call of the host");
+            Ok(ReplProgress::ResolveFutures(ReplResolveFutures {
+                repl,
+                executor,
+                vm_state: vm_state.expect("snapshot should exist for ResolveFutures"),
+                pending_call_ids,
+                position,
+            }))
+        }
         ConvertedExit::NameLookup { name, scope, position } => Ok(ReplProgress::NameLookup(ReplNameLookup {
             name,
             position,
@@ -1664,10 +1860,9 @@ fn build_repl_progress(
     }
 }
 
-/// Converts host call arguments to internal `ArgValues` for function calls;
-/// `call_function` has already refused keyword arguments.
+/// Converts host call arguments to internal `ArgValues` for function calls.
 fn convert_args(args: CallArgs, vm: &mut VM<'_>) -> Result<ArgValues, MontyException> {
-    let (graph, arg_ids, _) = unstable::into_call_args_parts(args);
+    let (graph, arg_ids, kwarg_ids) = unstable::into_call_args_parts(args);
     let values = graph
         .to_values(vm)
         .map_err(|e| MontyException::runtime_error(format!("invalid argument type: {e}")))?;
@@ -1676,6 +1871,21 @@ fn convert_args(args: CallArgs, vm: &mut VM<'_>) -> Result<ArgValues, MontyExcep
         .iter()
         .map(|id| values[id.index()].clone_with_heap(vm.heap))
         .collect();
+    if !kwarg_ids.is_empty() {
+        let kwargs = kwarg_ids
+            .iter()
+            .map(|(key, value)| {
+                (
+                    values[key.index()].clone_with_heap(vm.heap),
+                    values[value.index()].clone_with_heap(vm.heap),
+                )
+            })
+            .collect();
+        return Ok(ArgValues::ArgsKargs {
+            args: positional,
+            kwargs: KwargsValues::Pairs(kwargs),
+        });
+    }
     Ok(match positional.len() {
         0 => ArgValues::Empty,
         1 => ArgValues::One(positional.pop().expect("checked len")),
@@ -1689,6 +1899,18 @@ fn convert_args(args: CallArgs, vm: &mut VM<'_>) -> Result<ArgValues, MontyExcep
             kwargs: KwargsValues::Empty,
         },
     })
+}
+
+/// The error a value the host hands in raises when the sandbox cannot hold
+/// it: a `MemoryError` when holding it trips a limit, as any allocation does,
+/// and a `RuntimeError` naming what it was otherwise.
+fn invalid_input(error: InvalidInputError, what: &str) -> RunError {
+    match error {
+        InvalidInputError::Resource(error) => RunError::from(error),
+        InvalidInputError::InvalidType(_) => {
+            MontyException::runtime_error(format!("invalid {what} type: {error}")).into()
+        }
+    }
 }
 
 /// Whether a session global should be surfaced as a "function" by

@@ -47,4 +47,4 @@ for compute in [
 # The trailing expression adds a second reference to `big`. A leaked operand
 # would show up as an unreachable heap object before these counts are compared.
 big
-# ref-counts={'datetime': 1, 'delta': 1, 'big': 2, 'neg_big': 1, 'zero_delta': 1, 'divisor': 1}
+# ref-counts={'datetime': 2, 'delta': 1, 'big': 2, 'neg_big': 1, 'zero_delta': 1, 'divisor': 1}

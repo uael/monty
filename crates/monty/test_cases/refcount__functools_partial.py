@@ -47,4 +47,4 @@ dropped = functools.partial(target, [4, 5])
 dropped = None
 
 len(called)
-# ref-counts={'functools': 1, 'obj': 3, 'bound': 1, 'called': 1, 'kw_value': 2, 'keyworded': 1, 'inner_arg': 2, 'flattened': 1, 'anon_arg': 1, 'anon_kw': 1, 'target': 6}
+# ref-counts={'functools': 2, 'obj': 3, 'bound': 1, 'called': 1, 'kw_value': 2, 'keyworded': 1, 'inner_arg': 2, 'flattened': 1, 'anon_arg': 1, 'anon_kw': 1, 'target': 6}

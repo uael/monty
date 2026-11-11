@@ -17,6 +17,7 @@ use crate::{
     exception_private::{ExcTypeExt, RunError, RunResult},
     heap::{DropWithContext, Heap, HeapReader},
     intern::{CompileInterns, Interns, StringId},
+    modules::table::ModuleTable,
     name_map::NameMap,
     namespace::NamespaceId,
     object_bridge::MontyObjectExt,
@@ -247,6 +248,12 @@ pub(crate) struct SessionTables {
     pub(crate) global_names: NameMap,
     /// Interned strings and compiled functions used during execution.
     pub(crate) interns: Interns,
+    /// The modules this session has imported, which `sys.modules` is.
+    ///
+    /// Defaulted so a dump written before the table existed still loads: a
+    /// session that imported nothing and one that has no table read the same.
+    #[serde(default)]
+    pub(crate) sys_modules: ModuleTable,
 }
 
 /// The module code, source and environment, borrowed immutably during execution.
@@ -385,6 +392,7 @@ impl Executor {
             tables: SessionTables {
                 global_names: globals,
                 interns,
+                sys_modules: ModuleTable::default(),
             },
             program: Program {
                 module_code: Arc::new(module_code),
@@ -410,11 +418,16 @@ impl Executor {
     /// On success the tables move into the executor; on failure they remain unchanged.
     /// `script_name` identifies this feed's source; `session` supplies the user-facing
     /// filename and working directory.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one snippet needs the session's whole compiler state"
+    )]
     pub(crate) fn new_repl_snippet(
         code: Arc<str>,
         script_name: &str,
         globals: &mut NameMap,
         interns: &mut Interns,
+        modules: &mut ModuleTable,
         input_names: &[String],
         options: CompileOptions,
         session: ReplSession<'_>,
@@ -441,6 +454,7 @@ impl Executor {
             tables: SessionTables {
                 global_names: mem::take(globals),
                 interns: interns.take(),
+                sys_modules: mem::take(modules),
             },
             program: Program {
                 module_code: Arc::new(module_code),
@@ -476,6 +490,7 @@ impl Executor {
         script_name: &str,
         mut existing_globals: NameMap,
         interns: &mut Interns,
+        modules: &mut ModuleTable,
         options: CompileOptions,
         session: ReplSession<'_>,
     ) -> Result<Self, MontyException> {
@@ -520,6 +535,7 @@ impl Executor {
         let tables = SessionTables {
             global_names: existing_globals,
             interns: interns.take(),
+            sys_modules: mem::take(modules),
         };
 
         Ok(Self {
@@ -570,6 +586,8 @@ impl Executor {
             populate_inputs(inputs, &mut vm)?;
             Program::run_to_completion(&mut vm)
         });
+        // `sys.modules` is a dict of this heap, which dies here.
+        self.tables.sys_modules = ModuleTable::default();
 
         if heap.size() > heap_capacity {
             self.heap_capacity = heap.size();
@@ -607,7 +625,7 @@ impl Executor {
         let mut heap = Heap::new(self.namespace_size(), resource_tracker);
         let globals = self.empty_globals();
 
-        HeapReader::with(&mut heap, self, |reader, executor| {
+        let output = HeapReader::with(&mut heap, self, |reader, executor| {
             // Create VM, populate inputs, and run
             let mut vm = VM::new(
                 globals,
@@ -651,8 +669,10 @@ impl Executor {
             if let Ok(FrameExit::Return(Value::Ref(id))) = &frame_exit_result {
                 roots.push(*id);
             }
+            // `sys.modules` is a root too: the session owns it, and it holds each module the run imported.
+            roots.extend(vm.sys_modules.existing());
             // Those are the only roots: locals are gone once the module frame exits, so
-            // anything still live must hang off a name or the result to not be a leak.
+            // anything still live must hang off a name, the result or `sys.modules` to not be a leak.
             let unreachable: Vec<String> = vm
                 .heap
                 .unreachable_entries(roots)
@@ -678,7 +698,10 @@ impl Executor {
                 heap_count,
                 allocations_since_gc,
             })
-        })
+        });
+        // `sys.modules` is a dict of this heap, which dies here.
+        self.tables.sys_modules = ModuleTable::default();
+        output
     }
 
     /// Creates an empty globals vector with all slots set to `Undefined`.
