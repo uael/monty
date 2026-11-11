@@ -34,8 +34,8 @@ opts the class out in both, leaving the ordinary attribute copy.
 
 A `__copy__` or `__deepcopy__` that calls a host function (an external
 function, or anything reaching the filesystem) raises `NotImplementedError`;
-copying runs synchronously and cannot suspend, the same limit `sorted(key=...)`
-has.
+copying runs synchronously and cannot suspend, the same limit a `__repr__` has
+(see [classes.md](classes.md)).
 
 ## Types that cannot be copied
 

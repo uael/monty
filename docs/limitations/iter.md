@@ -6,7 +6,7 @@
     Direct `iter()`, `next()` (including its default form), and `functools.reduce()` can suspend in these methods.
 
 - `iter(callable, sentinel)` runs `callable` synchronously, so one that calls an external/OS function cannot suspend and
-    raises `NotImplementedError`. Same limitation as `map`/`filter`/`sorted(key=...)`.
+    raises `NotImplementedError`.
 
 - `iter(callable, sentinel)` compares `result == sentinel`, where CPython compares `sentinel == result`; only observable
     if the two sides have asymmetric `__eq__`.

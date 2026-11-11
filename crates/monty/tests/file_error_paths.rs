@@ -337,20 +337,24 @@ f.read(5)
     assert_eq!(result, MontyObject::bytes(Vec::new()));
 }
 
+/// A `__hash__` that a dict calls while it probes its table runs in a nested
+/// run of the VM, which no call to the host can cross, so the read raises
+/// inside `__hash__`, where an ordinary `try`/`except` catches it.
 #[test]
-fn rejected_read_suspension_catchable_inside_key_fn() {
+fn rejected_read_suspension_catchable_inside_lt() {
     let code = r"
 f = open('/x.txt')
 caught = []
 
-def key_fn(x):
-    try:
-        f.read(5)
-    except NotImplementedError as e:
-        caught.append(str(e))
-    return x
+class Key:
+    def __hash__(self):
+        try:
+            f.read(5)
+        except NotImplementedError as e:
+            caught.append(str(e))
+        return 0
 
-sorted([1], key=key_fn)
+{Key(): 1}
 caught[0]
 ";
     let runner = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();

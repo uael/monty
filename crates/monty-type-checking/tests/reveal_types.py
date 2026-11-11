@@ -65,6 +65,8 @@ reveal_type(datetime.time(12, 30))
 reveal_type(datetime.datetime(2024, 1, 15, 12, 30))
 reveal_type(datetime.timedelta(days=1))
 reveal_type(datetime.timezone.utc)
+reveal_type(filter(None, [1, 0]))
+reveal_type(map(str, [1]))
 
 # === decimal ===
 # `localcontext` takes a list of signals for `traps` and `flags`, as the runtime does

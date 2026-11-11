@@ -16,9 +16,9 @@ reveal_types.py:20:13: info[revealed-type] Revealed type: `dict[int, int]`
 reveal_types.py:21:13: info[revealed-type] Revealed type: `set[int]`
 reveal_types.py:22:13: info[revealed-type] Revealed type: `frozenset[int]`
 reveal_types.py:23:13: info[revealed-type] Revealed type: `range`
-reveal_types.py:26:13: info[revealed-type] Revealed type: `enumerate[int]`
-reveal_types.py:27:13: info[revealed-type] Revealed type: `Iterator[int]`
-reveal_types.py:28:13: info[revealed-type] Revealed type: `zip[tuple[int, int]]`
+reveal_types.py:26:13: info[revealed-type] Revealed type: `list[tuple[int, int]]`
+reveal_types.py:27:13: info[revealed-type] Revealed type: `list[int]`
+reveal_types.py:28:13: info[revealed-type] Revealed type: `list[tuple[int, int]]`
 reveal_types.py:31:13: info[revealed-type] Revealed type: `slice[Literal[1], Literal[2], Any]`
 reveal_types.py:34:13: info[revealed-type] Revealed type: `BaseException`
 reveal_types.py:35:13: info[revealed-type] Revealed type: `Exception`
@@ -48,16 +48,18 @@ reveal_types.py:64:13: info[revealed-type] Revealed type: `time`
 reveal_types.py:65:13: info[revealed-type] Revealed type: `datetime`
 reveal_types.py:66:13: info[revealed-type] Revealed type: `timedelta`
 reveal_types.py:67:13: info[revealed-type] Revealed type: `timezone`
-reveal_types.py:73:13: info[revealed-type] Revealed type: `_ContextManager`
-reveal_types.py:80:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
-reveal_types.py:81:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
-reveal_types.py:82:13: info[revealed-type] Revealed type: `BufferedReader[_BufferedReaderStream]`
-reveal_types.py:83:13: info[revealed-type] Revealed type: `BufferedWriter`
-reveal_types.py:86:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
-reveal_types.py:87:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
-reveal_types.py:88:13: info[revealed-type] Revealed type: `BufferedReader[_BufferedReaderStream]`
-reveal_types.py:89:13: info[revealed-type] Revealed type: `BufferedWriter`
-reveal_types.py:93:17: info[revealed-type] Revealed type: `IO[Any]`
-reveal_types.py:94:17: info[revealed-type] Revealed type: `IO[Any]`
-reveal_types.py:100:13: info[revealed-type] Revealed type: `bool`
-reveal_types.py:101:13: info[revealed-type] Revealed type: `list[str]`
+reveal_types.py:68:13: info[revealed-type] Revealed type: `list[int]`
+reveal_types.py:69:13: info[revealed-type] Revealed type: `list[str]`
+reveal_types.py:75:13: info[revealed-type] Revealed type: `_ContextManager`
+reveal_types.py:82:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
+reveal_types.py:83:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
+reveal_types.py:84:13: info[revealed-type] Revealed type: `BufferedReader[_BufferedReaderStream]`
+reveal_types.py:85:13: info[revealed-type] Revealed type: `BufferedWriter`
+reveal_types.py:88:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
+reveal_types.py:89:13: info[revealed-type] Revealed type: `TextIOWrapper[_WrappedBuffer]`
+reveal_types.py:90:13: info[revealed-type] Revealed type: `BufferedReader[_BufferedReaderStream]`
+reveal_types.py:91:13: info[revealed-type] Revealed type: `BufferedWriter`
+reveal_types.py:95:17: info[revealed-type] Revealed type: `IO[Any]`
+reveal_types.py:96:17: info[revealed-type] Revealed type: `IO[Any]`
+reveal_types.py:102:13: info[revealed-type] Revealed type: `bool`
+reveal_types.py:103:13: info[revealed-type] Revealed type: `list[str]`

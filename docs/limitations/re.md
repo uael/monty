@@ -31,8 +31,8 @@ match CPython's, with these divergences:
     (`cannot use a string pattern on a bytes-like object`); a bytes *pattern*
     raises `first argument must be string or compiled pattern`, whereas
     CPython supports bytes patterns.
-- A non-str `repl` for `re.sub` raises `callable replacement is not yet supported in re.sub()`; CPython raises
-    `decoding to str: need a bytes-like object, int found`-style errors for non-callable non-strings.
+- A `repl` that is neither a str nor callable raises CPython's `decoding to str: need a bytes-like object, int found`,
+    also for a bytes `repl`, where CPython raises `sequence item 0: expected str instance, bytes found`.
     Like CPython, the check runs even when a negative `count` means zero
     substitutions.
 - `re.sub` replacement templates are not generally validated: CPython parses
@@ -70,8 +70,8 @@ Methods: `search`, `match`, `fullmatch`, `findall`, `sub`, `split`,
 `finditer`.
 
 Not implemented: `subn`, `groups` (count), `groupindex` (named-group
-mapping), `scanner`. The `pos` / `endpos` arguments accepted by
-`Pattern.search(string, pos, endpos)` etc. in CPython are **not** supported.
+mapping), `scanner`. `search`, `match`, `fullmatch`, `findall` and `finditer` take `pos` and `endpos` as CPython
+does. A `match` or `fullmatch` from a `pos` past 0 that fails reads the rest of the subject before it gives `None`.
 
 A non-str subject passed to a Pattern *method* raises `expected string, not {type}` rather than CPython's
 `expected string or bytes-like object, got '{type}'`. The module-level functions match CPython's wording.

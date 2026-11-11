@@ -161,6 +161,9 @@ cached_takes_int('nope')
 cached_takes_int(1, 2)
 cached_takes_int(n='nope')
 
+# Monty gives a list for filter and the like, which next() refuses as CPython refuses a list.
+next(filter(None, [1]))
+next(map(str, [1]))
 # === decimal: traps and flags take a list or a signal dict, not a tuple ===
 decimal.Context(traps=(decimal.Inexact,))
 decimal.localcontext(flags=(decimal.Rounded,))

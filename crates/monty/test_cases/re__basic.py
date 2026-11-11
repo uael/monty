@@ -297,44 +297,30 @@ except TypeError as e:
     assert str(e) == "expected string or bytes-like object, got 'int'", f're.sub negative count subject: {e}'
 # ... and a non-str repl is rejected too — CPython processes the replacement
 # template before its match loop, even when zero substitutions will run
-# (messages differ: callable replacement is a Monty feature gap, see
-# limitations/re.md)
 try:
     re.sub(r'\d', 123, '1a2', -1)
     assert False, 're.sub with int repl and negative count should raise TypeError'
 except TypeError as e:
-    if _monty:
-        assert str(e) == 'callable replacement is not yet supported in re.sub()', f're.sub neg-count repl: {e}'
-    else:
-        assert str(e) == 'decoding to str: need a bytes-like object, int found', f're.sub neg-count repl: {e}'
+    assert str(e) == 'decoding to str: need a bytes-like object, int found', f're.sub neg-count repl: {e}'
 # ... with the repl error winning over a bad subject
 try:
     re.sub(r'\d', None, 456, -1)
     assert False, 're.sub with bad repl and bad subject should raise for the repl'
 except TypeError as e:
-    if _monty:
-        assert str(e) == 'callable replacement is not yet supported in re.sub()', f're.sub repl-first: {e}'
-    else:
-        assert str(e) == 'decoding to str: need a bytes-like object, NoneType found', f're.sub repl-first: {e}'
+    assert str(e) == 'decoding to str: need a bytes-like object, NoneType found', f're.sub repl-first: {e}'
 # Pattern.sub applies the same order
 try:
     re.compile(r'\d').sub(123, '1a2', -1)
     assert False, 'Pattern.sub with int repl and negative count should raise TypeError'
 except TypeError as e:
-    if _monty:
-        assert str(e) == 'callable replacement is not yet supported in re.sub()', f'Pattern.sub neg-count repl: {e}'
-    else:
-        assert str(e) == 'decoding to str: need a bytes-like object, int found', f'Pattern.sub neg-count repl: {e}'
+    assert str(e) == 'decoding to str: need a bytes-like object, int found', f'Pattern.sub neg-count repl: {e}'
 
 # === re.sub() non-str repl (positive-count path) ===
 try:
     re.sub(r'\d', None, '1a2')
     assert False, 're.sub with None repl should raise TypeError'
 except TypeError as e:
-    if _monty:
-        assert str(e) == 'callable replacement is not yet supported in re.sub()', f're.sub None repl: {e}'
-    else:
-        assert str(e) == 'decoding to str: need a bytes-like object, NoneType found', f're.sub None repl: {e}'
+    assert str(e) == 'decoding to str: need a bytes-like object, NoneType found', f're.sub None repl: {e}'
 
 # === Pattern.sub() error: missing repl ===
 pattern = re.compile(r'\d+')
@@ -1002,3 +988,36 @@ assert len(matches) == 2
 assert matches[0].group(1) == 'a'
 assert matches[0].group(2) == '1'
 assert matches[1].group(1) == 'b'
+
+# === re.subn() ===
+assert re.subn(r'\d+', 'X', 'a1 b2 c3') == ('aX bX cX', 3), 're.subn counts each substitution'
+assert re.subn(r'\d+', 'X', 'a1 b2 c3', 2) == ('aX bX c3', 2), 're.subn count caps the substitutions'
+assert re.subn(r'\d+', 'X', 'abc') == ('abc', 0), 're.subn with no match counts zero'
+assert re.subn(r'\d+', 'X', 'a1 b2', -1) == ('a1 b2', 0), 're.subn with a negative count changes nothing'
+assert re.subn(r'(\d)', r'<\1>', 'a1b2') == ('a<1>b<2>', 2), 're.subn expands groups'
+assert re.subn(r'\d', lambda m: '#', 'a1b2') == ('a#b#', 2), 're.subn calls a function of the match'
+assert re.compile(r'\d').subn('X', 'a1b2c3') == ('aXbXcX', 3), 'pattern.subn counts each substitution'
+assert re.compile(r'\d').subn('X', 'a1b2c3', count=1) == ('aXb2c3', 1), 'pattern.subn takes a count'
+
+try:
+    re.subn(r'\d+')
+    assert False, 're.subn(pattern) should raise TypeError'
+except TypeError as e:
+    assert str(e) == "subn() missing 2 required positional arguments: 'repl' and 'string'", f're.subn missing two: {e}'
+# === re.sub() replacement escapes decode as CPython parses a template ===
+assert re.sub('x', r'\n', 'axb') == 'a\nb', 'raw \\n becomes a newline'
+assert re.sub('x', r'\t\r\a\b\f\v', 'x') == '\t\r\a\b\f\v', 'each letter escape decodes'
+assert re.sub('x', r'\\n', 'x') == '\\n', 'an escaped backslash stays literal'
+assert re.sub('x', r'\.', 'x') == '\\.', 'a backslash before punctuation stays'
+assert re.compile('(x)').sub(r'[\1]\n', 'x') == '[x]\n', 'a group and an escape in one template'
+assert re.subn('x', r'\n', 'xx') == ('\n\n', 2), 'subn decodes the escapes too'
+try:
+    re.sub('x', r'a\q', 'x')
+    assert False, 'an unknown letter escape should raise'
+except re.error as e:
+    assert str(e) == 'bad escape \\q at position 1', f'bad escape: {e}'
+try:
+    re.sub('x', 'ab\\', 'x')
+    assert False, 'a trailing backslash should raise'
+except re.error as e:
+    assert str(e) == 'bad escape (end of pattern) at position 2', f'trailing backslash: {e}'

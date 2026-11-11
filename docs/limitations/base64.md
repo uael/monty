@@ -16,7 +16,7 @@ types and error messages match CPython 3.14 subject to the divergences below.
     reaching back into Python runs the call to completion and cannot pause, and
     reading a real file is a suspension out to the host. They would therefore
     work on a duck-typed object and fail on the file `open()` returns — the same
-    restriction `filter` and `sorted(key=)` carry. Accessing them raises
+    restriction a `__repr__` carries (see [classes.md](classes.md)). Accessing them raises
     `AttributeError`.
 - The `python -m base64` command line interface.
 

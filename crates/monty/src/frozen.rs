@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     annotations,
     args::ArgValues,
-    builtins::next,
+    builtins::{filter, map, min_max, next, zip},
     bytecode::{CallResult, Compiler, VM},
     exception_private::RunResult,
     intern::{CompileInterns, FunctionId, Interns},
@@ -18,7 +18,8 @@ use crate::{
     name_map::NameMap,
     parse::parse_with_interner,
     prepare::prepare_with_existing_names,
-    types::{forward_ref, generic_alias, iter, lru_cache},
+    sorting,
+    types::{forward_ref, generic_alias, iter, list, lru_cache},
 };
 
 /// Identifies an internal implementation with one authoritative source definition.
@@ -37,6 +38,21 @@ pub(crate) enum FrozenFunction {
     /// Return a default when a suspendable user `__next__` method is exhausted.
     #[serde(rename = "builtins.next_default")]
     NextDefault,
+    /// Call the function of `map()` on each item.
+    #[serde(rename = "builtins.map")]
+    Map,
+    /// Call the predicate of `filter()` on each item, or test each item when it is `None`.
+    #[serde(rename = "builtins.filter")]
+    Filter,
+    /// Call the key of `sorted()` or `list.sort()` on each item, then sort by the keys.
+    #[serde(rename = "builtins.sort_by_key")]
+    SortByKey,
+    /// Call the key of `min()` or `max()` on each item and keep the item whose key wins.
+    #[serde(rename = "builtins.min_max_key")]
+    MinMaxKey,
+    /// Step the iterables of `zip()` together, when one of them is a generator.
+    #[serde(rename = "builtins.zip")]
+    Zip,
     /// Evaluate annotations for `annotationlib.get_annotations` and `typing.get_type_hints`.
     #[serde(rename = "annotationlib.get_annotations")]
     GetAnnotations,
@@ -55,6 +71,7 @@ impl FrozenFunction {
         let source = self.source();
         let mut overlay = CompileInterns::new(interns);
         let index = overlay.functions_len();
+        let id = overlay.next_function_id();
         let mut globals = NameMap::new();
         let parsed =
             parse_with_interner(source, "<monty-frozen>", &mut overlay, false).map_err(|e| e.into_run_error(source))?;
@@ -72,8 +89,6 @@ impl FrozenFunction {
             1,
             "frozen source must take its dependencies as arguments"
         );
-        // Successful compilation checked the bytecode's function-ID limit.
-        let id = FunctionId::from_index(u16::try_from(index).expect("compiled function ID fits u16"));
         Ok((id, overlay))
     }
 
@@ -84,6 +99,11 @@ impl FrozenFunction {
             Self::Iter => iter::ITER_SOURCE,
             Self::LruCacheMiss => lru_cache::CACHE_MISS_SOURCE,
             Self::NextDefault => next::NEXT_DEFAULT_SOURCE,
+            Self::Map => map::MAP_SOURCE,
+            Self::Filter => filter::FILTER_SOURCE,
+            Self::SortByKey => sorting::SORT_BY_KEY_SOURCE,
+            Self::MinMaxKey => min_max::MIN_MAX_KEY_SOURCE,
+            Self::Zip => zip::ZIP_SOURCE,
             Self::GetAnnotations => typing::GET_ANNOTATIONS_SOURCE,
             Self::ForwardRefEvaluate => forward_ref::EVALUATE_SOURCE,
             Self::ClassAnnotations => annotations::CLASS_ANNOTATIONS_SOURCE,
@@ -112,6 +132,12 @@ pub(crate) enum FrozenFunctions {
     TypeRepr,
     /// Check the result returned by a user `__iter__` method.
     ValidateIterator,
+    /// Sort a private list in place by a list of its keys.
+    OrderByKeys,
+    /// Give the items of a sort back to the list that `list.sort()` detached.
+    RestoreSorted,
+    /// Whether a key of `min()` or `max()` wins over the best key so far.
+    KeyWins,
 }
 
 /// Dispatches private helpers using the same argument ownership rules as public natives.
@@ -127,5 +153,8 @@ pub(crate) fn call_helper(function: FrozenFunctions, args: ArgValues, vm: &mut V
         FrozenFunctions::Store => lru_cache::call_store(args, vm).map(CallResult::Value),
         FrozenFunctions::TypeRepr => typing::call_type_repr(args, vm).map(CallResult::Value),
         FrozenFunctions::ValidateIterator => iter::call_validate_iterator(args, vm).map(CallResult::Value),
+        FrozenFunctions::OrderByKeys => sorting::call_order_by_keys(args, vm).map(CallResult::Value),
+        FrozenFunctions::RestoreSorted => list::call_restore_sorted(args, vm).map(CallResult::Value),
+        FrozenFunctions::KeyWins => min_max::call_key_wins(args, vm).map(CallResult::Value),
     }
 }
