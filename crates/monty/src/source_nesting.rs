@@ -17,16 +17,16 @@ use ruff_text_size::{Ranged, TextLen, TextRange};
 
 use crate::parse::MAX_NESTING_DEPTH;
 
-/// Whether `source` can be handed to ruff (or ty) without the parser recursing
-/// past [`MAX_NESTING_DEPTH`]; a source of at most `source_scan_threshold`
-/// bytes always can.
+/// Whether `source` can be handed to ty without its parser recursing past
+/// [`MAX_NESTING_DEPTH`], the contents of each string literal counted as an
+/// annotation; a source of at most `source_scan_threshold` bytes always can.
 ///
-/// Compilation applies the same test and raises `SyntaxError: Source is too
-/// deeply nested`, so hosts that also type-check use this to skip the type
-/// checker and let the compiler report the located error.
+/// A source that passes also compiles past the scan, which counts no string
+/// contents, so hosts that type-check use this to skip the type checker.
 #[must_use]
 pub fn source_within_nesting_bound(source: &str, source_scan_threshold: usize) -> bool {
-    source.len() <= source_scan_threshold || nesting_bound_exceeded(source, Mode::Module, MAX_NESTING_DEPTH).is_none()
+    source.len() <= source_scan_threshold
+        || nesting_bound_exceeded(source, Mode::Module, MAX_NESTING_DEPTH, true).is_none()
 }
 
 /// Estimates ruff's peak parser recursion from one lexer pass, returning the
@@ -34,10 +34,12 @@ pub fn source_within_nesting_bound(source: &str, source_scan_threshold: usize) -
 ///
 /// The estimate never undercounts a recursion point (see [`Scanner`]), so a
 /// source that passes cannot recurse more than `limit` plus a small constant
-/// for operator-precedence climbing. String literals are scanned in turn,
-/// since the type checker parses a forward-reference annotation's contents.
-pub(crate) fn nesting_bound_exceeded(source: &str, mode: Mode, limit: u16) -> Option<TextRange> {
-    nesting_bound_exceeded_within(source, mode, u32::from(limit), 0)
+/// for operator-precedence climbing. With `annotations`, string literals are
+/// scanned in turn, since the type checker parses a forward-reference
+/// annotation's contents; a source compiled to run has nothing parse them, so
+/// its strings are data, whatever brackets they hold.
+pub(crate) fn nesting_bound_exceeded(source: &str, mode: Mode, limit: u16, annotations: bool) -> Option<TextRange> {
+    nesting_bound_exceeded_within(source, mode, u32::from(limit), annotations.then_some(0))
 }
 
 /// How many string literals deep the scan follows before rejecting outright;
@@ -45,15 +47,15 @@ pub(crate) fn nesting_bound_exceeded(source: &str, mode: Mode, limit: u16) -> Op
 const MAX_STRING_LITERAL_DEPTH: u8 = 8;
 
 /// [`nesting_bound_exceeded`] for the contents of a string literal
-/// `string_depth` literals deep.
-fn nesting_bound_exceeded_within(source: &str, mode: Mode, limit: u32, string_depth: u8) -> Option<TextRange> {
+/// `string_depth` literals deep, or with no descent into string literals.
+fn nesting_bound_exceeded_within(source: &str, mode: Mode, limit: u32, string_depth: Option<u8>) -> Option<TextRange> {
     // Every frame [`Scanner`] charges costs at least one byte of source, so a
     // source no longer than the limit cannot exceed it; that spares nearly
     // every string literal a second lexer.
     if source.len() <= limit as usize {
         return None;
     }
-    if string_depth > MAX_STRING_LITERAL_DEPTH {
+    if string_depth.is_some_and(|depth| depth > MAX_STRING_LITERAL_DEPTH) {
         return Some(TextRange::up_to(source.text_len()));
     }
     let mut lexer = lex(source, mode);
@@ -67,8 +69,9 @@ fn nesting_bound_exceeded_within(source: &str, mode: Mode, limit: u32, string_de
         // ruff parses an annotation from the raw source between the quotes, so
         // that slice gets the same estimate as the code around it.
         if kind == TokenKind::String
+            && let Some(depth) = string_depth
             && let Some((contents, mode)) = string_literal_contents(&source[range])
-            && nesting_bound_exceeded_within(contents, mode, limit, string_depth + 1).is_some()
+            && nesting_bound_exceeded_within(contents, mode, limit, Some(depth + 1)).is_some()
         {
             return Some(range);
         }

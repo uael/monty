@@ -84,16 +84,6 @@ fn indentation_chain_is_rejected() {
     assert_too_deeply_nested(code);
 }
 
-#[test]
-fn string_annotation_chain_is_rejected() {
-    // ty parses a forward reference from the text between the quotes.
-    assert_too_deeply_nested(format!("x: '{}1{}'", "(".repeat(5000), ")".repeat(5000)));
-}
-
-#[test]
-fn triple_quoted_string_annotation_chain_is_rejected() {
-    assert_too_deeply_nested(format!("x: \"\"\"\n{}1{}\"\"\"", "(".repeat(5000), ")".repeat(5000)));
-}
 
 // === long but flat sources the scan must not reject ===
 
@@ -123,6 +113,14 @@ fn ordinary_strings_compile() {
     assert_compiles(strings.repeat(200));
     // Four quote styles is as deep as raw source can nest string literals.
     assert_compiles(format!("x: \"\"\"'''\"'int'\"'''\"\"\"\n{}", "y = 1\n".repeat(1000)));
+}
+
+#[test]
+fn strings_of_brackets_compile() {
+    // The compiler parses no string as an annotation, so its contents are data.
+    assert_compiles(format!("s = '{}'", "\\x1b[31mred\\x1b[0m".repeat(300)));
+    assert_compiles(format!("x: '{}1{}'", "(".repeat(5000), ")".repeat(5000)));
+    assert_compiles(format!("x: \"\"\"\n{}1{}\"\"\"", "(".repeat(5000), ")".repeat(5000)));
 }
 
 #[test]
@@ -200,6 +198,18 @@ fn eval_of_a_long_nested_string_is_rejected() {
 }
 
 #[test]
+fn eval_and_exec_of_a_long_string_of_brackets_run() {
+    let mut run = MontyRun::new(
+        "s = '\\x1b[31mred\\x1b[0m' * 300\nexec('t = ' + repr(s))\nlen(eval(repr(s))) + len(t)".to_owned(),
+        "test.py",
+        vec![],
+        CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(run.run_no_limits(vec![]).unwrap(), MontyObject::int(7200));
+}
+
+#[test]
 fn exec_of_a_long_flat_string_runs() {
     let mut run = MontyRun::new(
         "exec('x = [' + '-1, ' * 3000 + ']')\nlen(x)".to_owned(),
@@ -259,6 +269,9 @@ fn type_check_rejects_deep_asts_from_flat_source() {
     assert_type_check_rejects(&format!("def f(a: {}): ...", vec!["int"; 1000].join(" | ")));
     assert_type_check_rejects(&format!("def f() -> {}: ...", vec!["int"; 1000].join(" | ")));
     // ty parses string annotations, continuing the depth around them
+    assert_type_check_rejects(&format!("x: '{}1{}'", "(".repeat(5000), ")".repeat(5000)));
+    assert_type_check_rejects(&format!("x: \"\"\"\n{}1{}\"\"\"", "(".repeat(5000), ")".repeat(5000)));
+    assert!(!source_within_nesting_bound(&format!("x: '{}1{}'", "(".repeat(5000), ")".repeat(5000)), 0));
     assert_type_check_rejects(&format!("x: list['{}']", vec!["int"; 1000].join(" | ")));
     assert_type_check_rejects(&format!("x: \"list['{}']\"", vec!["int"; 1000].join(" | ")));
     // ty also type-checks the AST it recovers from a syntax error

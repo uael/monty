@@ -36,7 +36,6 @@ use crate::{
         ConvertedExit, ExtFunctionResult, LookupAnswer, LookupScope, NameLookupResult, convert_frame_exit,
         resume_lookup, resume_with_result,
     },
-    source_nesting::source_within_nesting_bound,
     types::{SessionRandom, tuple::allocate_tuple},
     value::Value,
     virtual_path::canonical_cwd,
@@ -1416,7 +1415,7 @@ pub enum ReplContinuationMode {
 #[must_use]
 pub fn detect_repl_continuation_mode(source: &str) -> ReplContinuationMode {
     // Invalid because feeding it raises the SyntaxError; parsing it here would grow the stack unguarded.
-    if !source_within_nesting_bound(source, SOURCE_SCAN_THRESHOLD) {
+    if source_nesting_exception(source, "", SOURCE_SCAN_THRESHOLD).is_err() {
         return ReplContinuationMode::Invalid;
     }
     let Err(error) = parse_module(source) else {

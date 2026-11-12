@@ -242,7 +242,7 @@ pub(crate) fn parse_module_with_filename_id(
     source_scan_threshold: usize,
     future_annotations: bool,
 ) -> Result<ParsedModule, ParseError> {
-    check_source_nesting(code, Mode::Module, filename_id, source_scan_threshold)?;
+    check_source_nesting(code, Mode::Module, filename_id, source_scan_threshold, false)?;
     let parsed =
         parse_module(code).map_err(|e| ParseError::syntax(e.error.to_string(), code_range(filename_id, e.range())))?;
     // Harvested before `into_syntax` drops the token stream.
@@ -273,7 +273,7 @@ pub(crate) fn parse_expression_with_interner(
     interner: &mut CompileInterns<'_>,
     source_scan_threshold: usize,
 ) -> Result<ExprLoc, ParseError> {
-    check_source_nesting(code, Mode::Expression, filename_id, source_scan_threshold)?;
+    check_source_nesting(code, Mode::Expression, filename_id, source_scan_threshold, false)?;
     // ruff's lexer asserts the same `u32` bound on every source it parses.
     let end = TextSize::try_from(code.len()).expect("eval source exceeds u32 offsets");
     let start = end - TextSize::of(code.trim_start_matches([' ', '\t']));
@@ -338,7 +338,7 @@ pub(crate) fn source_nesting_exception(
     source_scan_threshold: usize,
 ) -> Result<(), MontyException> {
     // The filename id is a compiler concern; the exception names the file itself.
-    check_source_nesting(code, Mode::Module, StringId::default(), source_scan_threshold)
+    check_source_nesting(code, Mode::Module, StringId::default(), source_scan_threshold, false)
         .map_err(|e| e.into_python_exc(script_name, code))
 }
 
@@ -356,7 +356,8 @@ pub fn type_check_nesting_exception(
     script_name: &str,
     source_scan_threshold: usize,
 ) -> Result<(), MontyException> {
-    source_nesting_exception(code, script_name, source_scan_threshold)?;
+    check_source_nesting(code, Mode::Module, StringId::default(), source_scan_threshold, true)
+        .map_err(|e| e.into_python_exc(script_name, code))?;
     match ast_depth_exceeded(code, MAX_NESTING_DEPTH) {
         Some(range) => Err(
             ParseError::syntax("Source is too deeply nested", code_range(StringId::default(), range))
@@ -369,15 +370,18 @@ pub fn type_check_nesting_exception(
 /// Rejects a source over `source_scan_threshold` bytes whose estimated parser
 /// nesting exceeds [`MAX_NESTING_DEPTH`] before ruff can grow its stack on it.
 ///
+/// `annotations` counts the contents of each string literal too, for a source
+/// that ty reads; a source compiled to run holds strings that only run as data.
 /// Same message as the converter's exact check, so either path reads alike.
 fn check_source_nesting(
     code: &str,
     mode: Mode,
     filename_id: StringId,
     source_scan_threshold: usize,
+    annotations: bool,
 ) -> Result<(), ParseError> {
     if code.len() > source_scan_threshold
-        && let Some(range) = nesting_bound_exceeded(code, mode, MAX_NESTING_DEPTH)
+        && let Some(range) = nesting_bound_exceeded(code, mode, MAX_NESTING_DEPTH, annotations)
     {
         Err(ParseError::syntax(
             "Source is too deeply nested",
