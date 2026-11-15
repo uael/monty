@@ -31,6 +31,20 @@ The `asyncio` module exposes three functions and one exception class:
     task and a `Task` inside one; Monty schedules coroutines without giving a
     program an object for one, so a program that tells its runs apart by
     `id(current_task())` sees one identity for all of them.
+- `asyncio._set_running_loop(loop)` and `asyncio._get_running_loop()` — set and
+    read the loop of a program, as a loop written in Python sets itself in
+    CPython; `None` clears it. While one is set, `get_running_loop()` gives it,
+    `create_task(coro)` gives what its `create_task` makes, and `gather(...)`
+    asks it for a task of each coroutine and for the future it gives, which is
+    done with the results in order, or with the first exception or cancel of a
+    child, as CPython's gather. The program steps its tasks by hand. The loop
+    must answer `create_task` and `create_future`, and each child
+    `add_done_callback`, `done`, `cancelled`, `exception`, `result` and
+    `_make_cancelled_error`, as an `asyncio.Future` does. Where CPython wraps an
+    object with `__await__` in a coroutine before it gives it to the loop, the
+    loop takes it as it is here.
+- `asyncio.create_task(coro)` — needs a loop that the program set, and raises
+    `RuntimeError` with none, since Monty makes no task of its own.
 - `asyncio.CancelledError` — raisable and catchable, but **nothing in Monty
     raises it**: no await is ever cancelled. A sibling of a failing `gather()`
     keeps running rather than having this raised at its `await`
@@ -41,7 +55,7 @@ The `asyncio` module exposes three functions and one exception class:
 
 Not implemented (raise `AttributeError`):
 
-`create_task`, `wait`, `wait_for`, `shield`, `to_thread`,
+`wait`, `wait_for`, `shield`, `to_thread`,
 `new_event_loop`, `get_event_loop`, `Queue`, `Lock`,
 `Semaphore`, `Event`, `Future`, `Task`, `TaskGroup`, `timeout`,
 `timeout_at`, `Timeout`, `as_completed`, `iscoroutine`, `ensure_future`,

@@ -1,5 +1,7 @@
 //! The modules a session has imported, which `sys.modules` is.
 
+use std::mem;
+
 use crate::{
     bytecode::VM,
     exception_private::{RunError, RunResult},
@@ -19,11 +21,17 @@ use crate::{
 /// standard module answers can be imported, since a sandbox reads no files.
 ///
 /// **Owns one heap reference**, the dict, which lives as long as the session.
-/// The dict owns a reference to every module in it.
+/// The dict owns a reference to every module in it. It owns one more for the
+/// running loop that a program set, while it holds one.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModuleTable {
     /// The `sys.modules` dict, allocated the first time anything imports.
     dict: Option<HeapId>,
+    /// The event loop that `asyncio._set_running_loop` set, which
+    /// `asyncio.get_running_loop`, `create_task` and `gather` ask, as CPython's
+    /// loop of the thread. Monty has one thread, so the session holds it.
+    #[serde(default)]
+    running_loop: Option<HeapId>,
 }
 
 impl ModuleTable {
@@ -34,6 +42,17 @@ impl ModuleTable {
         *self
             .dict
             .get_or_insert_with(|| heap.heap().allocate(HeapData::Dict(Dict::new())))
+    }
+
+    /// The running loop that a program set, if it set one.
+    pub(crate) fn running_loop(&self) -> Option<HeapId> {
+        self.running_loop
+    }
+
+    /// Sets the running loop, or none, and gives back the one it held, whose
+    /// reference the caller now owns.
+    pub(crate) fn set_running_loop(&mut self, running: Option<HeapId>) -> Option<HeapId> {
+        mem::replace(&mut self.running_loop, running)
     }
 
     /// The `sys.modules` dict, if this session has made one.

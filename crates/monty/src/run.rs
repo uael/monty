@@ -671,6 +671,8 @@ impl Executor {
             }
             // `sys.modules` is a root too: the session owns it, and it holds each module the run imported.
             roots.extend(vm.sys_modules.existing());
+            // So is the running loop that the program set, which the session holds.
+            roots.extend(vm.sys_modules.running_loop());
             // Those are the only roots: locals are gone once the module frame exits, so
             // anything still live must hang off a name, the result or `sys.modules` to not be a leak.
             let unreachable: Vec<String> = vm
