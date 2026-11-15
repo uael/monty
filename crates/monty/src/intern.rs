@@ -865,6 +865,9 @@ pub enum StaticStrings {
     /// `binascii.crc_hqx()` function.
     #[strum(serialize = "crc_hqx")]
     CrcHqx,
+    /// `asyncio.create_task()` function.
+    #[strum(serialize = "create_task")]
+    CreateTask,
     /// Module name for `import csv`.
     Csv,
     /// `time.ctime()` function.
@@ -1377,6 +1380,9 @@ pub enum StaticStrings {
     /// `asyncio.get_running_loop()` function.
     #[strum(serialize = "get_running_loop")]
     GetRunningLoop,
+    /// `asyncio._get_running_loop()` function, which gives `None` where no loop runs.
+    #[strum(serialize = "_get_running_loop")]
+    GetRunningLoopOrNone,
     /// `random.gauss()` function.
     Gauss,
     /// Module name for `import gc`.
@@ -2307,6 +2313,9 @@ pub enum StaticStrings {
     /// `ContextVar.set()` method.
     #[strum(serialize = "set")]
     SetMethod,
+    /// `asyncio._set_running_loop()` function.
+    #[strum(serialize = "_set_running_loop")]
+    SetRunningLoop,
     /// `typing.Set` marker.
     #[strum(serialize = "Set")]
     SetType,
