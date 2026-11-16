@@ -797,6 +797,7 @@ pub(crate) struct AbandonedState {
     pub cwd: String,
     pub random: SessionRandom,
     pub modules: ModuleCache,
+    pub re_pattern_cache: RePatternCache,
 }
 
 impl VMSnapshot {
@@ -826,9 +827,10 @@ impl VMSnapshot {
     /// Discards the in-flight execution state of a snapshot that will never be
     /// restored, releasing every heap reference it holds (operand and exception
     /// stacks, scheduler tasks, pending resume effects), and returns the
-    /// globals, working directory, `random` generator and file modules so an
-    /// abandoned REPL snippet keeps its namespace, any `os.chdir` it made, any
-    /// seed it set and any module it finished importing. Mirrors `VM::drop`.
+    /// globals, working directory, `random` generator, file modules and compiled
+    /// patterns so an abandoned REPL snippet keeps its namespace, any `os.chdir` it
+    /// made, any seed it set, any module it finished importing and each pattern it
+    /// compiled. Mirrors `VM::drop`.
     pub(crate) fn abandon(self, heap: &mut Heap) -> AbandonedState {
         let Self {
             stack,
@@ -841,6 +843,7 @@ impl VMSnapshot {
             cwd,
             random,
             mut modules,
+            re_pattern_cache,
             ..
         } = self;
         HeapReader::with(heap, &mut (), |heap, ()| {
@@ -860,6 +863,7 @@ impl VMSnapshot {
             cwd,
             random,
             modules,
+            re_pattern_cache,
         }
     }
 
@@ -999,9 +1003,9 @@ pub struct VM<'h> {
     /// charge before returning a suspending `CallResult`. Checked by [`Self::snapshot`].
     run_reentry_depth: u8,
 
-    /// Per-run cache of compiled patterns for module-level `re.*` calls. A pure
-    /// performance cache: a snapshot carries it to the VM that resumes the run, and
-    /// never serializes it.
+    /// The cache of compiled patterns for module-level `re.*` calls. A pure
+    /// performance cache: a snapshot carries it to the VM that resumes the run, the
+    /// REPL session to the VM of its next snippet or call, and none serializes it.
     pub(crate) re_pattern_cache: RePatternCache,
 
     /// Module generator and state for initializing unseeded generators.

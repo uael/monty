@@ -675,10 +675,11 @@ const LARGE_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 /// `CACHE_CAPACITY` huge patterns under its own memory limit; longer ones stay uncached.
 const CACHED_PATTERN_LIMIT: usize = 4 * 1024;
 
-/// Per-run cache of compiled patterns for module-level `re.*` calls, keyed on
+/// Cache of compiled patterns for module-level `re.*` calls, keyed on
 /// `(pattern, flags)` — so `re.split(r'\s+', text)` in a loop compiles once. Mirrors
-/// CPython's `re._cache`; a snapshot carries it to the VM that resumes the run, and
-/// never serializes it. Direct-mapped with 5-slot linear probing and LRU-on-collision
+/// CPython's `re._cache`; a snapshot carries it to the VM that resumes the run, a REPL
+/// session to the VM of its next snippet or call, and none serializes it.
+/// Direct-mapped with 5-slot linear probing and LRU-on-collision
 /// (jiter's `py_string_cache` design), bounding retained memory by
 /// [`CACHED_SIZE_LIMIT`] and [`CACHED_PATTERN_LIMIT`].
 ///

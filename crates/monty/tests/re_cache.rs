@@ -1,6 +1,8 @@
 //! Tests for the cache of compiled patterns across a call of the host: the
 //! snapshot that the call pauses on carries the cache to the VM that resumes it.
 
+use std::fmt::Debug;
+
 use monty::{MontyRepl, ReplFunctionCall, ReplProgress};
 use monty_types::{CompileOptions, MontyObject, PrintWriter, ResourceLimits, ResourceTracker};
 
@@ -11,11 +13,15 @@ fn called(progress: ReplProgress) -> ReplFunctionCall {
     call
 }
 
-/// How many compiled patterns the paused run holds, as its debug form says.
-fn held(call: &ReplFunctionCall) -> String {
-    let shown = format!("{call:?}");
-    let at = shown.find("RePatternCache(").expect("the snapshot shows its cache");
-    shown[at..].split(')').next().unwrap().to_owned() + ")"
+/// How many compiled patterns a session or its paused run holds, as its debug form says:
+/// the cache of the session is empty while a run holds it.
+fn held(state: &impl Debug) -> String {
+    let shown = format!("{state:?}");
+    let counts = shown.split("RePatternCache(").skip(1);
+    let held: usize = counts
+        .map(|one| one.split(')').next().unwrap().parse::<usize>().unwrap())
+        .sum();
+    format!("RePatternCache({held})")
 }
 
 #[test]
@@ -34,4 +40,23 @@ fn a_call_of_the_host_carries_the_compiled_patterns_of_the_run() {
     // The resumed run holds the pattern it compiled before the call beside the one it compiled after.
     assert_eq!(held(&call), "RePatternCache(2)");
     drop(call.into_repl());
+}
+
+#[test]
+fn a_session_carries_the_compiled_patterns_from_one_feed_to_the_next() {
+    let mut repl = MontyRepl::new(
+        "re_cache.py",
+        ResourceTracker::new(ResourceLimits::default()),
+        CompileOptions::default(),
+    );
+    repl.feed_run("import re\nre.search('a+', 'aa')", vec![], PrintWriter::Disabled)
+        .unwrap();
+    assert_eq!(held(&repl), "RePatternCache(1)");
+    repl.feed_run("re.search('a+', 'aaa')", vec![], PrintWriter::Disabled)
+        .unwrap();
+    // The second feed found the pattern of the first and compiled nothing.
+    assert_eq!(held(&repl), "RePatternCache(1)");
+    repl.feed_run("re.search('b+', 'bb')", vec![], PrintWriter::Disabled)
+        .unwrap();
+    assert_eq!(held(&repl), "RePatternCache(2)");
 }

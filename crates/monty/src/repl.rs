@@ -27,7 +27,7 @@ use crate::{
     exception_private::{ExcTypeExt, RunError, RunResult, resolve_frames},
     heap::{DropWithContext, Heap, HeapData, HeapReader},
     intern::Interns,
-    modules::table::ModuleTable,
+    modules::{re::RePatternCache, table::ModuleTable},
     name_map::NameMap,
     object_bridge::{MontyGraphExt, MontyObjectExt},
     parse::source_nesting_exception,
@@ -100,6 +100,11 @@ pub struct MontyRepl {
     /// so each file runs once per session.
     #[serde(default)]
     modules: ModuleCache,
+    /// The compiled patterns of the `re` calls of the session, carried between snippets and
+    /// calls like the `random` state, so a pattern compiles once per session and not once per
+    /// feed. A pure performance cache: never serialized, and a restored session starts with none.
+    #[serde(skip)]
+    re_pattern_cache: RePatternCache,
     /// Whether a feed has run `from __future__ import annotations`, which then
     /// applies to every later feed, as in CPython's interactive mode.
     #[serde(default)]
@@ -141,6 +146,7 @@ impl MontyRepl {
             random: SessionRandom::default(),
             sys_modules: ModuleTable::default(),
             modules: ModuleCache::default(),
+            re_pattern_cache: RePatternCache::default(),
             future_annotations: false,
             heap,
             globals: Vec::new(),
@@ -339,6 +345,7 @@ impl MontyRepl {
 
                 vm.random = mem::take(&mut this.random);
                 vm.modules = mem::take(&mut this.modules);
+                vm.re_pattern_cache = mem::take(&mut this.re_pattern_cache);
 
                 // Inject inputs with VM alive
                 if let Err(error) = inject_inputs_into_vm(&executor.program, input_values, &input_ids, &mut vm) {
@@ -347,6 +354,7 @@ impl MontyRepl {
                         &mut this.cwd,
                         &mut this.random,
                         &mut this.modules,
+                        &mut this.re_pattern_cache,
                         &mut vm,
                     );
                     return Err(error);
@@ -364,6 +372,7 @@ impl MontyRepl {
                         &mut this.cwd,
                         &mut this.random,
                         &mut this.modules,
+                        &mut this.re_pattern_cache,
                         &mut vm,
                     );
                     None
@@ -447,6 +456,7 @@ impl MontyRepl {
 
                 vm.random = mem::take(&mut self.random);
                 vm.modules = mem::take(&mut self.modules);
+                vm.re_pattern_cache = mem::take(&mut self.re_pattern_cache);
 
                 if let Err(e) = inject_inputs_into_vm(&executor.program, input_values, &input_ids, &mut vm) {
                     reclaim_vm_state(
@@ -454,6 +464,7 @@ impl MontyRepl {
                         &mut self.cwd,
                         &mut self.random,
                         &mut self.modules,
+                        &mut self.re_pattern_cache,
                         &mut vm,
                     );
                     return Err(e);
@@ -467,6 +478,7 @@ impl MontyRepl {
                     &mut self.cwd,
                     &mut self.random,
                     &mut self.modules,
+                    &mut self.re_pattern_cache,
                     &mut vm,
                 );
                 Ok(result)
@@ -558,6 +570,7 @@ impl MontyRepl {
 
                 vm.random = mem::take(&mut self.random);
                 vm.modules = mem::take(&mut self.modules);
+                vm.re_pattern_cache = mem::take(&mut self.re_pattern_cache);
                 let result = match convert_args(args, vm) {
                     Ok(args) => {
                         let (args, kwargs) = args.into_parts();
@@ -612,6 +625,7 @@ impl MontyRepl {
                 mem::replace(&mut globals[args_slot], Value::Undefined).drop_with(vm);
                 self.random = mem::take(&mut vm.random);
                 self.modules = mem::take(&mut vm.modules);
+                self.re_pattern_cache = mem::take(&mut vm.re_pattern_cache);
                 self.globals = globals;
                 if let Some(cwd) = vm.take_changed_cwd() {
                     self.cwd = Arc::from(cwd);
@@ -1284,6 +1298,7 @@ impl ReplResolveFutures {
         repl.cwd = Arc::from(state.cwd);
         repl.random = state.random;
         repl.modules = state.modules;
+        repl.re_pattern_cache = state.re_pattern_cache;
         repl.commit_executor(executor);
         repl
     }
@@ -1356,6 +1371,7 @@ impl ReplResolveFutures {
                         &mut repl.cwd,
                         &mut repl.random,
                         &mut repl.modules,
+                        &mut repl.re_pattern_cache,
                         &mut vm,
                     );
                     return Err(MontyException::runtime_error(format!(
@@ -1375,6 +1391,7 @@ impl ReplResolveFutures {
                         &mut repl.cwd,
                         &mut repl.random,
                         &mut repl.modules,
+                        &mut repl.re_pattern_cache,
                         &mut vm,
                     );
                     None
@@ -1529,6 +1546,7 @@ fn abort_restored(
                 &mut repl.cwd,
                 &mut repl.random,
                 &mut repl.modules,
+                &mut repl.re_pattern_cache,
                 &mut vm,
             );
             converted
@@ -1590,6 +1608,7 @@ impl ReplSnapshot {
         repl.cwd = Arc::from(state.cwd);
         repl.random = state.random;
         repl.modules = state.modules;
+        repl.re_pattern_cache = state.re_pattern_cache;
         repl.commit_executor(executor);
         repl
     }
@@ -1667,6 +1686,7 @@ impl ReplSnapshot {
                         &mut repl.cwd,
                         &mut repl.random,
                         &mut repl.modules,
+                        &mut repl.re_pattern_cache,
                         &mut vm,
                     );
                     None
@@ -1744,6 +1764,7 @@ fn reclaim_vm_state(
     cwd: &mut Arc<str>,
     random: &mut SessionRandom,
     modules: &mut ModuleCache,
+    re_patterns: &mut RePatternCache,
     vm: &mut VM<'_>,
 ) {
     *globals = vm.take_globals();
@@ -1752,6 +1773,7 @@ fn reclaim_vm_state(
     }
     *random = mem::take(&mut vm.random);
     *modules = mem::take(&mut vm.modules);
+    *re_patterns = mem::take(&mut vm.re_pattern_cache);
 }
 
 /// Injects input values into the VM's global namespace slots.
