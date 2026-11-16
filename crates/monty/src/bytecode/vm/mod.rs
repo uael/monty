@@ -222,6 +222,9 @@ pub enum FrameExit {
         name_load_ip: Option<usize>,
         /// The callee is an async host function (see [`CallResult::External`]).
         is_async: bool,
+        /// The value that a watched function returned, which the caller takes
+        /// when the host answers, whatever the answer (see `MontyRepl::watch`).
+        returned: Option<Value>,
     },
 
     /// Execution paused for an os function call.
@@ -312,7 +315,11 @@ impl<C: ContainsHeap> DropWithContext<C> for FrameExit {
     fn drop_with(self, heap: &mut C) {
         match self {
             Self::Return(value) => value.drop_with(heap),
-            Self::ExternalCall { args, .. } | Self::MethodCall { args, .. } => {
+            Self::ExternalCall { args, returned, .. } => {
+                args.drop_with(heap);
+                returned.drop_with(heap);
+            }
+            Self::MethodCall { args, .. } => {
                 args.drop_with(heap);
             }
             Self::OsCall {
@@ -1253,6 +1260,28 @@ impl<'h> VM<'h> {
         }
     }
 
+    /// The name of the function whose frame runs now when a host watches it
+    /// (see `MontyRepl::watch`).
+    fn watched(&self) -> Option<StringId> {
+        let function = self.interns.get_function(self.current_frame().function_id?);
+        function.watched.then_some(function.name.name_id)
+    }
+
+    /// The return of a call of a watched function, which goes to the host as a
+    /// call of the name of the function with the value it returned. The caller
+    /// takes that value when the host answers, whatever the answer, and raises
+    /// what the host raises in its place.
+    fn watched_return(&mut self, name: StringId, value: Value) -> FrameExit {
+        FrameExit::ExternalCall {
+            function_name: EitherStr::Interned(name),
+            args: ArgValues::One(value.clone_with_heap(self)),
+            call_id: self.allocate_call_id(),
+            name_load_ip: None,
+            is_async: false,
+            returned: Some(value),
+        }
+    }
+
     /// Allocates a new `CallId` for an external function call.
     fn allocate_call_id(&mut self) -> CallId {
         self.scheduler.allocate_call_id()
@@ -1358,6 +1387,7 @@ impl<'h> VM<'h> {
                 call_id: self.allocate_call_id(),
                 name_load_ip: self.ext_function_load_ip.take(),
                 is_async,
+                returned: None,
             },
             CallResult::OsCall(call) => return self.prepare_os_call(call, None),
             CallResult::OsCallWithEffect { call, effect } => return self.prepare_os_call(call, Some(effect)),
@@ -2269,8 +2299,9 @@ impl<'h> VM<'h> {
                         }
                         continue;
                     }
-                    // Read the initializer flag before popping the frame.
+                    // Read the initializer flag and the watch before popping the frame.
                     let is_init = self.current_frame().is_initializer;
+                    let watched = self.watched();
                     // Pop current frame; `stop` requests returning to the host
                     // (e.g. `evaluate_function`).
                     let stop = self.pop_frame();
@@ -2310,6 +2341,8 @@ impl<'h> VM<'h> {
                         // This frame indicated evaluation should stop - return to host with value
                         // e.g. `evaluate_function`
                         return Ok(FrameExit::Return(value));
+                    } else if let Some(name) = watched {
+                        return Ok(self.watched_return(name, value));
                     } else {
                         self.push(value);
                     }
@@ -2443,6 +2476,10 @@ impl<'h> VM<'h> {
                 self.push(settled);
                 return self.run_external();
             }
+            Some(PendingEffect::Post(PostConversionEffect::Returned { value })) => {
+                self.push(value);
+                return self.run_external();
+            }
             effect => {
                 self.pending_effect = effect;
                 obj
@@ -2513,7 +2550,11 @@ impl<'h> VM<'h> {
             }
             // The sleeps were answered above; any pre-conversion effect was consumed.
             Some(
-                PendingEffect::Post(PostConversionEffect::DiscardResult | PostConversionEffect::SleepResult { .. })
+                PendingEffect::Post(
+                    PostConversionEffect::DiscardResult
+                    | PostConversionEffect::SleepResult { .. }
+                    | PostConversionEffect::Returned { .. },
+                )
                 | PendingEffect::Pre(_)
                 | PendingEffect::Scan(_)
                 | PendingEffect::Import(_),
@@ -2637,7 +2678,9 @@ impl<'h> VM<'h> {
                     | PostConversionEffect::LoadThenCall { .. }
                     | PostConversionEffect::SeedRandom { .. }),
                 ) => effect.release(self.heap),
-                PendingEffect::Post(PostConversionEffect::SleepResult { result }) => result.drop_with(self),
+                PendingEffect::Post(
+                    PostConversionEffect::SleepResult { result } | PostConversionEffect::Returned { value: result },
+                ) => result.drop_with(self),
                 // A walk or glob turns an `OSError` into its result, as CPython's
                 // do for a failed `scandir`; anything else still raises.
                 PendingEffect::Scan(effect) if effect.absorbs(&error) => {

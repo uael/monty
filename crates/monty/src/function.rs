@@ -99,6 +99,10 @@ pub(crate) struct Function {
     /// for `f.__annotations__` and `typing.get_type_hints()`; `None` when unannotated.
     #[serde(rename = "T", default, skip_serializing_if = "Option::is_none")]
     pub annotate: Option<FunctionId>,
+    /// Whether each return of a call of this function goes to the host first,
+    /// as [`MontyRepl::watch`](crate::MontyRepl::watch) says.
+    #[serde(rename = "W", default, skip_serializing_if = "std::ops::Not::not")]
+    pub watched: bool,
     /// Compiled body borrowed by active frames, which track body-relative instruction offsets.
     #[serde(rename = "B")]
     pub code: Code,
@@ -144,6 +148,7 @@ impl Function {
             defaults_count,
             is_async,
             exact_positional_call: OnceCell::new(),
+            watched: false,
             annotate: None,
             code,
         }

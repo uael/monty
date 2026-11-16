@@ -3188,6 +3188,22 @@ impl Interns {
         &self.functions[id.index()]
     }
 
+    /// Marks each function of this name whose definition stands in this file
+    /// as watched, and gives how many it marked.
+    pub(crate) fn watch(&mut self, file: &str, name: &str) -> usize {
+        let named: Vec<bool> = self
+            .functions
+            .iter()
+            .map(|one| self.get_str(one.name.name_id) == name && self.get_filename(one.name.position.filename) == file)
+            .collect();
+        let mut at = 0;
+        self.functions.for_each_mut(|one| {
+            one.watched |= named[at];
+            at += 1;
+        });
+        named.into_iter().filter(|one| *one).count()
+    }
+
     /// Looks up, by its filename-only ID and never by the displayed text, the
     /// source of a snippet or of code that `compile()` named: source whose lines
     /// a traceback does not print.

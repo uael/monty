@@ -218,6 +218,19 @@ impl MontyRepl {
         self.cwd = canonical_cwd(cwd);
     }
 
+    /// Watches each function of this name that a snippet defined in this file,
+    /// and gives how many: each later return of a call of one goes to the host
+    /// first, as a [`ReplFunctionCall`] of the name of the function with the
+    /// value it returned, whose stack names where the call stood. The caller
+    /// takes the value the function returned, whatever the host answers, and
+    /// raises what the host raises in its place. So a host sees each value such
+    /// a function makes and where, as a debugger that breaks at a return, and
+    /// the program runs as it would with no watch. A function defined after
+    /// the watch is not watched, and the watch lasts in a dump of the session.
+    pub fn watch(&mut self, file: &str, name: &str) -> usize {
+        self.interns.watch(file, name)
+    }
+
     /// Returns the resource tracker that will be used for the next snippet.
     ///
     /// This is primarily intended for host integrations that need to attach
