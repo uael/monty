@@ -10,13 +10,13 @@ use std::mem;
 
 use monty_types::{
     CallArgs, ExcType, InvalidInputError, MontyException, MontyObject, MontyUuid, OsFunctionCall, PrintWriter,
-    ResourceTracker, SourceRange,
+    ResourceTracker, SourceRange, StackFrame,
 };
 
 use crate::{
     asyncio::CallId,
     bytecode::{FrameExit, PendingImport, PendingLookupEffect, VM, VMSnapshot},
-    exception_private::{ExcTypeExt, RunError, RunResult, SimpleException},
+    exception_private::{ExcTypeExt, RunError, RunResult, SimpleException, resolve_frames},
     heap::{DropWithContext, Heap, HeapReader},
     intern::Interns,
     object_bridge::MontyObjectExt,
@@ -147,6 +147,17 @@ pub struct FunctionCall {
 }
 
 impl FunctionCall {
+    /// The frames that stand at this call, outermost first, as a traceback
+    /// raised at the call would print them: the file, the lines and the name
+    /// of each, the innermost at the call itself.
+    #[must_use]
+    pub fn stack(&self) -> Vec<StackFrame> {
+        let Snapshot { executor, vm_state, .. } = &self.snapshot;
+        let interns = &executor.tables.interns;
+        let frames = vm_state.stack(interns, &executor.program.module_code);
+        resolve_frames(&frames, interns, |_| Some(&*executor.program.code))
+    }
+
     /// Returns a mutable reference to the resource tracker.
     ///
     /// This allows modifying resource limits between execution phases,

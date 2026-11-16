@@ -131,6 +131,9 @@ impl Builtin {
 /// and `exec()` of an `'eval'` one evaluates an expression, as in CPython.
 struct Snippet {
     text: Arc<str>,
+    /// The filename that `compile()` gave the source, which its frames show,
+    /// or `None` for text and for the default `<string>`.
+    named: Option<Box<str>>,
     mode: CodeMode,
     /// Whether the body may `await` at its top level, which makes running it
     /// hand back a coroutine rather than running it here; only a code object
@@ -157,7 +160,16 @@ fn run_snippet(
         (_, CodeMode::Exec) => SnippetSource::Exec,
         (Builtin::Exec, CodeMode::Eval) => SnippetSource::ExecExpression,
     };
-    let (_, coroutine) = admit(kind, &snippet.text, snippet.top_level_await, names, namespace, vm)?;
+    let named = snippet.named.as_deref();
+    let (_, coroutine) = admit(
+        kind,
+        &snippet.text,
+        named,
+        snippet.top_level_await,
+        names,
+        namespace,
+        vm,
+    )?;
     Ok(coroutine.map_or(CallResult::FramePushed, CallResult::Value))
 }
 
@@ -245,7 +257,7 @@ pub(crate) fn compile_and_push(
     namespace: Box<FrameNamespace>,
     vm: &mut VM<'_>,
 ) -> RunResult<FunctionId> {
-    admit(kind, source, false, names, namespace, vm).map(|(func_id, _)| func_id)
+    admit(kind, source, None, false, names, namespace, vm).map(|(func_id, _)| func_id)
 }
 
 /// [`compile_and_push`], and for a body that awaits at its top level the coroutine that runs it, in
@@ -256,6 +268,7 @@ pub(crate) fn compile_and_push(
 fn admit(
     kind: SnippetSource<'_>,
     source: &Arc<str>,
+    named: Option<&str>,
     top_level_await: bool,
     names: SnippetNames,
     namespace: Box<FrameNamespace>,
@@ -264,7 +277,7 @@ fn admit(
     let globals_len = vm.global_names.len();
     let mut namespace_guard = DropGuard::new(namespace, vm);
     let (_, vm) = namespace_guard.as_parts_mut();
-    match compile_snippet(kind, source, top_level_await, names, vm) {
+    match compile_snippet(kind, source, named, top_level_await, names, vm) {
         Ok((func_id, overlay, awaits)) => {
             // The frame or the coroutine owns the namespace from here, on every path.
             let (namespace, vm) = namespace_guard.into_parts();
@@ -328,16 +341,18 @@ fn first_code_line_indented(source: &str) -> bool {
 fn compile_snippet<'h>(
     kind: SnippetSource<'_>,
     source: &Arc<str>,
+    named: Option<&str>,
     top_level_await: bool,
     names: SnippetNames,
     vm: &mut VM<'h>,
 ) -> RunResult<(FunctionId, CompileInterns<'h>, bool)> {
     let mut overlay = CompileInterns::new(vm.interns);
     let filename_id = match kind {
-        SnippetSource::File { path } => overlay.add_file_source(Arc::from(path), Arc::clone(source)),
-        SnippetSource::Eval | SnippetSource::Exec | SnippetSource::ExecExpression => {
-            overlay.add_eval_source(Arc::clone(source))
-        }
+        SnippetSource::File { path } => overlay.add_file_source(Arc::from(path), Arc::clone(source), false),
+        SnippetSource::Eval | SnippetSource::Exec | SnippetSource::ExecExpression => match named {
+            Some(name) => overlay.add_file_source(Arc::from(name), Arc::clone(source), true),
+            None => overlay.add_eval_source(Arc::clone(source)),
+        },
     };
     let options = vm.env.options;
     let compile_error = |e: ParseError| match kind {
@@ -441,6 +456,7 @@ fn snippet(builtin: Builtin, source: &Value, vm: &mut VM<'_>) -> RunResult<Snipp
     {
         return Ok(Snippet {
             text: Arc::from(code.source()),
+            named: (code.filename() != "<string>").then(|| Box::from(code.filename())),
             mode: code.mode(),
             top_level_await: code.top_level_await(),
         });
@@ -451,6 +467,7 @@ fn snippet(builtin: Builtin, source: &Value, vm: &mut VM<'_>) -> RunResult<Snipp
     };
     Ok(Snippet {
         text: snippet_source(name, source, vm)?,
+        named: None,
         mode,
         top_level_await: false,
     })

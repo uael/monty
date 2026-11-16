@@ -42,7 +42,7 @@ use crate::{
         op::{MATCH_KEYS_REST, Opcode, decode_assert_flags},
     },
     defer_drop_mut,
-    exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
+    exception_private::{ExcType, ExcTypeExt, RawStackFrame, RunError, RunResult, SimpleException},
     heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
@@ -800,6 +800,29 @@ pub(crate) struct AbandonedState {
 }
 
 impl VMSnapshot {
+    /// The frames of the paused run, outermost first, as a traceback raised at
+    /// the pause would name them: the frame that paused at the instruction that
+    /// paused it, and each frame below at its call of the frame above. A frame of
+    /// frozen code stands in no traceback, so it stands in none here.
+    pub(crate) fn stack(&self, interns: &Interns, module_code: &Code) -> Vec<RawStackFrame> {
+        let mut offset = Some(self.instruction_ip);
+        let mut stack = Vec::new();
+        for frame in self.frames.iter().rev() {
+            let shown = frame.function_id.is_none_or(|id| !interns.is_internal_function(id));
+            let code = frame_code(interns, module_code, frame.function_id);
+            if let Some(entry) = offset.filter(|_| shown).and_then(|at| code.location_for_offset(at)) {
+                let name = frame.function_id.map_or_else(
+                    || interns.intern_static(StaticStrings::Module),
+                    |id| interns.get_function(id).name.name_id,
+                );
+                stack.push(RawStackFrame::new(entry.range(), name, None));
+            }
+            offset = frame.call_offset.map(|at| at as usize);
+        }
+        stack.reverse();
+        stack
+    }
+
     /// Discards the in-flight execution state of a snapshot that will never be
     /// restored, releasing every heap reference it holds (operand and exception
     /// stacks, scheduler tasks, pending resume effects), and returns the

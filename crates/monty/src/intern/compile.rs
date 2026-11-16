@@ -211,12 +211,13 @@ impl<'i> CompileInterns<'i> {
         id
     }
 
-    /// Records an imported file's source; tracebacks display `path` and its source lines.
-    pub(crate) fn add_file_source(&mut self, path: Arc<str>, source: Arc<str>) -> StringId {
+    /// Records the source of an imported file, whose lines tracebacks display, or of code that `compile()`
+    /// named, whose lines they do not; tracebacks display `path` for both.
+    pub(crate) fn add_file_source(&mut self, path: Arc<str>, source: Arc<str>, compiled: bool) -> StringId {
         let pending_len = self.pending.as_ref().map_or(0, |pending| pending.file_sources.len());
         let index = FILE_SOURCE_ID_BASE + self.base.file_sources.len() + pending_len;
         let id = StringId(index.try_into().expect("source ID overflow"));
-        let file = FileSource { path, source };
+        let file = FileSource { path, source, compiled };
         if let Some(pending) = &mut self.pending {
             pending.file_sources.push(file);
         } else {
