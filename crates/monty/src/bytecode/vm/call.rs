@@ -183,6 +183,15 @@ impl CallResult {
                             let value = effect.apply(None, vm);
                             vm.push(value);
                         }
+                        // No host sees a watched return here, so the caller takes its value at once.
+                        FrameExit::ExternalCall {
+                            returned: Some(value),
+                            args,
+                            ..
+                        } => {
+                            args.drop_with(vm);
+                            vm.push(value);
+                        }
                         exit => {
                             let error = vm.unsupported_frame_exit(exit);
                             if let Some(error) = vm.handle_exception(error) {

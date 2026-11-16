@@ -761,6 +761,16 @@ impl Program {
         // and a called external function is an undefined name.
         loop {
             match answer_unserved_lookups(frame_exit_result, vm) {
+                // No host sees a watched return, so the caller takes its value at once.
+                Ok(FrameExit::ExternalCall {
+                    returned: Some(value),
+                    args,
+                    ..
+                }) => {
+                    args.drop_with(vm);
+                    vm.push(value);
+                    frame_exit_result = vm.run_external();
+                }
                 Ok(FrameExit::ExternalCall {
                     function_name,
                     args,

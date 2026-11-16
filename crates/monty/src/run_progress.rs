@@ -1095,8 +1095,11 @@ pub(crate) fn convert_frame_exit(result: RunResult<FrameExit>, vm: &mut VM<'_>) 
             args,
             call_id,
             is_async,
+            returned,
             ..
         }) => {
+            // As for an OS call below: the call is the host's from here, so its resume takes the value.
+            vm.pending_effect = returned.map(|value| PendingEffect::Post(PostConversionEffect::Returned { value }));
             let position = vm.suspension_position();
             let name = function_name.into_string(vm.interns);
             match vm.export_on_clock(|vm| args.into_call_args(vm)) {

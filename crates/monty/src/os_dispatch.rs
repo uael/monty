@@ -112,6 +112,8 @@ impl PendingEffect {
             // `asyncio.sleep` wants the future: `resume_with_result` moves the
             // result onto the pending awaitable instead.
             Self::Post(PostConversionEffect::SleepResult { .. }) => None,
+            // The caller takes the value that the function returned, never a future.
+            Self::Post(PostConversionEffect::Returned { .. }) => Some("a watched return"),
         }
     }
 
@@ -391,6 +393,9 @@ pub(crate) enum PostConversionEffect {
     /// awaitable takes `result` over; see `ExternalFuture::sleep_result`).
     /// Owns `result`'s reference; released by [`release_pending_effect`].
     SleepResult { result: Value },
+    /// Drop the host's answer and give the caller `value`, which a watched
+    /// function returned (see `MontyRepl::watch`). Owns `value`'s reference.
+    Returned { value: Value },
 }
 
 impl PostConversionEffect {
@@ -419,7 +424,7 @@ impl PostConversionEffect {
                 args.drop_with(heap);
             }
             Self::OpenName { .. } | Self::DiscardResult | Self::ClockReading { .. } => {}
-            Self::SleepResult { result } => result.drop_with(heap),
+            Self::SleepResult { result } | Self::Returned { value: result } => result.drop_with(heap),
             Self::SeedRandom { target, retry } => {
                 if let RandomTarget::Instance(id) = target {
                     heap.heap_mut().dec_ref(id);
