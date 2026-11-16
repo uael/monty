@@ -5,6 +5,7 @@
 use monty::{Dump, MontyRepl, MontyRun, ReplProgress, RunProgress, Session, SessionRef, dump};
 use monty_types::{
     CompileOptions, ExtFunctionResult, MontyObject, NameLookupResult, PrintWriter, ResourceTracker, SourceRange,
+    StackFrame,
 };
 
 /// The text `position` covers in `source`, which it names `filename`; offsets are UTF-8 bytes.
@@ -185,4 +186,48 @@ fn resolve_futures_points_at_the_main_task_await_while_spawned_tasks_block() {
             other => panic!("unexpected progress: {other:?}"),
         }
     }
+}
+
+/// Each frame of `stack` as its file, its first line and its name.
+fn frames(stack: &[StackFrame]) -> Vec<(&str, u32, Option<&str>)> {
+    stack
+        .iter()
+        .map(|frame| (frame.filename.as_str(), frame.start.line, frame.frame_name.as_deref()))
+        .collect()
+}
+
+#[test]
+fn a_call_names_each_frame_that_stands_at_it() {
+    let code = "def inner(n):\n    return fetch(n)\n\ndef outer():\n    return inner(1)\n\nouter()";
+    let call = start(code).into_function_call().unwrap();
+    assert_eq!(
+        frames(&call.stack()),
+        [
+            ("test.py", 7, Some("<module>")),
+            ("test.py", 5, Some("outer")),
+            ("test.py", 2, Some("inner")),
+        ]
+    );
+    assert_eq!(call.stack()[2].preview_line.as_deref(), Some("    return fetch(n)"));
+}
+
+#[test]
+fn a_repl_call_names_the_frames_of_code_compiled_under_a_name_of_its_own() {
+    let mut repl = MontyRepl::new("repl.py", ResourceTracker::default(), CompileOptions::default());
+    let first_feed = "def helper(n):\n    return fetch(n)";
+    repl.feed_run(first_feed, vec![], PrintWriter::Stdout).unwrap();
+    let word = "x = 1\n\ny = helper(x)";
+    let feed = format!("exec(compile({word:?}, 'rung3', 'exec'))");
+    let progress = repl.feed_start(&feed, vec![], PrintWriter::Stdout).unwrap();
+    let ReplProgress::FunctionCall(call) = progress else {
+        panic!("expected a function call");
+    };
+    assert_eq!(
+        frames(&call.stack()),
+        [
+            ("<python-input-1>", 1, Some("<module>")),
+            ("rung3", 3, Some("<module>")),
+            ("<python-input-0>", 2, Some("helper")),
+        ]
+    );
 }

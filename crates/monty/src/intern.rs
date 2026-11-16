@@ -3079,11 +3079,15 @@ const SOURCE_ID_BASE: usize = 1 << 31;
 /// Imported files take the IDs above the snippet range, so each displays its own path.
 const FILE_SOURCE_ID_BASE: usize = 3 << 30;
 
-/// An imported module file: its virtual path and text, for tracebacks.
+/// An imported module file, or code that `compile()` named: its path and text, for tracebacks.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FileSource {
     path: Arc<str>,
     source: Arc<str>,
+    /// Code that `compile()` named, whose lines a traceback does not print, as
+    /// CPython reads no file for it.
+    #[serde(default)]
+    compiled: bool,
 }
 
 impl Interns {
@@ -3184,7 +3188,9 @@ impl Interns {
         &self.functions[id.index()]
     }
 
-    /// Looks up snippet source by its filename-only ID, never by the displayed text.
+    /// Looks up, by its filename-only ID and never by the displayed text, the
+    /// source of a snippet or of code that `compile()` named: source whose lines
+    /// a traceback does not print.
     pub(crate) fn eval_source(&self, filename: StringId) -> Option<&str> {
         let index = filename.index();
         (index < FILE_SOURCE_ID_BASE)
@@ -3192,6 +3198,13 @@ impl Interns {
             .flatten()
             .and_then(|index| self.eval_sources.get(index))
             .map(AsRef::as_ref)
+            .or_else(|| {
+                let index = index.checked_sub(FILE_SOURCE_ID_BASE)?;
+                self.file_sources
+                    .get(index)
+                    .filter(|file| file.compiled)
+                    .map(|file| &*file.source)
+            })
     }
 
     /// Every snippet source with its filename-only ID, for a dump upgrade that rewrites positions.

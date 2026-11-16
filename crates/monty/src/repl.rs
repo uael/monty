@@ -14,7 +14,7 @@ use std::{mem, sync::Arc};
 use ahash::AHashMap;
 use monty_types::{
     CallArgs, ExcType, InvalidInputError, MontyException, MontyObject, MontyUuid, NamedValues, OsFunctionCall,
-    OsPolicy, PrintWriter, ResourceTracker, SOURCE_SCAN_THRESHOLD, SourceRange,
+    OsPolicy, PrintWriter, ResourceTracker, SOURCE_SCAN_THRESHOLD, SourceRange, StackFrame,
     unstable::{self, MontyGraph, NodeId},
 };
 use ruff_python_ast::token::TokenKind;
@@ -24,7 +24,7 @@ use crate::{
     args::{ArgValues, KwargsValues},
     bytecode::{FrameExit, ModuleCache, VM, VMSnapshot},
     defer_drop,
-    exception_private::{ExcTypeExt, RunError, RunResult},
+    exception_private::{ExcTypeExt, RunError, RunResult, resolve_frames},
     heap::{DropWithContext, Heap, HeapData, HeapReader},
     intern::Interns,
     modules::table::ModuleTable,
@@ -932,6 +932,22 @@ pub struct ReplFunctionCall {
 }
 
 impl ReplFunctionCall {
+    /// The frames that stand at this call, outermost first, as a traceback
+    /// raised at the call would print them: the file, the lines and the name
+    /// of each, the innermost at the call itself.
+    #[must_use]
+    pub fn stack(&self) -> Vec<StackFrame> {
+        let ReplSnapshot {
+            repl,
+            executor,
+            vm_state,
+            ..
+        } = &self.snapshot;
+        let interns = &executor.tables.interns;
+        let frames = vm_state.stack(interns, &executor.program.module_code);
+        resolve_frames(&frames, interns, |name| repl.sources.get(name).map(|source| &**source))
+    }
+
     /// Extracts the REPL session, discarding the in-flight execution state.
     ///
     /// Restores globals from the VM snapshot so the REPL remains usable.

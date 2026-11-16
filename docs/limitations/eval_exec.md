@@ -24,8 +24,9 @@ A syntax error therefore still reaches the caller of `compile()`, which is what 
 - **A code object exposes no attributes.**
     `co_name`, `co_filename`, `co_code`, `co_consts`, `co_flags` and the rest raise `AttributeError`, and there is no
     `types.CodeType` to build one with or to check against.
-- **The `filename` argument is validated but not used.**
-    Frames of the code read `File "<string>"` in a traceback, as they do for a snippet given as a string.
+- **A syntax error that `compile()` raises reads `File "<string>"`.**
+    Frames of the code read the `filename` in a traceback and print none of its lines, as in CPython, but the parse
+    in `compile()` itself does not name it.
 - **The source is parsed again at every run**, so compiling once and running many times saves no work.
     It also costs the source text twice: once in the code object and once in the session's snippet sources.
 - **`repr()` is `<code object <module>, file "f.py">`**, where CPython writes the qualified name, the address and the
