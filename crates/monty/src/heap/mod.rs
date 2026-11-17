@@ -11,6 +11,7 @@ use std::{
     fmt,
     iter::once,
     marker::PhantomData,
+    mem,
     ops::{Deref, DerefMut},
     ptr::{self, NonNull},
     sync::Arc,
@@ -23,7 +24,12 @@ use serde::{de::Error as _, ser::SerializeStruct};
 use crate::types::Type;
 use crate::{
     asyncio::{Awaiter, ExternalFutureState, GatherState},
-    types::{ExtFunction, HostClassType, TimeZone, Tuple, decimal::py_context::DecimalSlot},
+    intern::FunctionId,
+    types::{
+        ExtFunction, HostClassType, TimeZone, Tuple,
+        decimal::py_context::DecimalSlot,
+        generator::{GeneratorKind, GeneratorState},
+    },
     value::Value,
 };
 // Re-export items moved to `heap_traits` so that `crate::heap::DropGuard` etc. continue
@@ -1003,6 +1009,11 @@ pub(crate) struct Heap {
     /// The callables and classes held for the host by handle, when the
     /// session holds handles; strong, unlike the indexes above.
     handles: Option<Handles>,
+    /// The functions of the coroutines freed with their body never started, each once, in the order
+    /// of their first free, which `monty.unawaited()` takes: the fact CPython warns of as "coroutine
+    /// ... was never awaited". Each function at most once, so a loop that drops coroutines grows it
+    /// no further. A dump keeps none of it.
+    unawaited: Vec<FunctionId>,
 }
 
 impl serde::Serialize for Heap {
@@ -1059,6 +1070,7 @@ impl<'de> serde::Deserialize<'de> for Heap {
             boundary_index,
             host_type_index,
             handles: fields.handles,
+            unawaited: Vec::new(),
         })
     }
 }
@@ -1177,6 +1189,7 @@ impl Heap {
             boundary_index: BTreeMap::new(),
             host_type_index: BTreeMap::new(),
             handles: None,
+            unawaited: Vec::new(),
         };
 
         // The empty-tuple singleton starts with refcount = 1 — that single ref *is* the
@@ -1330,6 +1343,23 @@ impl Heap {
             }
             Some(WeakIndexKey::Boundary(_) | WeakIndexKey::HostType(_)) | None => {}
         }
+    }
+
+    /// Notes the function of a coroutine that goes with its body never started.
+    fn note_unawaited(&mut self, data: &HeapData) {
+        if let HeapData::Generator(coroutine) = data
+            && coroutine.kind == GeneratorKind::Coroutine
+            && coroutine.state == GeneratorState::Created
+            && !self.unawaited.contains(&coroutine.func_id)
+        {
+            self.unawaited.push(coroutine.func_id);
+        }
+    }
+
+    /// Takes the functions of the coroutines freed with their body never started since the last
+    /// take, each once; see [`Heap::unawaited`].
+    pub(crate) fn take_unawaited(&mut self) -> Vec<FunctionId> {
+        mem::take(&mut self.unawaited)
     }
 
     /// Boundary uuid of the sandbox class or instance at `id`, generated and
@@ -1492,6 +1522,7 @@ impl Heap {
                     // a &self borrow on `StableHeap`. At least this repeated lookup is already
                     // on the slow path.
                     let mut value = reader.heap.entries.entry(current_id).expect("already looked up").free();
+                    reader.heap.note_unawaited(value.data.0.get_mut());
 
                     // Collect child IDs and push onto work stack for iterative processing
                     py_dec_ref_ids_for_data(value.data.0.get_mut(), &mut work_stack);
@@ -1657,6 +1688,7 @@ impl Heap {
             // Clear weak entries before freeing their slots, just as `dec_ref`.
             let weak_key = Self::weak_index_key(value.data.0.get_mut());
             self.remove_weak_index_entry(weak_key, id);
+            self.note_unawaited(value.data.0.get_mut());
             freed += 1;
             // Walk children, marking child `Value::Ref`s as `Dereferenced`
             // under `memory-model-checks` so dropping the freed entry's data

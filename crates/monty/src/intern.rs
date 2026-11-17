@@ -2643,6 +2643,8 @@ pub enum StaticStrings {
     Tzname,
     /// `math.ulp()` function.
     Ulp,
+    /// `monty.unawaited()` function.
+    Unawaited,
     /// `NamedTuple._asdict()` method.
     #[strum(serialize = "_asdict")]
     UnderAsdict,

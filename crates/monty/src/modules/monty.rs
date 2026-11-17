@@ -14,6 +14,12 @@
 //! these attributes, made as the interpreter makes one and with no `__init__`
 //! run. It is how a host gives back an instance it took out with its fields,
 //! since the session has no `__new__` to make a bare one with.
+//!
+//! `unawaited()` is the names of the coroutines freed with their body never
+//! started since the last call, each once, in the order of their first free:
+//! what CPython warns of as "coroutine ... was never awaited", with no warning.
+//! It is how a host that runs code tells that code that a call of an
+//! `async def` ran nothing.
 
 use crate::{
     args::{ArgValues, FromArgs},
@@ -23,7 +29,7 @@ use crate::{
     heap::{DropWithContext, HeapData, HeapId, HeapReadOutput},
     intern::StaticStrings,
     modules::{ModuleFunctions, copy},
-    types::{Dict, Instance, Module},
+    types::{Dict, Instance, List, Module},
     value::Value,
 };
 
@@ -33,6 +39,7 @@ use crate::{
 pub(crate) enum MontyFunctions {
     Rebound,
     Instance,
+    Unawaited,
 }
 
 /// Creates the `monty` module on the heap.
@@ -48,6 +55,11 @@ pub fn create_module(vm: &mut VM<'_>) -> HeapId {
         Value::ModuleFunction(ModuleFunctions::Monty(MontyFunctions::Instance)),
         vm,
     );
+    module.set_attr(
+        StaticStrings::Unawaited,
+        Value::ModuleFunction(ModuleFunctions::Monty(MontyFunctions::Unawaited)),
+        vm,
+    );
     vm.heap.allocate(HeapData::Module(Box::new(module)))
 }
 
@@ -56,6 +68,7 @@ pub(super) fn call(vm: &mut VM<'_>, function: MontyFunctions, args: ArgValues) -
     match function {
         MontyFunctions::Rebound => call_rebound(vm, args),
         MontyFunctions::Instance => call_instance(vm, args),
+        MontyFunctions::Unawaited => call_unawaited(vm, args),
     }
 }
 
@@ -129,6 +142,19 @@ fn call_instance(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
     Ok(Value::Ref(vm.heap.allocate(HeapData::Instance(Box::new(
         Instance::new(class_id, attrs),
     )))))
+}
+
+/// `monty.unawaited()`: the names of the coroutines freed with their body
+/// never started since the last call, which it forgets.
+fn call_unawaited(vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
+    args.check_zero_args("unawaited", vm.heap)?;
+    let names = vm
+        .heap
+        .take_unawaited()
+        .into_iter()
+        .map(|function| Value::InternString(vm.interns.get_function(function).name.name_id))
+        .collect();
+    Ok(Value::Ref(vm.heap.allocate(HeapData::List(List::new(names)))))
 }
 
 /// The dict an argument of a function is, borrowed, or the `TypeError` for
